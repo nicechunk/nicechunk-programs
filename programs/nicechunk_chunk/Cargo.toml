@@ -1,0 +1,19 @@
+[package]
+name = "nicechunk_chunk"
+version = "0.1.0"
+description = "NiceChunk chunk delta program"
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "nicechunk_chunk"
+
+[features]
+default = ["devnet"]
+devnet = []
+testnet = []
+mainnet = []
+no-entrypoint = []
+
+[dependencies]
+solana-program.workspace = true

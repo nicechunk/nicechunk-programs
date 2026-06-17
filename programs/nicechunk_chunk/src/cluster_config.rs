@@ -1,0 +1,32 @@
+use solana_program::{pubkey, pubkey::Pubkey};
+
+#[cfg(all(feature = "devnet", feature = "mainnet"))]
+compile_error!("Only one cluster feature can be enabled");
+#[cfg(all(feature = "devnet", feature = "testnet"))]
+compile_error!("Only one cluster feature can be enabled");
+#[cfg(all(feature = "testnet", feature = "mainnet"))]
+compile_error!("Only one cluster feature can be enabled");
+
+#[cfg(feature = "devnet")]
+pub const NICECHUNK_CORE_PROGRAM_ID: Pubkey =
+    pubkey!("9EhMCRYMJej1F21KzaA5Zao3khGGc5aJbDGbnxaogQHu");
+#[cfg(feature = "devnet")]
+pub const NICECHUNK_PLAYER_PROGRAM_ID: Pubkey =
+    pubkey!("oeaRMVnPoV4iENnGCCtaEeRxU5be515s4YYe6aXQuKe");
+
+#[cfg(feature = "testnet")]
+pub const NICECHUNK_CORE_PROGRAM_ID: Pubkey =
+    pubkey!("9EhMCRYMJej1F21KzaA5Zao3khGGc5aJbDGbnxaogQHu");
+#[cfg(feature = "testnet")]
+pub const NICECHUNK_PLAYER_PROGRAM_ID: Pubkey =
+    pubkey!("oeaRMVnPoV4iENnGCCtaEeRxU5be515s4YYe6aXQuKe");
+
+#[cfg(feature = "mainnet")]
+pub const NICECHUNK_CORE_PROGRAM_ID: Pubkey =
+    pubkey!("9EhMCRYMJej1F21KzaA5Zao3khGGc5aJbDGbnxaogQHu");
+#[cfg(feature = "mainnet")]
+pub const NICECHUNK_PLAYER_PROGRAM_ID: Pubkey =
+    pubkey!("oeaRMVnPoV4iENnGCCtaEeRxU5be515s4YYe6aXQuKe");
+
+pub const MAGICBLOCK_DELEGATION_PROGRAM_ID: Pubkey =
+    pubkey!("DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh");

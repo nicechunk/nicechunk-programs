@@ -1,0 +1,19 @@
+[package]
+name = "nicechunk_backpack"
+version = "0.1.0"
+description = "NiceChunk transferable backpack inventory program"
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "nicechunk_backpack"
+
+[features]
+default = ["devnet"]
+devnet = []
+testnet = []
+mainnet = []
+no-entrypoint = []
+
+[dependencies]
+solana-program.workspace = true

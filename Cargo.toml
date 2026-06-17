@@ -1,0 +1,19 @@
+[workspace]
+members = [
+  "programs/nicechunk_core",
+  "programs/nicechunk_player",
+  "programs/nicechunk_chunk",
+  "programs/nicechunk_guardian",
+  "programs/nicechunk_backpack",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+
+[workspace.dependencies]
+solana-program = "1.18.26"
+spl-token = { version = "4.0.0", features = ["no-entrypoint"] }
+
+[profile.release]
+overflow-checks = true

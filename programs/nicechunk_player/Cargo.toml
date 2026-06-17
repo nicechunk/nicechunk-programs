@@ -1,0 +1,19 @@
+[package]
+name = "nicechunk_player"
+version = "0.1.0"
+description = "NiceChunk player profile program"
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "nicechunk_player"
+
+[features]
+default = ["devnet"]
+devnet = []
+testnet = []
+mainnet = []
+no-entrypoint = []
+
+[dependencies]
+solana-program.workspace = true
