@@ -9,8 +9,10 @@ import {
   NICECHUNK_PLAYER_PROGRAM_ID,
 } from "./nicechunk-player.ts";
 
+const env = typeof process !== "undefined" ? process.env : {};
+
 export const NICECHUNK_BACKPACK_PROGRAM_ID = new PublicKey(
-  process.env.NICECHUNK_BACKPACK_PROGRAM_ID ?? "FwTrMDGyRg653L9svvt5aoGii9ZjX1WekSFWcwByjxqt",
+  env.NICECHUNK_BACKPACK_PROGRAM_ID ?? "FwTrMDGyRg653L9svvt5aoGii9ZjX1WekSFWcwByjxqt",
 );
 export const BACKPACK_SEED = "backpack";
 export const BACKPACK_MAGIC = "NCKBPK01";

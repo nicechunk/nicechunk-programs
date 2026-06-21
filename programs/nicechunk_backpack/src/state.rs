@@ -122,6 +122,31 @@ impl BackpackAccount {
             .copy_from_slice(&updated_slot.to_le_bytes());
         Ok(())
     }
+
+    pub fn remove_resource_at(
+        data: &mut [u8],
+        owner: &Pubkey,
+        index: u8,
+        updated_slot: u64,
+    ) -> ProgramResult {
+        Self::validate_owner(data, owner)?;
+        let item_count = data[Self::ITEM_COUNT_OFFSET];
+        if index >= item_count {
+            return Err(NicechunkBackpackError::InvalidResourceIndex.into());
+        }
+
+        let start = Self::RECORDS_OFFSET + index as usize * BACKPACK_RECORD_LEN;
+        let end = Self::RECORDS_OFFSET + item_count as usize * BACKPACK_RECORD_LEN;
+        if start + BACKPACK_RECORD_LEN < end {
+            data.copy_within(start + BACKPACK_RECORD_LEN..end, start);
+        }
+        let last_start = Self::RECORDS_OFFSET + (item_count - 1) as usize * BACKPACK_RECORD_LEN;
+        data[last_start..last_start + BACKPACK_RECORD_LEN].fill(0);
+        data[Self::ITEM_COUNT_OFFSET] = item_count.saturating_sub(1);
+        data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
+            .copy_from_slice(&updated_slot.to_le_bytes());
+        Ok(())
+    }
 }
 
 pub struct BackpackResourceRecord {

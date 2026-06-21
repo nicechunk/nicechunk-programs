@@ -8,8 +8,10 @@ import {
   NICECHUNK_CORE_PROGRAM_ID,
 } from "./nicechunk-core.ts";
 
+const env = typeof process !== "undefined" ? process.env : {};
+
 export const NICECHUNK_PLAYER_PROGRAM_ID = new PublicKey(
-  process.env.NICECHUNK_PLAYER_PROGRAM_ID ?? "oeaRMVnPoV4iENnGCCtaEeRxU5be515s4YYe6aXQuKe",
+  env.NICECHUNK_PLAYER_PROGRAM_ID ?? "oeaRMVnPoV4iENnGCCtaEeRxU5be515s4YYe6aXQuKe",
 );
 export const PLAYER_PROFILE_SEED = "player";
 export const PLAYER_SESSION_SEED = "session";
@@ -19,7 +21,7 @@ export const PLAYER_SESSION_LEN = 184;
 export const PLAYER_PROFILE_MAGIC = "NCKPLY01";
 export const PLAYER_SESSION_MAGIC = "NCKSES01";
 export const NICECHUNK_BACKPACK_PROGRAM_ID = new PublicKey(
-  process.env.NICECHUNK_BACKPACK_PROGRAM_ID ?? "FwTrMDGyRg653L9svvt5aoGii9ZjX1WekSFWcwByjxqt",
+  env.NICECHUNK_BACKPACK_PROGRAM_ID ?? "FwTrMDGyRg653L9svvt5aoGii9ZjX1WekSFWcwByjxqt",
 );
 export const EQUIPMENT_SLOT_COUNT = 9;
 export const SESSION_ACTION_BREAK_BLOCK = 1 << 1;

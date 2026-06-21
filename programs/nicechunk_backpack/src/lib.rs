@@ -19,7 +19,7 @@ pub mod cluster_config;
 pub mod errors;
 pub mod state;
 
-use cluster_config::NICECHUNK_PLAYER_PROGRAM_ID;
+use cluster_config::{NICECHUNK_MARKET_PROGRAM_ID, NICECHUNK_PLAYER_PROGRAM_ID};
 use errors::{require_key_eq, NicechunkBackpackError};
 use state::{
     BackpackAccount, BackpackInitArgs, BackpackResourceRecord, PlayerProfileView,
@@ -43,6 +43,8 @@ pub fn process_instruction(
     match tag {
         0 => initialize_backpack(program_id, accounts, payload),
         1 => append_mined_resource(program_id, accounts, payload),
+        2 => remove_resource(program_id, accounts, payload),
+        3 => append_market_resource(program_id, accounts, payload),
         _ => Err(NicechunkBackpackError::InvalidInstruction.into()),
     }
 }
@@ -173,6 +175,78 @@ fn append_mined_resource(
 
     let mut backpack_data = backpack.try_borrow_mut_data()?;
     BackpackAccount::append_resource(&mut backpack_data, &session.owner, &record, clock.slot)
+}
+
+fn remove_resource(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    payload: &[u8],
+) -> ProgramResult {
+    if accounts.len() != 2 || payload.len() != 1 {
+        return Err(NicechunkBackpackError::InvalidInstruction.into());
+    }
+
+    let index = payload[0];
+    let account_info_iter = &mut accounts.iter();
+    let owner = next_account_info(account_info_iter)?;
+    let backpack = next_account_info(account_info_iter)?;
+
+    if !owner.is_signer || !owner.is_writable {
+        return Err(NicechunkBackpackError::InvalidPayer.into());
+    }
+    if !backpack.is_writable {
+        return Err(NicechunkBackpackError::InvalidWritableAccount.into());
+    }
+    require_key_eq(
+        backpack.owner,
+        program_id,
+        NicechunkBackpackError::InvalidBackpackOwner,
+    )?;
+
+    let clock = Clock::get()?;
+    let mut backpack_data = backpack.try_borrow_mut_data()?;
+    BackpackAccount::remove_resource_at(&mut backpack_data, owner.key, index, clock.slot)
+}
+
+fn append_market_resource(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    payload: &[u8],
+) -> ProgramResult {
+    if accounts.len() != 3 || payload.len() != BackpackResourceRecord::LEN {
+        return Err(NicechunkBackpackError::InvalidInstruction.into());
+    }
+
+    let record = BackpackResourceRecord::unpack(payload)?;
+    let account_info_iter = &mut accounts.iter();
+    let market_authority = next_account_info(account_info_iter)?;
+    let owner = next_account_info(account_info_iter)?;
+    let backpack = next_account_info(account_info_iter)?;
+
+    if !market_authority.is_signer {
+        return Err(NicechunkBackpackError::InvalidMarketAuthority.into());
+    }
+    let (expected_authority, _) = Pubkey::find_program_address(
+        &[b"market-authority"],
+        &NICECHUNK_MARKET_PROGRAM_ID,
+    );
+    require_key_eq(
+        market_authority.key,
+        &expected_authority,
+        NicechunkBackpackError::InvalidMarketAuthority,
+    )?;
+    if !backpack.is_writable {
+        return Err(NicechunkBackpackError::InvalidWritableAccount.into());
+    }
+    require_key_eq(
+        backpack.owner,
+        program_id,
+        NicechunkBackpackError::InvalidBackpackOwner,
+    )?;
+
+    let clock = Clock::get()?;
+    let mut backpack_data = backpack.try_borrow_mut_data()?;
+    BackpackAccount::append_resource(&mut backpack_data, owner.key, &record, clock.slot)
 }
 
 fn validate_backpack_pda(

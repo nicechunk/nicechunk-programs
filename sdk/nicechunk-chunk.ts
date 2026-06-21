@@ -14,8 +14,10 @@ import {
   NICECHUNK_PLAYER_PROGRAM_ID,
 } from "./nicechunk-player.ts";
 
+const env = typeof process !== "undefined" ? process.env : {};
+
 export const NICECHUNK_CHUNK_PROGRAM_ID = new PublicKey(
-  process.env.NICECHUNK_CHUNK_PROGRAM_ID ?? "12rCvz9PZ64Uix1TCiHEGU4AN4ZS1h4jv5u7CkqTRdk5",
+  env.NICECHUNK_CHUNK_PROGRAM_ID ?? "12rCvz9PZ64Uix1TCiHEGU4AN4ZS1h4jv5u7CkqTRdk5",
 );
 export const CHUNK_SEED = "chunk";
 export const CHUNK_BROKEN_SEED = "chunk-broken";

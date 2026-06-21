@@ -23,6 +23,8 @@ pub enum NicechunkBackpackError {
     SessionActionNotAllowed = 6417,
     PackSizeMismatch = 6418,
     PlayerBackpackAlreadyBound = 6419,
+    InvalidResourceIndex = 6420,
+    InvalidMarketAuthority = 6421,
 }
 
 impl From<NicechunkBackpackError> for ProgramError {

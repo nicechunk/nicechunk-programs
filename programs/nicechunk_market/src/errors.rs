@@ -26,6 +26,18 @@ pub enum NicechunkMarketError {
     InvalidNckMint = 6620,
     InvalidTokenProgram = 6621,
     InvalidTokenAccount = 6622,
+    InvalidBackpackProgram = 6623,
+    InvalidBackpackData = 6624,
+    InvalidEscrowInventory = 6625,
+    InvalidMarketAuthority = 6626,
+    InvalidTreasury = 6627,
+    InvalidFee = 6628,
+    InvalidAssetPda = 6629,
+    AssetAlreadyInitialized = 6630,
+    InvalidAssetOwner = 6631,
+    InvalidAssetData = 6632,
+    AssetNotActive = 6633,
+    AssetNotListed = 6634,
 }
 
 impl From<NicechunkMarketError> for ProgramError {
