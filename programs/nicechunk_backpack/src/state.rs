@@ -18,6 +18,7 @@ pub const LEGACY_PLAYER_PROFILE_LEN: usize = 417;
 pub const PLAYER_PROFILE_LEN: usize = 449;
 pub const PLAYER_PROFILE_MAGIC: [u8; 8] = *b"NCKPLY01";
 pub const PLAYER_PROFILE_OWNER_OFFSET: usize = 12;
+pub const PLAYER_PROFILE_EQUIPPED_BACKPACK_OFFSET: usize = 393;
 
 pub const PLAYER_SESSION_LEN: usize = 184;
 pub const PLAYER_SESSION_MAGIC: [u8; 8] = *b"NCKSES01";
@@ -166,6 +167,19 @@ impl PlayerProfileView {
         }
         Ok(())
     }
+
+    pub fn validate_owner_without_bound_backpack(data: &[u8], owner: &Pubkey) -> ProgramResult {
+        Self::validate_owner(data, owner)?;
+        if data.len() == PLAYER_PROFILE_LEN
+            && data[PLAYER_PROFILE_EQUIPPED_BACKPACK_OFFSET
+                ..PLAYER_PROFILE_EQUIPPED_BACKPACK_OFFSET + 32]
+                .iter()
+                .any(|byte| *byte != 0)
+        {
+            return Err(NicechunkBackpackError::PlayerBackpackAlreadyBound.into());
+        }
+        Ok(())
+    }
 }
 
 fn is_supported_player_profile_len(len: usize) -> bool {
@@ -276,7 +290,12 @@ fn read_i16(data: &[u8], offset: usize) -> i16 {
 }
 
 fn read_i32(data: &[u8], offset: usize) -> i32 {
-    i32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+    i32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
 }
 
 fn read_i64(data: &[u8], offset: usize) -> i64 {

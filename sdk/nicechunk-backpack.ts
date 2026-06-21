@@ -66,13 +66,16 @@ export function createInitializeBackpackInstruction({
   backpackId,
   capacity = BACKPACK_DEFAULT_CAPACITY,
   backpackProgramId = NICECHUNK_BACKPACK_PROGRAM_ID,
+  playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
 }: {
   payer: PublicKey;
   backpackId: bigint | number;
   capacity?: number;
   backpackProgramId?: PublicKey;
+  playerProgramId?: PublicKey;
 }): TransactionInstruction {
   const [backpack] = deriveBackpackPda({ creator: payer, backpackId, programId: backpackProgramId });
+  const [playerProfile] = derivePlayerProfilePda(payer, playerProgramId);
   const data = Buffer.alloc(10);
   data.writeUInt8(0, 0);
   data.writeBigUInt64LE(BigInt(backpackId), 1);
@@ -81,6 +84,7 @@ export function createInitializeBackpackInstruction({
     programId: backpackProgramId,
     keys: [
       { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: playerProfile, isSigner: false, isWritable: false },
       { pubkey: backpack, isSigner: false, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],

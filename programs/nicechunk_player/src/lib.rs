@@ -584,7 +584,31 @@ fn extend_player_profile_if_needed<'a>(
             ],
         )?;
     }
-    player_profile.realloc(PlayerProfile::LEN, true)
+    player_profile.realloc(PlayerProfile::LEN, true)?;
+
+    let mut data = player_profile.try_borrow_mut_data()?;
+    let created_slot: [u8; 8] = data
+        [PlayerProfile::LEGACY_CREATED_SLOT_OFFSET..PlayerProfile::LEGACY_CREATED_SLOT_OFFSET + 8]
+        .try_into()
+        .map_err(|_| NicechunkPlayerError::InvalidPlayerProfileData)?;
+    let updated_slot: [u8; 8] = data
+        [PlayerProfile::LEGACY_UPDATED_SLOT_OFFSET..PlayerProfile::LEGACY_UPDATED_SLOT_OFFSET + 8]
+        .try_into()
+        .map_err(|_| NicechunkPlayerError::InvalidPlayerProfileData)?;
+    let created_at: [u8; 8] = data
+        [PlayerProfile::LEGACY_CREATED_AT_OFFSET..PlayerProfile::LEGACY_CREATED_AT_OFFSET + 8]
+        .try_into()
+        .map_err(|_| NicechunkPlayerError::InvalidPlayerProfileData)?;
+
+    data[PlayerProfile::EQUIPPED_BACKPACK_OFFSET..PlayerProfile::EQUIPPED_BACKPACK_OFFSET + 32]
+        .fill(0);
+    data[PlayerProfile::CREATED_SLOT_OFFSET..PlayerProfile::CREATED_SLOT_OFFSET + 8]
+        .copy_from_slice(&created_slot);
+    data[PlayerProfile::UPDATED_SLOT_OFFSET..PlayerProfile::UPDATED_SLOT_OFFSET + 8]
+        .copy_from_slice(&updated_slot);
+    data[PlayerProfile::CREATED_AT_OFFSET..PlayerProfile::CREATED_AT_OFFSET + 8]
+        .copy_from_slice(&created_at);
+    Ok(())
 }
 
 fn read_i32(bytes: &[u8], offset: usize) -> i32 {

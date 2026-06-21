@@ -8,7 +8,7 @@ They are intentionally small and only cover the login/profile and block-change f
 `nicechunk_player`:
 
 - Creates one public `PlayerProfile` PDA per wallet.
-- Stores basic public attributes, world position, nine visible equipment slots, and a backpack style.
+- Stores basic public attributes, world position, nine visible equipment slots, backpack style, and the currently equipped backpack public key.
 - Does not store private backpack contents.
 - Does not mint items, resources, books, or reputation.
 
@@ -93,6 +93,23 @@ Accounts:
 1. player_profile writable PDA ["player", authority]
 2. global_config  readonly
 ```
+
+### SetEquippedBackpack
+
+```text
+instruction_data = [5]
+
+Accounts:
+0. authority      writable signer
+1. player_profile writable PDA ["player", authority]
+2. backpack       readonly Backpack PDA owned by authority
+3. system_program readonly
+```
+
+This instruction writes the backpack public key into `PlayerProfile`. If the
+profile already has a non-default equipped backpack key, the instruction fails.
+Legacy 417-byte devnet player profiles are expanded to the current 449-byte
+layout when the backpack is bound.
 
 ### InitializeChunk
 

@@ -22,6 +22,7 @@ pub enum NicechunkBackpackError {
     PlayerSessionExpired = 6416,
     SessionActionNotAllowed = 6417,
     PackSizeMismatch = 6418,
+    PlayerBackpackAlreadyBound = 6419,
 }
 
 impl From<NicechunkBackpackError> for ProgramError {

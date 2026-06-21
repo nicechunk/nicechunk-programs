@@ -159,9 +159,11 @@ impl PlayerProfile {
         if data.len() == LEGACY_PLAYER_PROFILE_LEN {
             return Ok(false);
         }
-        Ok(data[Self::EQUIPPED_BACKPACK_OFFSET..Self::EQUIPPED_BACKPACK_OFFSET + 32]
-            .iter()
-            .any(|byte| *byte != 0))
+        Ok(
+            data[Self::EQUIPPED_BACKPACK_OFFSET..Self::EQUIPPED_BACKPACK_OFFSET + 32]
+                .iter()
+                .any(|byte| *byte != 0),
+        )
     }
 
     pub fn write_position(

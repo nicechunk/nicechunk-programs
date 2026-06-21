@@ -16,6 +16,11 @@ import {
   PLAYER_PROFILE_LEN,
 } from "../sdk/nicechunk-player.ts";
 import {
+  createInitializeBackpackInstruction,
+  deriveBackpackPda,
+  NICECHUNK_BACKPACK_PROGRAM_ID,
+} from "../sdk/nicechunk-backpack.ts";
+import {
   createDelegateChunkInstruction,
   createRecordBlockChangeInstruction,
   createRecordBlockChangeWithSessionInstruction,
@@ -58,6 +63,24 @@ describe("nicechunk player and chunk SDK", () => {
     assert.equal(ix.keys[1].pubkey.toBase58(), playerProfile.toBase58());
     assert.equal(ix.keys[1].isWritable, true);
     assert.equal(ix.keys[2].pubkey.toBase58(), globalConfig.toBase58());
+    assert.equal(ix.keys[3].pubkey.toBase58(), SystemProgram.programId.toBase58());
+  });
+
+  it("builds initialize backpack with player profile guard", () => {
+    const backpackId = 1n;
+    const [playerProfile] = derivePlayerProfilePda(owner, NICECHUNK_PLAYER_PROGRAM_ID);
+    const [backpack] = deriveBackpackPda({ creator: owner, backpackId });
+    const ix = createInitializeBackpackInstruction({ payer: owner, backpackId });
+
+    assert.equal(ix.programId.toBase58(), NICECHUNK_BACKPACK_PROGRAM_ID.toBase58());
+    assert.equal(ix.data.readUInt8(0), 0);
+    assert.equal(ix.data.readBigUInt64LE(1), backpackId);
+    assert.equal(ix.keys[0].pubkey.toBase58(), owner.toBase58());
+    assert.equal(ix.keys[0].isSigner, true);
+    assert.equal(ix.keys[1].pubkey.toBase58(), playerProfile.toBase58());
+    assert.equal(ix.keys[1].isWritable, false);
+    assert.equal(ix.keys[2].pubkey.toBase58(), backpack.toBase58());
+    assert.equal(ix.keys[2].isWritable, true);
     assert.equal(ix.keys[3].pubkey.toBase58(), SystemProgram.programId.toBase58());
   });
 

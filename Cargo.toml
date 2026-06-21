@@ -5,6 +5,7 @@ members = [
   "programs/nicechunk_chunk",
   "programs/nicechunk_guardian",
   "programs/nicechunk_backpack",
+  "programs/nicechunk_market",
 ]
 resolver = "2"
 

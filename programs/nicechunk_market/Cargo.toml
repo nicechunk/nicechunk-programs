@@ -1,0 +1,20 @@
+[package]
+name = "nicechunk_market"
+version = "0.1.0"
+description = "NiceChunk marketplace listing program"
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "nicechunk_market"
+
+[features]
+default = ["devnet"]
+devnet = []
+testnet = []
+mainnet = []
+no-entrypoint = []
+
+[dependencies]
+solana-program.workspace = true
+spl-token.workspace = true

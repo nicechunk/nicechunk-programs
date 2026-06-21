@@ -52,7 +52,7 @@ fn initialize_backpack(
     accounts: &[AccountInfo],
     payload: &[u8],
 ) -> ProgramResult {
-    if accounts.len() != 3 || payload.len() != 9 {
+    if accounts.len() != 4 || payload.len() != 9 {
         return Err(NicechunkBackpackError::InvalidInstruction.into());
     }
 
@@ -61,6 +61,7 @@ fn initialize_backpack(
 
     let account_info_iter = &mut accounts.iter();
     let payer = next_account_info(account_info_iter)?;
+    let player_profile = next_account_info(account_info_iter)?;
     let backpack = next_account_info(account_info_iter)?;
     let system_program_account = next_account_info(account_info_iter)?;
 
@@ -75,6 +76,15 @@ fn initialize_backpack(
         &system_program::ID,
         NicechunkBackpackError::InvalidSystemProgram,
     )?;
+    require_key_eq(
+        player_profile.owner,
+        &NICECHUNK_PLAYER_PROGRAM_ID,
+        NicechunkBackpackError::InvalidPlayerProgram,
+    )?;
+
+    let player_profile_data = player_profile.try_borrow_data()?;
+    PlayerProfileView::validate_owner_without_bound_backpack(&player_profile_data, payer.key)?;
+    drop(player_profile_data);
 
     let bump = validate_backpack_pda(program_id, backpack.key, payer.key, backpack_id)?;
     if backpack.owner == program_id {
@@ -84,7 +94,14 @@ fn initialize_backpack(
         return Err(NicechunkBackpackError::InvalidSystemAccount.into());
     }
 
-    create_backpack_pda(payer, backpack, system_program_account, program_id, backpack_id, bump)?;
+    create_backpack_pda(
+        payer,
+        backpack,
+        system_program_account,
+        program_id,
+        backpack_id,
+        bump,
+    )?;
 
     let clock = Clock::get()?;
     let mut data = backpack.try_borrow_mut_data()?;
