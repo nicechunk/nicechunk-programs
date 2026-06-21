@@ -12,6 +12,14 @@ The current program set covers the global genesis configuration, player profile 
 
 The repository also includes operational scripts and TypeScript helpers used to derive PDAs, initialize devnet state, inspect generated blocks, mine blocks, register Guardians, and validate global configuration accounts.
 
+## Program Domain Mesh
+
+![Program domain mesh](docs/diagrams/program-domain-mesh.svg)
+
+The program set is deliberately split by gameplay domain. Core stores sealed world and economy configuration. Player owns identity, position, equipment, and session authority. Chunk owns generated-block verification, block deltas, mining, and delegation hooks. Guardian owns region registration and proof state. Backpack owns portable resource records. Market owns listings and settlement state.
+
+This layout keeps account review small. A change to marketplace listing state should not require a reviewer to re-audit player sessions. A change to chunk verification should stay visible next to the SDK decoder and tests that depend on the same byte layout.
+
 ## System Principles
 
 - Immutable public configuration: the core program stores fixed world and economy parameters, including hashes for terrain and resource rules, so clients can compare runtime behavior against public configuration.
