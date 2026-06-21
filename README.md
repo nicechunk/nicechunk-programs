@@ -20,6 +20,14 @@ The program set is deliberately split by gameplay domain. Core stores sealed wor
 
 This layout keeps account review small. A change to marketplace listing state should not require a reviewer to re-audit player sessions. A change to chunk verification should stay visible next to the SDK decoder and tests that depend on the same byte layout.
 
+## Account Layout Review
+
+![Account layout review path](docs/diagrams/account-layout-review.svg)
+
+The strongest habit in this repository should be account-layout discipline. A program state change starts in Rust, but it is not complete until the instruction layer, SDK decoder, scripts, tests, and documentation all agree on the same magic header, length, seed order, and field offsets.
+
+That is the review path future contributors should follow. The repository should make byte-level changes boring to inspect: what changed, which account owns it, which instruction writes it, which SDK decoder reads it, and which test proves the new shape.
+
 ## System Principles
 
 - Immutable public configuration: the core program stores fixed world and economy parameters, including hashes for terrain and resource rules, so clients can compare runtime behavior against public configuration.
