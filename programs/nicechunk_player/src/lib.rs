@@ -366,9 +366,6 @@ fn set_equipped_backpack(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progr
     {
         let data = player_profile.try_borrow_data()?;
         PlayerProfile::validate_owner(&data, authority.key)?;
-        if PlayerProfile::has_equipped_backpack(&data)? {
-            return Err(NicechunkPlayerError::PlayerBackpackAlreadyBound.into());
-        }
     }
 
     {
@@ -380,9 +377,6 @@ fn set_equipped_backpack(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progr
 
     let clock = Clock::get()?;
     let mut data = player_profile.try_borrow_mut_data()?;
-    if PlayerProfile::has_equipped_backpack(&data)? {
-        return Err(NicechunkPlayerError::PlayerBackpackAlreadyBound.into());
-    }
     PlayerProfile::write_equipped_backpack(&mut data, backpack.key, clock.slot)
 }
 

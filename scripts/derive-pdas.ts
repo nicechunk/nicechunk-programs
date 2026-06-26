@@ -1,6 +1,6 @@
 import { PublicKey } from "@solana/web3.js";
 import { deriveGlobalConfigPda, NICECHUNK_CORE_PROGRAM_ID } from "../sdk/nicechunk-core.ts";
-import { deriveChunkBrokenPda, deriveChunkPda, NICECHUNK_CHUNK_PROGRAM_ID } from "../sdk/nicechunk-chunk.ts";
+import { deriveChunkBrokenPda, NICECHUNK_CHUNK_PROGRAM_ID } from "../sdk/nicechunk-chunk.ts";
 import {
   deriveGuardianRegistryPda,
   deriveGuardianRegionPda,
@@ -21,7 +21,6 @@ const chunkZ = Number(process.env.CHUNK_Z ?? 0);
 const regionX = Number(process.env.REGION_X ?? 0);
 const regionY = Number(process.env.REGION_Y ?? 0);
 const playerProfile = owner ? derivePlayerProfilePda(owner, selectedPlayerProgramId) : undefined;
-const chunk = deriveChunkPda({ globalConfig, chunkX, chunkZ, programId: selectedChunkProgramId });
 const chunkBroken = deriveChunkBrokenPda({ globalConfig, chunkX, chunkZ, programId: selectedChunkProgramId });
 const guardianRegistry = deriveGuardianRegistryPda({ globalConfig, programId: selectedGuardianProgramId });
 const guardianTreasuryAuthority = deriveGuardianTreasuryAuthorityPda({ globalConfig, programId: selectedGuardianProgramId });
@@ -38,8 +37,6 @@ console.log(JSON.stringify({
   chunkProgramId: selectedChunkProgramId.toBase58(),
   chunkX,
   chunkZ,
-  chunk: chunk[0].toBase58(),
-  chunkBump: chunk[1],
   chunkBroken: chunkBroken[0].toBase58(),
   chunkBrokenBump: chunkBroken[1],
   guardianProgramId: selectedGuardianProgramId.toBase58(),

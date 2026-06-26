@@ -6,9 +6,9 @@ import {
   createMineBlockInstruction,
   decodeChunkBrokenState,
   deriveChunkBrokenPda,
-  VERIFY_GENERATED_BLOCK_INSPECT_ONLY,
+  generatedBlockIdAt,
 } from "../sdk/nicechunk-chunk.ts";
-import { deriveGlobalConfigPda } from "../sdk/nicechunk-core.ts";
+import { decodeGlobalConfig, deriveGlobalConfigPda } from "../sdk/nicechunk-core.ts";
 import {
   chunkProgramId,
   connection,
@@ -31,13 +31,22 @@ const payer = readPayerKeypair();
 const selectedCoreProgramId = coreProgramId();
 const selectedChunkProgramId = chunkProgramId();
 const [globalConfig] = deriveGlobalConfigPda(selectedCoreProgramId);
+const globalConfigAccount = await conn.getAccountInfo(globalConfig, "confirmed");
+if (!globalConfigAccount) throw new Error(`GlobalConfig account not found: ${globalConfig.toBase58()}`);
+const decodedGlobalConfig = decodeGlobalConfig(globalConfigAccount.data);
 const worldX = readNumber("WORLD_X", 0);
-const worldY = readNumber("WORLD_Y", 2);
+const worldY = readNumber("WORLD_Y", decodedGlobalConfig.seaLevel);
 const worldZ = readNumber("WORLD_Z", 0);
-const chunkSize = readNumber("CHUNK_SIZE", 16);
+const chunkSize = decodedGlobalConfig.chunkSize;
 const chunkX = Math.floor(worldX / chunkSize);
 const chunkZ = Math.floor(worldZ / chunkSize);
-const expectedBlockId = readNumber("EXPECTED_BLOCK_ID", VERIFY_GENERATED_BLOCK_INSPECT_ONLY);
+const expectedBlockId = generatedBlockIdAt(decodedGlobalConfig, {
+  chunkX,
+  chunkZ,
+  localX: ((worldX % chunkSize) + chunkSize) % chunkSize,
+  y: worldY,
+  localZ: ((worldZ % chunkSize) + chunkSize) % chunkSize,
+});
 const [chunkBroken, bump] = deriveChunkBrokenPda({
   globalConfig,
   chunkX,
@@ -49,6 +58,8 @@ if (process.env.DRY_RUN === "1") {
   console.log(JSON.stringify({
     status: "dry-run",
     payer: payer.publicKey.toBase58(),
+    owner: payer.publicKey.toBase58(),
+    sessionAuthority: payer.publicKey.toBase58(),
     coreProgramId: selectedCoreProgramId.toBase58(),
     chunkProgramId: selectedChunkProgramId.toBase58(),
     globalConfig: globalConfig.toBase58(),
@@ -66,6 +77,8 @@ if (process.env.DRY_RUN === "1") {
 
 const ix = createMineBlockInstruction({
   payer: payer.publicKey,
+  owner: payer.publicKey,
+  sessionAuthority: payer.publicKey,
   block: { worldX, worldY, worldZ, expectedBlockId },
   chunkProgramId: selectedChunkProgramId,
   coreProgramId: selectedCoreProgramId,
@@ -83,11 +96,6 @@ console.log(JSON.stringify({
   chunkBroken: chunkBroken.toBase58(),
   bump,
   decoded: account
-    ? decodeChunkBrokenState({
-      data: account.data,
-      chunkX,
-      chunkZ,
-      chunkSize,
-    })
+    ? decodeChunkBrokenState({ data: account.data, chunkX, chunkZ, chunkSize })
     : null,
 }, null, 2));

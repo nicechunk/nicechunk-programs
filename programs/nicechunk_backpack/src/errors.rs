@@ -25,6 +25,8 @@ pub enum NicechunkBackpackError {
     PlayerBackpackAlreadyBound = 6419,
     InvalidResourceIndex = 6420,
     InvalidMarketAuthority = 6421,
+    InvalidSmeltingAuthority = 6422,
+    InvalidInventoryItem = 6423,
 }
 
 impl From<NicechunkBackpackError> for ProgramError {

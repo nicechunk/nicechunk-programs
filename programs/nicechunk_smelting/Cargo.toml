@@ -1,0 +1,19 @@
+[package]
+name = "nicechunk_smelting"
+version = "0.1.0"
+description = "NiceChunk smelting recipe and backpack conversion program"
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "nicechunk_smelting"
+
+[features]
+default = ["devnet"]
+devnet = []
+testnet = []
+mainnet = []
+no-entrypoint = []
+
+[dependencies]
+solana-program.workspace = true

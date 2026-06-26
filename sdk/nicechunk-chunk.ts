@@ -3,7 +3,6 @@ import {
   SystemProgram,
   TransactionInstruction,
 } from "@solana/web3.js";
-import type { AccountMeta } from "@solana/web3.js";
 import {
   deriveGlobalConfigPda,
   NICECHUNK_CORE_PROGRAM_ID,
@@ -17,20 +16,9 @@ import {
 const env = typeof process !== "undefined" ? process.env : {};
 
 export const NICECHUNK_CHUNK_PROGRAM_ID = new PublicKey(
-  env.NICECHUNK_CHUNK_PROGRAM_ID ?? "12rCvz9PZ64Uix1TCiHEGU4AN4ZS1h4jv5u7CkqTRdk5",
+  env.NICECHUNK_CHUNK_PROGRAM_ID ?? "7JD6kASAfQeiVLUi51mrfWSbeh96ntRJnRiFQKCqUVhn",
 );
-export const CHUNK_SEED = "chunk";
 export const CHUNK_BROKEN_SEED = "chunk-broken";
-export const MAGICBLOCK_DELEGATION_PROGRAM_ID = new PublicKey(
-  "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh",
-);
-export const MAGICBLOCK_ROUTER_URL = "https://devnet-router.magicblock.app";
-export const MAGICBLOCK_ROUTER_WS_URL = "wss://devnet-router.magicblock.app";
-export const CHUNK_LEN = 8280;
-export const CHUNK_HEADER_LEN = 88;
-export const BLOCK_DELTA_LEN = 64;
-export const MAX_BLOCK_DELTAS = 128;
-export const CHUNK_MAGIC = "NCKCHK01";
 export const CHUNK_BROKEN_MAGIC = "NCBK";
 export const CHUNK_BROKEN_HEADER_LEN = 16;
 export const CHUNK_BROKEN_RECORD_LEN = 3;
@@ -42,20 +30,26 @@ export const BLOCK_GRASS = 1;
 export const BLOCK_DIRT = 2;
 export const BLOCK_STONE = 3;
 export const BLOCK_DEEP_STONE = 4;
+export const BLOCK_SAND = 5;
+export const BLOCK_GRAVEL = 6;
+export const BLOCK_CLAY = 7;
+export const BLOCK_MUD = 8;
+export const BLOCK_DRY_DIRT = 9;
+export const BLOCK_SALT_FLAT = 10;
+export const BLOCK_SNOW = 11;
+export const BLOCK_FROZEN_SOIL = 13;
+export const BLOCK_BASALT = 14;
+export const BLOCK_ASH = 15;
 export const BLOCK_BEDROCK = 16;
 export const BLOCK_WATER = 17;
-
-export interface BlockChangeInput {
-  chunkX: number;
-  chunkZ: number;
-  localX: number;
-  y: number;
-  localZ: number;
-  previousBlockId: number;
-  newBlockId: number;
-  action: number;
-  toolSlot: number;
-}
+export const BLOCK_QUICKSAND = 21;
+export const BLOCK_TRUNK = 22;
+export const BLOCK_LEAVES = 23;
+export const BLOCK_PINE_TRUNK = 24;
+export const BLOCK_PINE_LEAVES = 25;
+export const BLOCK_MOSS = 37;
+export const BLOCK_SHELL_BED = 46;
+export const BLOCK_COAL = 47;
 
 export interface GeneratedBlockInput {
   chunkX: number;
@@ -82,39 +76,6 @@ export interface MinimalGlobalConfigForBlockVerification {
   seaLevel: number;
 }
 
-export interface DecodedBlockDelta {
-  sequence: number;
-  actor: PublicKey;
-  localX: number;
-  y: number;
-  localZ: number;
-  previousBlockId: number;
-  newBlockId: number;
-  action: number;
-  toolSlot: number;
-  slot: bigint;
-  timestamp: bigint;
-}
-
-export interface DecodedChunkState {
-  magic: string;
-  version: number;
-  bump: number;
-  initialized: boolean;
-  globalConfig: PublicKey;
-  worldId: number;
-  chunkX: number;
-  chunkZ: number;
-  changeCount: number;
-  storedDeltaCount: number;
-  writeCursor: number;
-  maxDeltas: number;
-  createdSlot: bigint;
-  updatedSlot: bigint;
-  createdAt: bigint;
-  deltas: DecodedBlockDelta[];
-}
-
 export interface DecodedBrokenBlock {
   index: number;
   x: number;
@@ -135,33 +96,6 @@ export interface DecodedChunkBrokenState {
   chunkX: number;
   chunkZ: number;
   brokenBlocks: DecodedBrokenBlock[];
-}
-
-export interface ChunkDelegationPdas {
-  delegateBuffer: PublicKey;
-  delegationRecord: PublicKey;
-  delegationMetadata: PublicKey;
-}
-
-export function deriveChunkPda({
-  globalConfig,
-  chunkX,
-  chunkZ,
-  programId = NICECHUNK_CHUNK_PROGRAM_ID,
-}: {
-  globalConfig: PublicKey;
-  chunkX: number;
-  chunkZ: number;
-  programId?: PublicKey;
-}): [PublicKey, number] {
-  const chunkXBytes = Buffer.alloc(4);
-  const chunkZBytes = Buffer.alloc(4);
-  chunkXBytes.writeInt32LE(chunkX, 0);
-  chunkZBytes.writeInt32LE(chunkZ, 0);
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from(CHUNK_SEED), globalConfig.toBuffer(), chunkXBytes, chunkZBytes],
-    programId,
-  );
 }
 
 export function deriveChunkBrokenPda({
@@ -185,163 +119,28 @@ export function deriveChunkBrokenPda({
   );
 }
 
-export function createInitializeChunkInstruction({
+export function createMineBlockInstruction({
   payer,
-  chunkX,
-  chunkZ,
-  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
-  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
-}: {
-  payer: PublicKey;
-  chunkX: number;
-  chunkZ: number;
-  chunkProgramId?: PublicKey;
-  coreProgramId?: PublicKey;
-}): TransactionInstruction {
-  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
-  const [chunk] = deriveChunkPda({ globalConfig, chunkX, chunkZ, programId: chunkProgramId });
-  const data = Buffer.alloc(9);
-  data.writeUInt8(0, 0);
-  data.writeInt32LE(chunkX, 1);
-  data.writeInt32LE(chunkZ, 5);
-  return new TransactionInstruction({
-    programId: chunkProgramId,
-    keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
-      { pubkey: chunk, isSigner: false, isWritable: true },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
-    data,
-  });
-}
-
-export function deriveChunkDelegationPdas({
-  chunk,
-  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
-}: {
-  chunk: PublicKey;
-  chunkProgramId?: PublicKey;
-}): ChunkDelegationPdas {
-  const [delegateBuffer] = PublicKey.findProgramAddressSync(
-    [Buffer.from("buffer"), chunk.toBuffer()],
-    chunkProgramId,
-  );
-  const [delegationRecord] = PublicKey.findProgramAddressSync(
-    [Buffer.from("delegation"), chunk.toBuffer()],
-    MAGICBLOCK_DELEGATION_PROGRAM_ID,
-  );
-  const [delegationMetadata] = PublicKey.findProgramAddressSync(
-    [Buffer.from("delegation-metadata"), chunk.toBuffer()],
-    MAGICBLOCK_DELEGATION_PROGRAM_ID,
-  );
-  return { delegateBuffer, delegationRecord, delegationMetadata };
-}
-
-export function createDelegateChunkInstruction({
-  payer,
-  chunkX,
-  chunkZ,
-  commitFrequencyMs = 250,
-  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
-  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
-}: {
-  payer: PublicKey;
-  chunkX: number;
-  chunkZ: number;
-  commitFrequencyMs?: number;
-  chunkProgramId?: PublicKey;
-  coreProgramId?: PublicKey;
-}): TransactionInstruction {
-  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
-  const [chunk] = deriveChunkPda({ globalConfig, chunkX, chunkZ, programId: chunkProgramId });
-  const { delegateBuffer, delegationRecord, delegationMetadata } = deriveChunkDelegationPdas({
-    chunk,
-    chunkProgramId,
-  });
-  const data = Buffer.alloc(13);
-  data.writeUInt8(2, 0);
-  data.writeInt32LE(chunkX, 1);
-  data.writeInt32LE(chunkZ, 5);
-  data.writeUInt32LE(commitFrequencyMs, 9);
-  return new TransactionInstruction({
-    programId: chunkProgramId,
-    keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
-      { pubkey: chunk, isSigner: false, isWritable: true },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
-      { pubkey: chunkProgramId, isSigner: false, isWritable: false },
-      { pubkey: delegateBuffer, isSigner: false, isWritable: true },
-      { pubkey: delegationRecord, isSigner: false, isWritable: true },
-      { pubkey: delegationMetadata, isSigner: false, isWritable: true },
-      { pubkey: MAGICBLOCK_DELEGATION_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
-    data,
-  });
-}
-
-export function createRecordBlockChangeInstruction({
-  authority,
-  change,
-  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
-  playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
-  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
-}: {
-  authority: PublicKey;
-  change: BlockChangeInput;
-  chunkProgramId?: PublicKey;
-  playerProgramId?: PublicKey;
-  coreProgramId?: PublicKey;
-}): TransactionInstruction {
-  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
-  const [playerProfile] = derivePlayerProfilePda(authority, playerProgramId);
-  const [chunk] = deriveChunkPda({
-    globalConfig,
-    chunkX: change.chunkX,
-    chunkZ: change.chunkZ,
-    programId: chunkProgramId,
-  });
-  const data = Buffer.alloc(19);
-  data.writeUInt8(1, 0);
-  data.writeInt32LE(change.chunkX, 1);
-  data.writeInt32LE(change.chunkZ, 5);
-  data.writeUInt8(change.localX, 9);
-  data.writeInt16LE(change.y, 10);
-  data.writeUInt8(change.localZ, 12);
-  data.writeUInt16LE(change.previousBlockId, 13);
-  data.writeUInt16LE(change.newBlockId, 15);
-  data.writeUInt8(change.action, 17);
-  data.writeUInt8(change.toolSlot, 18);
-
-  return new TransactionInstruction({
-    programId: chunkProgramId,
-    keys: [
-      { pubkey: authority, isSigner: true, isWritable: true },
-      { pubkey: playerProfile, isSigner: false, isWritable: false },
-      { pubkey: chunk, isSigner: false, isWritable: true },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
-    data,
-  });
-}
-
-export function createRecordBlockChangeWithSessionInstruction({
   owner,
-  sessionAuthority,
-  change,
+  block,
+  sessionAuthority = payer,
   chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
   playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
   coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
+  chunkSize = 16,
 }: {
+  payer: PublicKey;
   owner: PublicKey;
-  sessionAuthority: PublicKey;
-  change: BlockChangeInput;
+  block: MineBlockInput;
+  sessionAuthority?: PublicKey;
   chunkProgramId?: PublicKey;
   playerProgramId?: PublicKey;
   coreProgramId?: PublicKey;
+  chunkSize?: number;
 }): TransactionInstruction {
+  if (block.expectedBlockId === undefined) {
+    throw new Error("expectedBlockId is required for canonical mining");
+  }
   const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
   const [playerProfile] = derivePlayerProfilePda(owner, playerProgramId);
   const [playerSession] = derivePlayerSessionPda({
@@ -349,81 +148,6 @@ export function createRecordBlockChangeWithSessionInstruction({
     sessionAuthority,
     programId: playerProgramId,
   });
-  const [chunk] = deriveChunkPda({
-    globalConfig,
-    chunkX: change.chunkX,
-    chunkZ: change.chunkZ,
-    programId: chunkProgramId,
-  });
-  const data = Buffer.alloc(19);
-  data.writeUInt8(3, 0);
-  data.writeInt32LE(change.chunkX, 1);
-  data.writeInt32LE(change.chunkZ, 5);
-  data.writeUInt8(change.localX, 9);
-  data.writeInt16LE(change.y, 10);
-  data.writeUInt8(change.localZ, 12);
-  data.writeUInt16LE(change.previousBlockId, 13);
-  data.writeUInt16LE(change.newBlockId, 15);
-  data.writeUInt8(change.action, 17);
-  data.writeUInt8(change.toolSlot, 18);
-
-  return new TransactionInstruction({
-    programId: chunkProgramId,
-    keys: [
-      { pubkey: sessionAuthority, isSigner: true, isWritable: true },
-      { pubkey: playerProfile, isSigner: false, isWritable: false },
-      { pubkey: playerSession, isSigner: false, isWritable: false },
-      { pubkey: chunk, isSigner: false, isWritable: true },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
-    data,
-  });
-}
-
-export function createVerifyGeneratedBlockInstruction({
-  block,
-  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
-  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
-}: {
-  block: GeneratedBlockInput;
-  chunkProgramId?: PublicKey;
-  coreProgramId?: PublicKey;
-}): TransactionInstruction {
-  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
-  const data = Buffer.alloc(15);
-  data.writeUInt8(4, 0);
-  data.writeInt32LE(block.chunkX, 1);
-  data.writeInt32LE(block.chunkZ, 5);
-  data.writeUInt8(block.localX, 9);
-  data.writeInt16LE(block.y, 10);
-  data.writeUInt8(block.localZ, 12);
-  data.writeUInt16LE(block.expectedBlockId ?? VERIFY_GENERATED_BLOCK_INSPECT_ONLY, 13);
-
-  const keys: AccountMeta[] = [
-    { pubkey: globalConfig, isSigner: false, isWritable: false },
-  ];
-  return new TransactionInstruction({
-    programId: chunkProgramId,
-    keys,
-    data,
-  });
-}
-
-export function createMineBlockInstruction({
-  payer,
-  block,
-  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
-  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
-  chunkSize = 16,
-}: {
-  payer: PublicKey;
-  block: MineBlockInput;
-  chunkProgramId?: PublicKey;
-  coreProgramId?: PublicKey;
-  chunkSize?: number;
-}): TransactionInstruction {
-  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
   const chunkX = Math.floor(block.worldX / chunkSize);
   const chunkZ = Math.floor(block.worldZ / chunkSize);
   const [chunkBroken] = deriveChunkBrokenPda({
@@ -437,12 +161,14 @@ export function createMineBlockInstruction({
   data.writeInt32LE(block.worldX, 1);
   data.writeInt16LE(block.worldY, 5);
   data.writeInt32LE(block.worldZ, 7);
-  data.writeUInt16LE(block.expectedBlockId ?? VERIFY_GENERATED_BLOCK_INSPECT_ONLY, 11);
+  data.writeUInt16LE(block.expectedBlockId, 11);
 
   return new TransactionInstruction({
     programId: chunkProgramId,
     keys: [
       { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: playerProfile, isSigner: false, isWritable: false },
+      { pubkey: playerSession, isSigner: false, isWritable: false },
       { pubkey: chunkBroken, isSigner: false, isWritable: true },
       { pubkey: globalConfig, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
@@ -457,16 +183,7 @@ export function generatedBlockIdAt(
 ): number {
   const worldX = block.chunkX * globalConfig.chunkSize + block.localX;
   const worldZ = block.chunkZ * globalConfig.chunkSize + block.localZ;
-  const surface = generatedSurfaceHeight(globalConfig, worldX, worldZ);
-  if (block.y <= globalConfig.minBuildY) return BLOCK_BEDROCK;
-  if (block.y > surface) {
-    if (block.y <= globalConfig.seaLevel) return BLOCK_WATER;
-    return BLOCK_AIR;
-  }
-  if (block.y === surface) return BLOCK_GRASS;
-  if (block.y >= surface - 3) return BLOCK_DIRT;
-  if (block.y < globalConfig.minBuildY + 12) return BLOCK_DEEP_STONE;
-  return BLOCK_STONE;
+  return canonicalBlockIdAt(globalConfig, worldX, block.y, worldZ);
 }
 
 export function generatedSurfaceHeight(
@@ -474,118 +191,377 @@ export function generatedSurfaceHeight(
   worldX: number,
   worldZ: number,
 ): number {
-  const minSurface = globalConfig.minBuildY + 8;
+  return canonicalSurfaceHeight(globalConfig, worldX, worldZ);
+}
+
+function canonicalBlockIdAt(
+  globalConfig: MinimalGlobalConfigForBlockVerification,
+  x: number,
+  y: number,
+  z: number,
+): number {
+  if (y <= globalConfig.minBuildY) return BLOCK_BEDROCK;
+  if (y > globalConfig.maxBuildY) return BLOCK_AIR;
+  const surface = canonicalSurfaceHeight(globalConfig, x, z);
+  if (y > surface) {
+    const waterLevel = canonicalWaterLevel(globalConfig, x, z, surface);
+    if (waterLevel !== null && y <= waterLevel) return BLOCK_WATER;
+    const treeBlock = canonicalTreeBlockIdAt(globalConfig, x, y, z);
+    return treeBlock !== BLOCK_AIR ? treeBlock : BLOCK_AIR;
+  }
+  if (y === surface) return canonicalSurfaceBlockId(globalConfig, x, z, surface);
+  const depth = surface - y;
+  if (depth <= 3) return canonicalSubsurfaceBlockId(globalConfig, x, z, surface);
+  if (depth >= 8 && canonicalCoalSeamAt(globalConfig, x, y, z, surface)) return BLOCK_COAL;
+  if (y <= globalConfig.minBuildY + 40 || depth >= 52) return BLOCK_DEEP_STONE;
+  if (canonicalVolcanicAt(globalConfig, x, z) > 238 && hashCoord3(globalConfig.worldSeed, x, y, z, 601) > 210) {
+    return BLOCK_BASALT;
+  }
+  return BLOCK_STONE;
+}
+
+function canonicalSurfaceHeight(
+  globalConfig: MinimalGlobalConfigForBlockVerification,
+  x: number,
+  z: number,
+): number {
+  const minSurface = Math.max(globalConfig.minBuildY + 8, globalConfig.seaLevel - 28);
   const maxSurface = Math.max(minSurface, Math.min(globalConfig.maxTerrainHeight, globalConfig.maxBuildY - 1));
-  const span = Math.max(1, maxSurface - minSurface + 1);
-  const base = hashCoord(globalConfig.worldSeed, worldX, worldZ, 0) % span;
-  const detail = (hashCoord(globalConfig.worldSeed, worldX >> 2, worldZ >> 2, 1) % 9) - 4;
-  return Math.max(minSurface, Math.min(maxSurface, minSurface + base + detail));
+  const terrain = canonicalTerrainFactors(globalConfig, x, z);
+  const { wx, wz, shelf, inland, waterMask } = terrain;
+
+  const ocean =
+    globalConfig.seaLevel - 16 +
+    Math.trunc((valueNoise2(globalConfig.worldSeed, wx, wz, 96, 24) - 128) * 5 / 128) +
+    Math.trunc((valueNoise2(globalConfig.worldSeed, wx, wz, 36, 25) - 128) * 2 / 128);
+  const coast = globalConfig.seaLevel - 3 + Math.trunc(shelf * 8 / 1024);
+  const plains = Math.trunc((valueNoise2(globalConfig.worldSeed, wx, wz, 120, 26) - 128) * 4 / 128);
+  const hills = Math.trunc((valueNoise2(globalConfig.worldSeed, wx, wz, 56, 27) - 128) * 7 / 128);
+  const rolling = Math.trunc((valueNoise2(globalConfig.worldSeed, wx, wz, 28, 28) - 128) * 2 / 128);
+  const roughness = smoothRangeFixed(Math.abs(valueNoise2(globalConfig.worldSeed, wx, wz, 180, 40) - 128), 54, 122);
+
+  const mountainRidge = Math.abs(valueNoise2(globalConfig.worldSeed, wx, wz, 96, 29) - 128);
+  const ridgeLift = smoothRangeFixed(mountainRidge, 70, 124);
+  const mountainMass = scaleByFixed(smoothRangeFixed(valueNoise2(globalConfig.worldSeed, wx, wz, 300, 30), 194, 244), inland);
+  const mountain = scaleByFixed(6 + scaleByFixed(20, ridgeLift), mountainMass);
+
+  let land = globalConfig.seaLevel + 7 + Math.trunc(inland * 8 / 1024) + scaleByFixed(plains + scaleByFixed(hills + rolling, roughness), inland) + mountain;
+  if (waterMask > 0) {
+    const waterLevel = canonicalInlandWaterLevel(globalConfig, wx, wz);
+    const waterBed = waterLevel - 3 - Math.trunc(waterMask * 2 / 1024) + Math.trunc((valueNoise2(globalConfig.worldSeed, wx, wz, 32, 39) - 128) / 128);
+    land = lerpIntFixed(land, waterBed, waterMask);
+  }
+
+  return clampInt(lerpIntFixed(ocean, Math.max(coast, land), shelf), minSurface, maxSurface);
 }
 
-function hashCoord(seed: Buffer | Uint8Array, x: number, z: number, salt: number): number {
-  let hash = (0x811c9dc5 ^ salt) >>> 0;
-  for (const byte of seed) {
-    hash ^= byte;
-    hash = Math.imul(hash, 0x01000193) >>> 0;
+function canonicalSurfaceBlockId(
+  globalConfig: MinimalGlobalConfigForBlockVerification,
+  x: number,
+  z: number,
+  surface: number,
+): number {
+  const waterLevel = canonicalWaterLevel(globalConfig, x, z, surface);
+  const underwater = waterLevel !== null && surface < waterLevel;
+  const moisture = canonicalMoistureAt(globalConfig, x, z);
+  const desert = canonicalDesertScoreAt(globalConfig, x, z);
+  const gravelPatch = valueNoise2(globalConfig.worldSeed, x, z, 44, 103);
+  const clayPatch = valueNoise2(globalConfig.worldSeed, x, z, 52, 104);
+
+  if (underwater || surface <= globalConfig.seaLevel + 1) {
+    if (moisture > 190 && clayPatch > 148) return BLOCK_CLAY;
+    if (gravelPatch > 218) return BLOCK_GRAVEL;
+    if (valueNoise2(globalConfig.worldSeed, x, z, 96, 105) > 236) return BLOCK_SHELL_BED;
+    return BLOCK_SAND;
   }
-  const bytes = Buffer.alloc(8);
-  bytes.writeInt32LE(x, 0);
-  bytes.writeInt32LE(z, 4);
-  for (const byte of bytes) {
-    hash ^= byte;
-    hash = Math.imul(hash, 0x01000193) >>> 0;
+  if (canonicalVolcanicAt(globalConfig, x, z) > 246) {
+    return valueNoise2(globalConfig.worldSeed, x, z, 64, 106) > 180 ? BLOCK_BASALT : BLOCK_ASH;
   }
+  if (canonicalColdAt(globalConfig, x, z, surface)) {
+    return surface > globalConfig.seaLevel + 34 || valueNoise2(globalConfig.worldSeed, x, z, 72, 107) > 164
+      ? BLOCK_SNOW
+      : BLOCK_FROZEN_SOIL;
+  }
+  if (desert > 178) {
+    if (desert > 226 && valueNoise2(globalConfig.worldSeed, x, z, 88, 108) > 188) return BLOCK_SALT_FLAT;
+    return desert > 204 ? BLOCK_SAND : BLOCK_DRY_DIRT;
+  }
+  if (moisture > 188) {
+    if (moisture > 224 && valueNoise2(globalConfig.worldSeed, x, z, 72, 109) > 168) return BLOCK_MOSS;
+    return moisture > 208 ? BLOCK_MUD : BLOCK_GRASS;
+  }
+  if (surface >= globalConfig.seaLevel + 36) return BLOCK_STONE;
+  return BLOCK_GRASS;
+}
+
+function canonicalSubsurfaceBlockId(
+  globalConfig: MinimalGlobalConfigForBlockVerification,
+  x: number,
+  z: number,
+  surface: number,
+): number {
+  const top = canonicalSurfaceBlockId(globalConfig, x, z, surface);
+  if ([BLOCK_SAND, BLOCK_SALT_FLAT, BLOCK_QUICKSAND].includes(top)) return BLOCK_SAND;
+  if ([BLOCK_MUD, BLOCK_CLAY, BLOCK_MOSS].includes(top)) {
+    return hashCoord3(globalConfig.worldSeed, x, surface - 1, z, 121) > 112 ? BLOCK_CLAY : BLOCK_MUD;
+  }
+  if ([BLOCK_SNOW, BLOCK_FROZEN_SOIL].includes(top)) return BLOCK_FROZEN_SOIL;
+  if ([BLOCK_BASALT, BLOCK_ASH].includes(top)) return BLOCK_BASALT;
+  if (top === BLOCK_STONE) return BLOCK_STONE;
+  return BLOCK_DIRT;
+}
+
+function canonicalCoalSeamAt(
+  globalConfig: MinimalGlobalConfigForBlockVerification,
+  x: number,
+  y: number,
+  z: number,
+  surface: number,
+): boolean {
+  if (y <= globalConfig.minBuildY + 3 || y >= surface - 7) return false;
+  const seam = hashCoord3(globalConfig.worldSeed, divFloor(x, 8), divFloor(y, 4), divFloor(z, 8), 301) % 100;
+  if (seam < 84) return false;
+  return hashCoord3(globalConfig.worldSeed, x + y * 3, y, z - y * 5, 302) % 100 >= 38;
+}
+
+function canonicalTreeBlockIdAt(
+  globalConfig: MinimalGlobalConfigForBlockVerification,
+  x: number,
+  y: number,
+  z: number,
+): number {
+  for (let cz = z - 2; cz <= z + 2; cz += 1) {
+    for (let cx = x - 2; cx <= x + 2; cx += 1) {
+      const surface = canonicalSurfaceHeight(globalConfig, cx, cz);
+      if (!canonicalCanGrowTree(globalConfig, cx, cz, surface)) continue;
+      const tree = canonicalTreeAt(globalConfig, cx, cz, surface);
+      if (!tree.exists) continue;
+      const block = canonicalTreeVolumeBlock(globalConfig, tree, x, y, z);
+      if (block !== BLOCK_AIR) return block;
+    }
+  }
+  return BLOCK_AIR;
+}
+
+function canonicalCanGrowTree(
+  globalConfig: MinimalGlobalConfigForBlockVerification,
+  x: number,
+  z: number,
+  surface: number,
+): boolean {
+  if (surface <= globalConfig.seaLevel + 1) return false;
+  const waterLevel = canonicalWaterLevel(globalConfig, x, z, surface);
+  if (waterLevel !== null && surface < waterLevel) return false;
+  if (canonicalDesertAt(globalConfig, x, z) || canonicalVolcanicAt(globalConfig, x, z) > 236) return false;
+  return true;
+}
+
+function canonicalTreeAt(globalConfig: MinimalGlobalConfigForBlockVerification, x: number, z: number, surface: number) {
+  const wet = canonicalWetAt(globalConfig, x, z);
+  const density = wet ? 180 : 218;
+  const cellSize = wet ? 7 : 9;
+  const cellX = divFloor(x, cellSize);
+  const cellZ = divFloor(z, cellSize);
+  const originX = cellX * cellSize;
+  const originZ = cellZ * cellSize;
+  const inner = Math.max(1, cellSize - 2);
+  const treeX = originX + 1 + (hashCoord3(globalConfig.worldSeed, cellX, 0, cellZ, 401) % inner);
+  const treeZ = originZ + 1 + (hashCoord3(globalConfig.worldSeed, cellX, 0, cellZ, 402) % inner);
+  const roll = hashCoord3(globalConfig.worldSeed, cellX, 0, cellZ, 403) & 255;
+  const pine = canonicalColdAt(globalConfig, x, z, surface)
+    || surface >= globalConfig.seaLevel + 32
+    || (hashCoord3(globalConfig.worldSeed, x, surface, z, 404) & 255) > 206;
+  const trunkHeight = (pine ? 5 : 4) + (hashCoord3(globalConfig.worldSeed, x, surface, z, 405) % 3);
+  return { exists: x === treeX && z === treeZ && roll > density, x, z, baseY: surface + 1, trunkHeight, pine };
+}
+
+function canonicalTreeVolumeBlock(
+  globalConfig: MinimalGlobalConfigForBlockVerification,
+  tree: { x: number; z: number; baseY: number; trunkHeight: number; pine: boolean },
+  x: number,
+  y: number,
+  z: number,
+): number {
+  const top = tree.baseY + tree.trunkHeight;
+  if (x === tree.x && z === tree.z && y >= tree.baseY && y < top) return tree.pine ? BLOCK_PINE_TRUNK : BLOCK_TRUNK;
+  if (tree.pine) {
+    if (leafLayerContains(globalConfig, tree.x, top - 4, tree.z, x, y, z, 2, 158, 501)) return BLOCK_PINE_LEAVES;
+    if (leafLayerContains(globalConfig, tree.x, top - 3, tree.z, x, y, z, 2, 188, 502)) return BLOCK_PINE_LEAVES;
+    if (leafLayerContains(globalConfig, tree.x, top - 2, tree.z, x, y, z, 1, 218, 503)) return BLOCK_PINE_LEAVES;
+    if (leafLayerContains(globalConfig, tree.x, top - 1, tree.z, x, y, z, 1, 184, 504)) return BLOCK_PINE_LEAVES;
+    if (leafLayerContains(globalConfig, tree.x, top, tree.z, x, y, z, 1, 138, 505)) return BLOCK_PINE_LEAVES;
+    if (x === tree.x && y === top + 1 && z === tree.z) return BLOCK_PINE_LEAVES;
+    return BLOCK_AIR;
+  }
+  if (leafLayerContains(globalConfig, tree.x, top - 2, tree.z, x, y, z, 2, 174, 511)) return BLOCK_LEAVES;
+  if (leafLayerContains(globalConfig, tree.x, top - 1, tree.z, x, y, z, 2, 214, 512)) return BLOCK_LEAVES;
+  if (leafLayerContains(globalConfig, tree.x, top, tree.z, x, y, z, 2, 148, 513)) return BLOCK_LEAVES;
+  if (leafLayerContains(globalConfig, tree.x, top + 1, tree.z, x, y, z, 1, 194, 514)) return BLOCK_LEAVES;
+  return BLOCK_AIR;
+}
+
+function leafLayerContains(
+  globalConfig: MinimalGlobalConfigForBlockVerification,
+  centerX: number,
+  centerY: number,
+  centerZ: number,
+  x: number,
+  y: number,
+  z: number,
+  radius: number,
+  density: number,
+  salt: number,
+): boolean {
+  if (y !== centerY) return false;
+  const dx = x - centerX;
+  const dz = z - centerZ;
+  if (Math.abs(dx) > radius || Math.abs(dz) > radius) return false;
+  if (Math.abs(dx) + Math.abs(dz) > radius + 1) return false;
+  const corner = Math.abs(dx) === radius && Math.abs(dz) === radius;
+  const roll = hashCoord3(globalConfig.worldSeed, centerX + dx * 23, centerY, centerZ + dz * 29, salt) & 255;
+  if (corner && roll < 178) return false;
+  return roll <= density;
+}
+
+function canonicalColdAt(globalConfig: MinimalGlobalConfigForBlockVerification, x: number, z: number, surface: number): boolean {
+  return surface >= globalConfig.seaLevel + 30
+    || (surface >= globalConfig.seaLevel + 18 && valueNoise2(globalConfig.worldSeed, x, z, 160, 201) < 42);
+}
+
+function canonicalDesertAt(globalConfig: MinimalGlobalConfigForBlockVerification, x: number, z: number): boolean {
+  return canonicalDesertScoreAt(globalConfig, x, z) > 178;
+}
+
+function canonicalWetAt(globalConfig: MinimalGlobalConfigForBlockVerification, x: number, z: number): boolean {
+  return canonicalMoistureAt(globalConfig, x, z) > 188;
+}
+
+function canonicalVolcanicAt(globalConfig: MinimalGlobalConfigForBlockVerification, x: number, z: number): number {
+  return valueNoise2(globalConfig.worldSeed, x, z, 192, 205);
+}
+
+function canonicalTerrainFactors(globalConfig: MinimalGlobalConfigForBlockVerification, x: number, z: number) {
+  const warpX = Math.trunc((valueNoise2(globalConfig.worldSeed, x, z, 160, 31) - 128) * 22 / 128);
+  const warpZ = Math.trunc((valueNoise2(globalConfig.worldSeed, x, z, 160, 32) - 128) * 22 / 128);
+  const wx = x + warpX;
+  const wz = z + warpZ;
+  const continent =
+    Math.trunc((valueNoise2(globalConfig.worldSeed, wx, wz, 520, 21) - 128) * 86 / 128) +
+    Math.trunc((valueNoise2(globalConfig.worldSeed, wx, wz, 220, 22) - 128) * 42 / 128) +
+    Math.trunc((valueNoise2(globalConfig.worldSeed, wx, wz, 96, 23) - 128) * 14 / 128) +
+    46;
+  const shelf = smoothRangeFixed(continent, -50, 34);
+  const inland = smoothRangeFixed(continent, -8, 78);
+  const riverWarpX = Math.trunc((valueNoise2(globalConfig.worldSeed, wx, wz, 128, 33) - 128) * 36 / 128);
+  const riverWarpZ = Math.trunc((valueNoise2(globalConfig.worldSeed, wx, wz, 128, 34) - 128) * 36 / 128);
+  const riverLine = 128 - Math.abs(valueNoise2(globalConfig.worldSeed, wx + riverWarpX, wz + riverWarpZ, 104, 35) - 128);
+  const river = scaleByFixed(smoothRangeFixed(riverLine, 118, 128), inland);
+  const lake = scaleByFixed(smoothRangeFixed(valueNoise2(globalConfig.worldSeed, wx, wz, 220, 37), 210, 242), inland);
+  return { wx, wz, shelf, inland, waterMask: Math.max(river, lake) };
+}
+
+function canonicalWaterLevel(
+  globalConfig: MinimalGlobalConfigForBlockVerification,
+  x: number,
+  z: number,
+  surface: number,
+): number | null {
+  if (surface < globalConfig.seaLevel) return globalConfig.seaLevel;
+  const { waterMask, wx, wz } = canonicalTerrainFactors(globalConfig, x, z);
+  if (waterMask <= 96) return null;
+  return canonicalInlandWaterLevel(globalConfig, wx, wz);
+}
+
+function canonicalInlandWaterLevel(
+  globalConfig: MinimalGlobalConfigForBlockVerification,
+  wx: number,
+  wz: number,
+): number {
+  return globalConfig.seaLevel + 6 + Math.trunc((valueNoise2(globalConfig.worldSeed, wx, wz, 180, 41) - 128) / 128);
+}
+
+function canonicalMoistureAt(globalConfig: MinimalGlobalConfigForBlockVerification, x: number, z: number): number {
+  return Math.trunc((
+    valueNoise2(globalConfig.worldSeed, x, z, 176, 211) * 3 +
+    valueNoise2(globalConfig.worldSeed, x, z, 72, 212)
+  ) / 4);
+}
+
+function canonicalDesertScoreAt(globalConfig: MinimalGlobalConfigForBlockVerification, x: number, z: number): number {
+  return Math.trunc((
+    valueNoise2(globalConfig.worldSeed, x, z, 224, 213) * 3 +
+    (255 - canonicalMoistureAt(globalConfig, x, z))
+  ) / 4);
+}
+
+function valueNoise2(seed: Buffer | Uint8Array, x: number, z: number, scale: number, salt: number): number {
+  const cellX = divFloor(x, scale);
+  const cellZ = divFloor(z, scale);
+  const localX = positiveModulo(x, scale);
+  const localZ = positiveModulo(z, scale);
+  const tx = smoothFixed(localX, scale);
+  const tz = smoothFixed(localZ, scale);
+  const a = hashCoord3(seed, cellX, 0, cellZ, salt) & 255;
+  const b = hashCoord3(seed, cellX + 1, 0, cellZ, salt) & 255;
+  const c = hashCoord3(seed, cellX, 0, cellZ + 1, salt) & 255;
+  const d = hashCoord3(seed, cellX + 1, 0, cellZ + 1, salt) & 255;
+  return lerpFixed(lerpFixed(a, b, tx), lerpFixed(c, d, tx), tz);
+}
+
+function hashCoord3(seed: Buffer | Uint8Array, x: number, y: number, z: number, salt: number): number {
+  let hash = (0x811c9dc5 ^ (salt >>> 0)) >>> 0;
+  for (const byte of seed) hash = Math.imul((hash ^ byte) >>> 0, 0x01000193) >>> 0;
+  hash = hashI32Bytes(hash, x);
+  hash = hashI32Bytes(hash, y);
+  hash = hashI32Bytes(hash, z);
   hash ^= hash >>> 16;
-  hash = Math.imul(hash, 0x7feb352d) >>> 0;
+  hash = Math.imul(hash >>> 0, 0x7feb352d) >>> 0;
   hash ^= hash >>> 15;
-  hash = Math.imul(hash, 0x846ca68b) >>> 0;
-  hash ^= hash >>> 16;
-  return hash >>> 0;
+  hash = Math.imul(hash >>> 0, 0x846ca68b) >>> 0;
+  return (hash ^ (hash >>> 16)) >>> 0;
 }
 
-export function decodeChunkState(data: Buffer): DecodedChunkState {
-  if (data.length !== CHUNK_LEN) {
-    throw new Error(`Invalid ChunkState length: expected ${CHUNK_LEN}, got ${data.length}`);
-  }
+function hashI32Bytes(hash: number, value: number): number {
+  const v = value | 0;
+  hash = Math.imul((hash ^ (v & 255)) >>> 0, 0x01000193) >>> 0;
+  hash = Math.imul((hash ^ ((v >>> 8) & 255)) >>> 0, 0x01000193) >>> 0;
+  hash = Math.imul((hash ^ ((v >>> 16) & 255)) >>> 0, 0x01000193) >>> 0;
+  return Math.imul((hash ^ ((v >>> 24) & 255)) >>> 0, 0x01000193) >>> 0;
+}
 
-  let offset = 0;
-  const bytes = (length: number): Buffer => {
-    const value = data.subarray(offset, offset + length);
-    offset += length;
-    return value;
-  };
-  const u8 = (): number => data.readUInt8(offset++);
-  const u16 = (): number => {
-    const value = data.readUInt16LE(offset);
-    offset += 2;
-    return value;
-  };
-  const u32 = (): number => {
-    const value = data.readUInt32LE(offset);
-    offset += 4;
-    return value;
-  };
-  const i32 = (): number => {
-    const value = data.readInt32LE(offset);
-    offset += 4;
-    return value;
-  };
-  const u64 = (): bigint => {
-    const value = data.readBigUInt64LE(offset);
-    offset += 8;
-    return value;
-  };
-  const i64 = (): bigint => {
-    const value = data.readBigInt64LE(offset);
-    offset += 8;
-    return value;
-  };
-  const pubkey = (): PublicKey => new PublicKey(bytes(32));
+function clampInt(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, Math.trunc(value)));
+}
 
-  const decoded: DecodedChunkState = {
-    magic: bytes(8).toString("utf8"),
-    version: u16(),
-    bump: u8(),
-    initialized: u8() === 1,
-    globalConfig: pubkey(),
-    worldId: u16(),
-    chunkX: i32(),
-    chunkZ: i32(),
-    changeCount: u32(),
-    storedDeltaCount: u16(),
-    writeCursor: u16(),
-    maxDeltas: u16(),
-    createdSlot: u64(),
-    updatedSlot: u64(),
-    createdAt: i64(),
-    deltas: [],
-  };
+function divFloor(value: number, divisor: number): number {
+  return Math.floor(value / divisor);
+}
 
-  for (let i = 0; i < decoded.storedDeltaCount; i += 1) {
-    const deltaOffset = CHUNK_HEADER_LEN + i * BLOCK_DELTA_LEN;
-    const delta = data.subarray(deltaOffset, deltaOffset + BLOCK_DELTA_LEN);
-    decoded.deltas.push({
-      sequence: delta.readUInt32LE(0),
-      actor: new PublicKey(delta.subarray(4, 36)),
-      localX: delta.readUInt8(36),
-      y: delta.readInt16LE(37),
-      localZ: delta.readUInt8(39),
-      previousBlockId: delta.readUInt16LE(40),
-      newBlockId: delta.readUInt16LE(42),
-      action: delta.readUInt8(44),
-      toolSlot: delta.readUInt8(45),
-      slot: delta.readBigUInt64LE(46),
-      timestamp: delta.readBigInt64LE(54),
-    });
-  }
+function positiveModulo(value: number, divisor: number): number {
+  return ((value % divisor) + divisor) % divisor;
+}
 
-  if (offset !== CHUNK_HEADER_LEN) {
-    throw new Error(`ChunkState header decoder offset mismatch: ${offset}`);
-  }
-  if (decoded.magic !== CHUNK_MAGIC) {
-    throw new Error(`Invalid ChunkState magic: ${decoded.magic}`);
-  }
-  return decoded;
+function smoothFixed(distance: number, scale: number): number {
+  const fixed = Math.trunc((distance * 1024) / scale);
+  return Math.trunc((fixed * fixed * (3072 - fixed * 2)) / (1024 * 1024));
+}
+
+function smoothRangeFixed(value: number, edge0: number, edge1: number): number {
+  if (value <= edge0) return 0;
+  if (value >= edge1) return 1024;
+  return smoothFixed(value - edge0, edge1 - edge0);
+}
+
+function lerpFixed(a: number, b: number, t: number): number {
+  return Math.trunc((a * (1024 - t) + b * t + 512) / 1024);
+}
+
+function lerpIntFixed(a: number, b: number, t: number): number {
+  return Math.trunc((a * (1024 - t) + b * t + 512) / 1024);
+}
+
+function scaleByFixed(value: number, fixed: number): number {
+  return Math.trunc((value * fixed) / 1024);
 }
 
 export function decodeChunkBrokenState({

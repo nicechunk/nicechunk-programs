@@ -27,6 +27,3 @@ pub const NICECHUNK_CORE_PROGRAM_ID: Pubkey =
 #[cfg(feature = "mainnet")]
 pub const NICECHUNK_PLAYER_PROGRAM_ID: Pubkey =
     pubkey!("oeaRMVnPoV4iENnGCCtaEeRxU5be515s4YYe6aXQuKe");
-
-pub const MAGICBLOCK_DELEGATION_PROGRAM_ID: Pubkey =
-    pubkey!("DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh");

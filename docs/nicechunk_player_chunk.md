@@ -26,7 +26,7 @@ Current devnet build defaults:
 ```text
 nicechunk_core   = 9EhMCRYMJej1F21KzaA5Zao3khGGc5aJbDGbnxaogQHu
 nicechunk_player = oeaRMVnPoV4iENnGCCtaEeRxU5be515s4YYe6aXQuKe
-nicechunk_chunk  = 12rCvz9PZ64Uix1TCiHEGU4AN4ZS1h4jv5u7CkqTRdk5
+nicechunk_chunk  = 7JD6kASAfQeiVLUi51mrfWSbeh96ntRJnRiFQKCqUVhn
 ```
 
 Use devnet for current testing. Do not send these scripts to mainnet.

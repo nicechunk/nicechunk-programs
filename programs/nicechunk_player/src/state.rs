@@ -26,8 +26,9 @@ pub const GLOBAL_CONFIG_WORLD_ID_OFFSET: usize = 85;
 pub const GLOBAL_CONFIG_MIN_BUILD_Y_OFFSET: usize = 263;
 pub const GLOBAL_CONFIG_MAX_BUILD_Y_OFFSET: usize = 265;
 
-pub const BACKPACK_LEN: usize = 1118;
+pub const BACKPACK_LEN: usize = 6464;
 pub const BACKPACK_MAGIC: [u8; 8] = *b"NCKBPK01";
+pub const BACKPACK_VERSION: u16 = 2;
 pub const BACKPACK_OWNER_OFFSET: usize = 20;
 
 pub struct GlobalConfigView {
@@ -252,6 +253,9 @@ pub struct BackpackAccountView;
 impl BackpackAccountView {
     pub fn validate_owner(data: &[u8], owner: &Pubkey) -> ProgramResult {
         if data.len() != BACKPACK_LEN || data[0..8] != BACKPACK_MAGIC {
+            return Err(NicechunkPlayerError::InvalidBackpackData.into());
+        }
+        if read_u16(data, 8) != BACKPACK_VERSION {
             return Err(NicechunkPlayerError::InvalidBackpackData.into());
         }
         if &data[BACKPACK_OWNER_OFFSET..BACKPACK_OWNER_OFFSET + 32] != owner.as_ref() {
