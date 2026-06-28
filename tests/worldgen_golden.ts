@@ -1,4 +1,5 @@
 import assert from "node:assert";
+import crypto from "node:crypto";
 // @ts-expect-error JavaScript world modules are intentionally tested through their public ESM exports.
 import { BiomeType, EMPTY_BLOCK, WorldMapBlock } from "../src/world/blocks.js";
 // @ts-expect-error JavaScript world modules are intentionally tested through their public ESM exports.
@@ -21,6 +22,9 @@ const CANONICAL_WORLD_CONFIG = {
   maxTerrainHeight: 160,
   seaLevel: 96,
 };
+
+const WIDE_COORDINATE_GRID = [-2048, -1024, -513, -257, -129, -64, -1, 0, 1, 63, 128, 255, 512, 1023, 2048]
+  .flatMap((x) => [-1536, -769, -384, -127, -1, 0, 1, 96, 255, 640, 1536].map((z) => ({ x, z })));
 
 describe("nicechunk deterministic worldgen golden fixtures", () => {
   beforeEach(() => {
@@ -47,6 +51,28 @@ describe("nicechunk deterministic worldgen golden fixtures", () => {
     }
   });
 
+  it("keeps wide client terrain signatures stable across coordinate ranges", () => {
+    const signature = sha256Json(WIDE_COORDINATE_GRID.map(({ x, z }) => {
+      const profile = terrainProfile(x, z);
+      return {
+        x,
+        z,
+        h: profile.height,
+        b: profile.biome,
+        t: profile.terrain,
+        s: profile.subsurface,
+        f: profile.fluid ?? null,
+        w: profile.waterLevel ?? null,
+        v: profile.vegetation ?? null,
+        st: profile.surfaceType,
+        tt: profile.tree.type,
+        tl: profile.tree.leafType,
+      };
+    }));
+
+    assert.equal(signature, "4decb256ce0a3745a78e814abf7bf4b7f9f17fdb5b36042dcce3820e96757ed3");
+  });
+
   it("keeps client generated block outputs stable around surface depth", () => {
     const fixtures = [
       { x: 8, z: 8, y: 102, terrain: WorldMapBlock.Mud, fluid: null },
@@ -63,6 +89,29 @@ describe("nicechunk deterministic worldgen golden fixtures", () => {
     }
 
     assert.equal(getGeneratedBlock(8, 103, 8), null);
+  });
+
+  it("keeps wide client block signatures stable across depth samples", () => {
+    const sampledColumns = WIDE_COORDINATE_GRID.filter((_, index) => index % 7 === 0);
+    const signature = sha256Json(sampledColumns.flatMap(({ x, z }) => {
+      const profile = terrainProfile(x, z);
+      return [-12, -4, -1, 0, 1, 4].map((dy) => {
+        const y = profile.height + dy;
+        const block = getGeneratedBlock(x, y, z);
+        return {
+          x,
+          y,
+          z,
+          t: block?.terrain ?? null,
+          f: block?.fluid ?? null,
+          v: block?.vegetation ?? null,
+          b: block?.biome ?? null,
+          h: block?.height ?? null,
+        };
+      });
+    }));
+
+    assert.equal(signature, "9b53898898db37cbb6a7bbae35b1c863521d100d0429a8c126db2ab56a7aa955");
   });
 
   it("keeps canonical protocol block IDs stable for mining verification", () => {
@@ -83,6 +132,25 @@ describe("nicechunk deterministic worldgen golden fixtures", () => {
       assert.equal(canonicalBlockIdAt({ x: fixture.x, y: height + 1, z: fixture.z }), fixture.above1, `canonical above1 at ${fixture.x},${fixture.z}`);
       assert.equal(canonicalRenderTypeAt({ x: fixture.x, y: height, z: fixture.z }), fixture.render, `canonical render at ${fixture.x},${fixture.z}`);
     }
+  });
+
+  it("keeps wide canonical protocol signatures stable across coordinate ranges", () => {
+    const signature = sha256Json(WIDE_COORDINATE_GRID.map(({ x, z }) => {
+      const height = canonicalSurfaceHeightAt({ x, z });
+      return {
+        x,
+        z,
+        h: height,
+        w: canonicalWaterLevelAt({ x, z, surface: height }),
+        surface: canonicalBlockIdAt({ x, y: height, z }),
+        below1: canonicalBlockIdAt({ x, y: height - 1, z }),
+        below8: canonicalBlockIdAt({ x, y: height - 8, z }),
+        above1: canonicalBlockIdAt({ x, y: height + 1, z }),
+        render: canonicalRenderTypeAt({ x, y: height, z }),
+      };
+    }));
+
+    assert.equal(signature, "4113e7c6e834d03896f03cf056d809e2b6afdcafaca3f59f37b65b9d539a8cfc");
   });
 
   it("keeps canonical above-surface tree blocks stable", () => {
@@ -108,4 +176,41 @@ describe("nicechunk deterministic worldgen golden fixtures", () => {
       { x: -503, y: 119, z: -413, block: WorldMapBlock.Leaves, type: "leaves" },
     ]);
   });
+
+  it("keeps wide canonical above-surface tree summaries stable", () => {
+    const areas = [
+      { minX: -1024, maxX: -993, minZ: -1024, maxZ: -993 },
+      { minX: -512, maxX: -481, minZ: -416, maxZ: -385 },
+      { minX: 0, maxX: 31, minZ: 0, maxZ: 31 },
+      { minX: 512, maxX: 543, minZ: 512, maxZ: 543 },
+    ];
+    const signature = sha256Json(areas.map((area) => {
+      const blocks = canonicalAboveSurfaceBlocksInArea(area);
+      const counts: Record<string, number> = {};
+      for (const block of blocks) counts[block.type] = (counts[block.type] ?? 0) + 1;
+      return {
+        ...area,
+        total: blocks.length,
+        counts,
+        first: blocks.slice(0, 5).map(compactAboveSurfaceBlock),
+        last: blocks.slice(-5).map(compactAboveSurfaceBlock),
+      };
+    }));
+
+    assert.equal(signature, "3b1fe11c98cecad308c4ed99cc5a30e09cf26a96c3ac03728164eb2e4f84808d");
+  });
 });
+
+function sha256Json(value: unknown) {
+  return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function compactAboveSurfaceBlock(block: { x: number; y: number; z: number; block: number; type: string }) {
+  return {
+    x: block.x,
+    y: block.y,
+    z: block.z,
+    block: block.block,
+    type: block.type,
+  };
+}
