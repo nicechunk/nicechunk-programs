@@ -96,7 +96,7 @@ npm run build
 Delegate one chunk:
 
 ```bash
-PAYER_KEYPAIR=.deploy/phantom-keypair.json \
+PAYER_KEYPAIR=/path/to/devnet-payer.json \
 CHUNK_X=0 \
 CHUNK_Z=0 \
 COMMIT_FREQUENCY_MS=250 \
@@ -112,7 +112,7 @@ CHUNK_X=0 CHUNK_Z=0 npm run chunk:subscribe-er
 Record a block change:
 
 ```bash
-PAYER_KEYPAIR=.deploy/phantom-keypair.json \
+PAYER_KEYPAIR=/path/to/devnet-payer.json \
 CHUNK_X=0 CHUNK_Z=0 LOCAL_X=1 BLOCK_Y=2 LOCAL_Z=1 \
 PREVIOUS_BLOCK_ID=1 NEW_BLOCK_ID=0 ACTION=1 \
 npm run chunk:record-block-change

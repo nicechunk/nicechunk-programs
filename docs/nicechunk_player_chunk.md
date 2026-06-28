@@ -169,13 +169,13 @@ solana program deploy target/deploy/nicechunk_chunk.so --url devnet
 Initialize a player profile:
 
 ```bash
-PAYER_KEYPAIR=.deploy/phantom-keypair.json npm run player:init
+PAYER_KEYPAIR=/path/to/devnet-payer.json npm run player:init
 ```
 
 Record a block break in chunk `(0, 0)`:
 
 ```bash
-PAYER_KEYPAIR=.deploy/phantom-keypair.json \
+PAYER_KEYPAIR=/path/to/devnet-payer.json \
 CHUNK_X=0 CHUNK_Z=0 LOCAL_X=1 BLOCK_Y=2 LOCAL_Z=3 \
 PREVIOUS_BLOCK_ID=1 NEW_BLOCK_ID=0 ACTION=1 TOOL_SLOT=0 \
 npm run chunk:record-block-change
