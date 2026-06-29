@@ -4,6 +4,10 @@
 
 Solana native programs that define the persistent on-chain state of NiceChunk.
 
+## Official Links
+
+GitHub: [https://github.com/nicechunk/nicechunk-programs](https://github.com/nicechunk/nicechunk-programs)
+
 ## Project Overview
 
 This repository contains the native Solana program layer for NiceChunk. It is intentionally separated from the browser client so protocol work can be reviewed, tested, audited, and forked without pulling in frontend assets or deployment concerns.
