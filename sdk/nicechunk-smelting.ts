@@ -13,10 +13,14 @@ import type { BackpackSlotRecord } from "./nicechunk-backpack.ts";
 const env = typeof process !== "undefined" ? process.env : {};
 
 export const NICECHUNK_SMELTING_PROGRAM_ID = new PublicKey(
-  env.NICECHUNK_SMELTING_PROGRAM_ID ?? "7imEiNtpiN487HRwrftdLrMFs8TcAnjLE94vKsDgU6L7",
+  env.NICECHUNK_SMELTING_PROGRAM_ID ?? env.NICECHUNK_GAME_PROGRAM_ID ?? "6CurnvneezBuHwPUnrCiFg1QMWeUF67ufQxYebyr2UP7",
+);
+export const NICECHUNK_GAME_PROGRAM_ID = new PublicKey(
+  env.NICECHUNK_GAME_PROGRAM_ID ?? "6CurnvneezBuHwPUnrCiFg1QMWeUF67ufQxYebyr2UP7",
 );
 export const RECIPE_TABLE_SEED = "smelting-recipes";
 export const SMELTING_AUTHORITY_SEED = "smelting-authority";
+const UNIFIED_GAME_SMELTING_NAMESPACE = 3;
 export const RECIPE_TABLE_MAGIC = "NCKSMR01";
 export const RECIPE_TABLE_HEADER_LEN = 96;
 export const RECIPE_TABLE_MAX_RECIPES = 12;
@@ -27,6 +31,12 @@ export const RECIPE_RECORD_LEN =
 export const RECIPE_TABLE_LEN = RECIPE_TABLE_HEADER_LEN + RECIPE_TABLE_MAX_RECIPES * RECIPE_RECORD_LEN;
 export const UPSERT_RECIPE_ARGS_LEN =
   8 + 1 + 1 + 1 + 1 + RECIPE_MAX_INPUTS * BACKPACK_SLOT_RECORD_LEN + RECIPE_MAX_OUTPUTS * BACKPACK_SLOT_RECORD_LEN;
+
+function smeltingInstructionData(programId: PublicKey, data: Buffer): Buffer {
+  return programId.equals(NICECHUNK_GAME_PROGRAM_ID)
+    ? Buffer.concat([Buffer.from([UNIFIED_GAME_SMELTING_NAMESPACE]), data])
+    : data;
+}
 
 export interface SmeltingRecipeInput {
   recipeId: bigint | number;
@@ -77,7 +87,7 @@ export function createInitializeRecipeTableInstruction({
       { pubkey: recipeTable, isSigner: false, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
-    data,
+    data: smeltingInstructionData(smeltingProgramId, data),
   });
 }
 
@@ -98,7 +108,7 @@ export function createUpsertSmeltingRecipeInstruction({
       { pubkey: authority, isSigner: true, isWritable: false },
       { pubkey: recipeTable, isSigner: false, isWritable: true },
     ],
-    data: Buffer.concat([Buffer.from([1]), encodeSmeltingRecipeArgs(recipe)]),
+    data: smeltingInstructionData(smeltingProgramId, Buffer.concat([Buffer.from([1]), encodeSmeltingRecipeArgs(recipe)])),
   });
 }
 
@@ -144,7 +154,7 @@ export function createExecuteSmeltingInstruction({
       { pubkey: smeltingAuthority, isSigner: false, isWritable: false },
       { pubkey: backpackProgramId, isSigner: false, isWritable: false },
     ],
-    data,
+    data: smeltingInstructionData(smeltingProgramId, data),
   });
 }
 
@@ -166,7 +176,7 @@ export function createSetRecipeTableAuthorityInstruction({
       { pubkey: recipeTable, isSigner: false, isWritable: true },
       { pubkey: newAuthority, isSigner: false, isWritable: false },
     ],
-    data: Buffer.from([3]),
+    data: smeltingInstructionData(smeltingProgramId, Buffer.from([3])),
   });
 }
 

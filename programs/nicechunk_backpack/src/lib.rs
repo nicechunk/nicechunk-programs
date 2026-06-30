@@ -50,6 +50,7 @@ pub fn process_instruction(
         3 => append_market_resource(program_id, accounts, payload),
         4 => remove_resources(program_id, accounts, payload),
         5 => append_smelting_item(program_id, accounts, payload),
+        6 => append_mined_resources_batch(program_id, accounts, payload),
         _ => Err(NicechunkBackpackError::InvalidInstruction.into()),
     }
 }
@@ -182,11 +183,83 @@ fn append_mined_resource(
     BackpackAccount::append_resource(&mut backpack_data, &session.owner, &record, clock.slot)
 }
 
-fn remove_resource(
+fn append_mined_resources_batch(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     payload: &[u8],
 ) -> ProgramResult {
+    if accounts.len() != 4 || payload.is_empty() {
+        return Err(NicechunkBackpackError::InvalidInstruction.into());
+    }
+    let count = payload[0] as usize;
+    if count == 0
+        || count > state::BACKPACK_MAX_CAPACITY as usize
+        || payload.len() != 1 + count * BackpackResourceRecord::LEN
+    {
+        return Err(NicechunkBackpackError::InvalidInstruction.into());
+    }
+
+    let mut records = Vec::with_capacity(count);
+    for index in 0..count {
+        let offset = 1 + index * BackpackResourceRecord::LEN;
+        records.push(BackpackResourceRecord::unpack(
+            &payload[offset..offset + BackpackResourceRecord::LEN],
+        )?);
+    }
+
+    let account_info_iter = &mut accounts.iter();
+    let session_authority = next_account_info(account_info_iter)?;
+    let player_profile = next_account_info(account_info_iter)?;
+    let player_session = next_account_info(account_info_iter)?;
+    let backpack = next_account_info(account_info_iter)?;
+
+    if !session_authority.is_signer {
+        return Err(NicechunkBackpackError::InvalidSessionAuthority.into());
+    }
+    if !backpack.is_writable {
+        return Err(NicechunkBackpackError::InvalidWritableAccount.into());
+    }
+    require_key_eq(
+        backpack.owner,
+        program_id,
+        NicechunkBackpackError::InvalidBackpackOwner,
+    )?;
+    require_key_eq(
+        player_profile.owner,
+        &NICECHUNK_PLAYER_PROGRAM_ID,
+        NicechunkBackpackError::InvalidPlayerProgram,
+    )?;
+    require_key_eq(
+        player_session.owner,
+        &NICECHUNK_PLAYER_PROGRAM_ID,
+        NicechunkBackpackError::InvalidPlayerProgram,
+    )?;
+
+    let clock = Clock::get()?;
+    let player_session_data = player_session.try_borrow_data()?;
+    let session = PlayerSessionView::validate(
+        &player_session_data,
+        session_authority.key,
+        player_profile.key,
+        SESSION_ACTION_BREAK_BLOCK,
+        clock.unix_timestamp,
+    )?;
+    drop(player_session_data);
+
+    let player_profile_data = player_profile.try_borrow_data()?;
+    PlayerProfileView::validate_owner(&player_profile_data, &session.owner)?;
+    drop(player_profile_data);
+
+    let mut backpack_data = backpack.try_borrow_mut_data()?;
+    BackpackAccount::append_resources_lossy(
+        &mut backpack_data,
+        &session.owner,
+        &records,
+        clock.slot,
+    )
+}
+
+fn remove_resource(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8]) -> ProgramResult {
     if payload.len() != 1 || (accounts.len() != 2 && accounts.len() != 4) {
         return Err(NicechunkBackpackError::InvalidInstruction.into());
     }
@@ -212,7 +285,12 @@ fn remove_resource(
 
         let clock = Clock::get()?;
         let mut backpack_data = backpack.try_borrow_mut_data()?;
-        return BackpackAccount::remove_resource_at(&mut backpack_data, owner.key, index, clock.slot);
+        return BackpackAccount::remove_resource_at(
+            &mut backpack_data,
+            owner.key,
+            index,
+            clock.slot,
+        );
     }
 
     let session_authority = next_account_info(account_info_iter)?;
@@ -279,10 +357,8 @@ fn append_market_resource(
     if !market_authority.is_signer {
         return Err(NicechunkBackpackError::InvalidMarketAuthority.into());
     }
-    let (expected_authority, _) = Pubkey::find_program_address(
-        &[b"market-authority"],
-        &NICECHUNK_MARKET_PROGRAM_ID,
-    );
+    let (expected_authority, _) =
+        Pubkey::find_program_address(&[b"market-authority"], &NICECHUNK_MARKET_PROGRAM_ID);
     require_key_eq(
         market_authority.key,
         &expected_authority,
@@ -320,10 +396,8 @@ fn append_smelting_item(
     if !smelting_authority.is_signer {
         return Err(NicechunkBackpackError::InvalidSmeltingAuthority.into());
     }
-    let (expected_authority, _) = Pubkey::find_program_address(
-        &[b"smelting-authority"],
-        &NICECHUNK_SMELTING_PROGRAM_ID,
-    );
+    let (expected_authority, _) =
+        Pubkey::find_program_address(&[b"smelting-authority"], &NICECHUNK_SMELTING_PROGRAM_ID);
     require_key_eq(
         smelting_authority.key,
         &expected_authority,

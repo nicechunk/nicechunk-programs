@@ -7,7 +7,8 @@ export const DEFAULT_DEVNET_URL = "https://solana-devnet.api.onfinality.io/publi
 export const DEVNET_NCK_MINT = "HSnWF5kjkWVrceW2SaSskScuLveUZE4gpthZ2ZXRPQPo";
 export const DEVNET_CORE_PROGRAM_ID = "9EhMCRYMJej1F21KzaA5Zao3khGGc5aJbDGbnxaogQHu";
 export const DEVNET_PLAYER_PROGRAM_ID = "oeaRMVnPoV4iENnGCCtaEeRxU5be515s4YYe6aXQuKe";
-export const DEVNET_CHUNK_PROGRAM_ID = "7JD6kASAfQeiVLUi51mrfWSbeh96ntRJnRiFQKCqUVhn";
+export const DEVNET_GAME_PROGRAM_ID = "6CurnvneezBuHwPUnrCiFg1QMWeUF67ufQxYebyr2UP7";
+export const DEVNET_CHUNK_PROGRAM_ID = DEVNET_GAME_PROGRAM_ID;
 export const DEVNET_GUARDIAN_PROGRAM_ID = "6frJyJSirfEwsztsxijcJLe29LSaceET1wanXSFwPQyE";
 
 export function clusterUrl(): string {
@@ -33,7 +34,7 @@ export function playerProgramId(): PublicKey {
 }
 
 export function chunkProgramId(): PublicKey {
-  return new PublicKey(process.env.NICECHUNK_CHUNK_PROGRAM_ID ?? DEVNET_CHUNK_PROGRAM_ID);
+  return new PublicKey(process.env.NICECHUNK_CHUNK_PROGRAM_ID ?? process.env.NICECHUNK_GAME_PROGRAM_ID ?? DEVNET_CHUNK_PROGRAM_ID);
 }
 
 export function guardianProgramId(): PublicKey {

@@ -19,7 +19,9 @@ pub mod cluster_config;
 pub mod errors;
 pub mod state;
 
-use cluster_config::{NICECHUNK_BACKPACK_PROGRAM_ID, NICECHUNK_CORE_PROGRAM_ID};
+use cluster_config::{
+    NICECHUNK_BACKPACK_PROGRAM_ID, NICECHUNK_CORE_PROGRAM_ID, NICECHUNK_GAME_PROGRAM_ID,
+};
 use errors::{require_key_eq, NicechunkPlayerError};
 use state::{
     BackpackAccountView, GlobalConfigView, PlayerProfile, PlayerSession, PlayerSessionInitArgs,
@@ -349,11 +351,11 @@ fn set_equipped_backpack(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progr
         program_id,
         NicechunkPlayerError::InvalidPlayerProfileOwner,
     )?;
-    require_key_eq(
-        backpack.owner,
-        &NICECHUNK_BACKPACK_PROGRAM_ID,
-        NicechunkPlayerError::InvalidBackpackProgram,
-    )?;
+    if backpack.owner != &NICECHUNK_BACKPACK_PROGRAM_ID
+        && backpack.owner != &NICECHUNK_GAME_PROGRAM_ID
+    {
+        return Err(NicechunkPlayerError::InvalidBackpackProgram.into());
+    }
 
     let (expected_player_profile, _) =
         Pubkey::find_program_address(&[PLAYER_PROFILE_SEED, authority.key.as_ref()], program_id);

@@ -105,9 +105,6 @@ export function createChunkGroup({ THREE, chunkX, chunkZ, state, geometryByType,
     mushroomCap: [],
     pendingMine: [],
   };
-  const previousPendingMineMatrixList = state.pendingMineMatrixList;
-  state.pendingMineMatrixList = matrices.pendingMine;
-
   const transform = new THREE.Matrix4();
   const scale = new THREE.Vector3(1, 1, 1);
   const waterScale = new THREE.Vector3(1, waterVisualHeightScale, 1);
@@ -220,7 +217,8 @@ export function createChunkGroup({ THREE, chunkX, chunkZ, state, geometryByType,
   for (const [type, list] of Object.entries(matrices)) {
     if (!list.length) continue;
     const meshableEntries = list.filter((entry) => entry.meshable);
-    const instanceEntries = list.filter((entry) => entry.matrix);
+    const instanceEntries = list.filter((entry) => entry.matrix && !entry.pending);
+    const pendingInstanceEntries = list.filter((entry) => entry.matrix && entry.pending);
     if (meshableEntries.length) {
       const geometry = createVisibleVoxelGeometry(THREE, state, meshableEntries, chunkMeshSolidKeys, surfaceAt);
       if (geometry) {
@@ -235,29 +233,77 @@ export function createChunkGroup({ THREE, chunkX, chunkZ, state, geometryByType,
         group.add(mesh);
       }
     }
-    if (!instanceEntries.length) continue;
-    const mesh = new THREE.InstancedMesh(geometryByType[type], materials[type], instanceEntries.length);
-    let hasInstanceColors = false;
-    instanceEntries.forEach((entry, index) => {
-      mesh.setMatrixAt(index, entry.matrix);
-      if (!entry.tint) return;
-      mesh.setColorAt(index, instanceColor.setRGB(entry.tint[0], entry.tint[1], entry.tint[2]));
-      hasInstanceColors = true;
-    });
-    if (hasInstanceColors && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    const interactive = instanceEntries.some((entry) => entry.block);
-    mesh.castShadow = castChunkShadows && chunkTypeUsesShadows(type);
-    mesh.receiveShadow = receiveChunkShadows && chunkTypeReceivesShadows(type);
-    updateInstancedMeshBounds(mesh);
-    if (!interactive) mesh.raycast = () => {};
-    mesh.userData.blocks = interactive ? instanceEntries.map((entry) => entry.block) : [];
-    mesh.userData.meshType = type;
-    group.add(mesh);
+    if (instanceEntries.length) {
+      group.add(createChunkInstancedMesh({
+        THREE,
+        geometry: geometryByType[type],
+        material: materials[type],
+        type,
+        entries: instanceEntries,
+        instanceColor,
+        castChunkShadows,
+        receiveChunkShadows,
+      }));
+    }
+    if (pendingInstanceEntries.length) {
+      group.add(createChunkInstancedMesh({
+        THREE,
+        geometry: geometryByType[type],
+        material: pendingMiningMaterialForType(materials[type], type),
+        type,
+        entries: pendingInstanceEntries,
+        instanceColor,
+        castChunkShadows: false,
+        receiveChunkShadows,
+      }));
+    }
   }
-
-  if (previousPendingMineMatrixList === undefined) delete state.pendingMineMatrixList;
-  else state.pendingMineMatrixList = previousPendingMineMatrixList;
   return group;
+}
+
+function createChunkInstancedMesh({
+  THREE,
+  geometry,
+  material,
+  type,
+  entries,
+  instanceColor,
+  castChunkShadows,
+  receiveChunkShadows,
+}) {
+  const mesh = new THREE.InstancedMesh(geometry, material, entries.length);
+  let hasInstanceColors = false;
+  entries.forEach((entry, index) => {
+    mesh.setMatrixAt(index, entry.matrix);
+    if (!entry.tint) return;
+    mesh.setColorAt(index, instanceColor.setRGB(entry.tint[0], entry.tint[1], entry.tint[2]));
+    hasInstanceColors = true;
+  });
+  if (hasInstanceColors && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  const interactive = entries.some((entry) => entry.block);
+  mesh.castShadow = castChunkShadows && chunkTypeUsesShadows(type);
+  mesh.receiveShadow = receiveChunkShadows && chunkTypeReceivesShadows(type);
+  updateInstancedMeshBounds(mesh);
+  if (!interactive) mesh.raycast = () => {};
+  mesh.userData.blocks = interactive ? entries.map((entry) => entry.block) : [];
+  mesh.userData.meshType = type;
+  return mesh;
+}
+
+const pendingMiningMaterialCache = new WeakMap();
+
+function pendingMiningMaterialForType(material, type) {
+  if (!material) return material;
+  let cached = pendingMiningMaterialCache.get(material);
+  if (cached) return cached;
+  cached = material.clone();
+  cached.name = `pending:${material.name || type}`;
+  cached.transparent = true;
+  cached.opacity = Math.min(Number.isFinite(material.opacity) ? material.opacity : 1, 0.42);
+  cached.depthWrite = false;
+  cached.fog = material.fog;
+  pendingMiningMaterialCache.set(material, cached);
+  return cached;
 }
 
 function chunkDetailCastsShadows(detailMode) {
@@ -1110,13 +1156,12 @@ function pushBlock(state, list, type, x, y, z, transform, rotation, scale, THREE
   const visualScale = isShortWaterVisualType(type) ? new THREE.Vector3(1, waterVisualHeightScale, 1) : scale;
   const block = { x, y, z, type, key };
   if (state.pendingMinedBlocks?.has(key)) {
-    const pendingList = state.pendingMineMatrixList ?? null;
-    const targetList = pendingList || list;
-    targetList.push({
+    list.push({
       matrix: composeMatrix(x, visualY, z, transform, rotation, visualScale, THREE),
       block,
       tint: blockTint(type, x, y, z),
       occludesVoxelFaces: true,
+      pending: true,
     });
     return;
   }

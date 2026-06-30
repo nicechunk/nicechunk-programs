@@ -899,6 +899,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nicechunk_game"
+version = "0.1.0"
+dependencies = [
+ "nicechunk_backpack",
+ "nicechunk_chunk",
+ "nicechunk_market",
+ "nicechunk_smelting",
+ "solana-program",
+]
+
+[[package]]
 name = "nicechunk_guardian"
 version = "0.1.0"
 dependencies = [

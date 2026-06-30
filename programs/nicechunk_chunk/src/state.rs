@@ -58,6 +58,10 @@ pub const BLOCK_COAL: u16 = 47;
 const TREE_MAX_LEAF_RADIUS: i32 = 2;
 const TREE_MAX_BLOCK_HEIGHT_ABOVE_SURFACE: i16 = 9;
 const MAX_WATER_LEVEL_ABOVE_SEA: i16 = 6;
+pub const TREE_FELL_MAX_CHUNKS: usize = 4;
+pub const TREE_FELL_MAX_BLOCKS: usize = ((TREE_MAX_LEAF_RADIUS * 2 + 1) as usize)
+    * ((TREE_MAX_LEAF_RADIUS * 2 + 1) as usize)
+    * TREE_MAX_BLOCK_HEIGHT_ABOVE_SURFACE as usize;
 
 pub const LEGACY_PLAYER_PROFILE_LEN: usize = 417;
 pub const PLAYER_PROFILE_LEN: usize = 449;
@@ -190,6 +194,89 @@ pub fn generated_block_id_at(global_config: &GlobalConfigView, args: &GeneratedB
         return BLOCK_BASALT;
     }
     BLOCK_STONE
+}
+
+pub fn generated_block_id_at_world(
+    global_config: &GlobalConfigView,
+    world_x: i32,
+    y: i16,
+    world_z: i32,
+) -> Result<u16, NicechunkChunkError> {
+    if global_config.chunk_size != 16 {
+        return Err(NicechunkChunkError::InvalidGlobalConfigData);
+    }
+    if y < global_config.min_build_y || y > global_config.max_build_y {
+        return Err(NicechunkChunkError::InvalidBlockCoordinate);
+    }
+    let chunk_size = global_config.chunk_size as i32;
+    let args = GeneratedBlockArgs {
+        chunk_x: world_x.div_euclid(chunk_size),
+        chunk_z: world_z.div_euclid(chunk_size),
+        local_x: world_x.rem_euclid(chunk_size) as u8,
+        y,
+        local_z: world_z.rem_euclid(chunk_size) as u8,
+    };
+    Ok(generated_block_id_at(global_config, &args))
+}
+
+#[derive(Clone, Copy)]
+pub struct TreeFellBlock {
+    pub world_x: i32,
+    pub world_y: i16,
+    pub world_z: i32,
+    pub block_id: u16,
+}
+
+pub fn is_tree_trunk_block(block_id: u16) -> bool {
+    block_id == BLOCK_TRUNK || block_id == BLOCK_PINE_TRUNK
+}
+
+pub fn is_tree_leaf_block(block_id: u16) -> bool {
+    block_id == BLOCK_LEAVES || block_id == BLOCK_PINE_LEAVES
+}
+
+pub fn generated_tree_fell_blocks(
+    global_config: &GlobalConfigView,
+    cut_x: i32,
+    cut_y: i16,
+    cut_z: i32,
+) -> Result<Vec<TreeFellBlock>, NicechunkChunkError> {
+    let surface = generated_surface_height(global_config, cut_x, cut_z);
+    let tree = generated_tree_at(global_config, cut_x, cut_z, surface);
+    if !tree.exists {
+        return Err(NicechunkChunkError::GeneratedBlockMismatch);
+    }
+    if cut_y < tree.base_y || cut_y >= tree.base_y.saturating_add(tree.trunk_height) {
+        return Err(NicechunkChunkError::GeneratedBlockMismatch);
+    }
+
+    let top_y = surface.saturating_add(TREE_MAX_BLOCK_HEIGHT_ABOVE_SURFACE);
+    let mut blocks = Vec::with_capacity(TREE_FELL_MAX_BLOCKS);
+    for y in cut_y..=top_y {
+        for z in
+            cut_z.saturating_sub(TREE_MAX_LEAF_RADIUS)..=cut_z.saturating_add(TREE_MAX_LEAF_RADIUS)
+        {
+            for x in cut_x.saturating_sub(TREE_MAX_LEAF_RADIUS)
+                ..=cut_x.saturating_add(TREE_MAX_LEAF_RADIUS)
+            {
+                let tree_block = generated_tree_volume_block(global_config, &tree, x, y, z);
+                if tree_block == BLOCK_AIR {
+                    continue;
+                }
+                blocks.push(TreeFellBlock {
+                    world_x: x,
+                    world_y: y,
+                    world_z: z,
+                    block_id: tree_block,
+                });
+            }
+        }
+    }
+
+    if blocks.is_empty() || blocks.len() > TREE_FELL_MAX_BLOCKS {
+        return Err(NicechunkChunkError::InvalidInstruction);
+    }
+    Ok(blocks)
 }
 
 fn generated_coal_seam_at(
@@ -1191,7 +1278,9 @@ impl ResourceDropTableState {
     }
 }
 
-pub fn unpack_resource_drop_rules(data: &[u8]) -> Result<Vec<ResourceDropRule>, NicechunkChunkError> {
+pub fn unpack_resource_drop_rules(
+    data: &[u8],
+) -> Result<Vec<ResourceDropRule>, NicechunkChunkError> {
     let rule_count = ResourceDropTableState::validate_header(data)?;
     let mut rules = Vec::with_capacity(rule_count);
     for index in 0..rule_count {

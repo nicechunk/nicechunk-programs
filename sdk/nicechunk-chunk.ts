@@ -17,8 +17,12 @@ import { NICECHUNK_BACKPACK_PROGRAM_ID } from "./nicechunk-backpack.ts";
 const env = typeof process !== "undefined" ? process.env : {};
 
 export const NICECHUNK_CHUNK_PROGRAM_ID = new PublicKey(
-  env.NICECHUNK_CHUNK_PROGRAM_ID ?? "7JD6kASAfQeiVLUi51mrfWSbeh96ntRJnRiFQKCqUVhn",
+  env.NICECHUNK_CHUNK_PROGRAM_ID ?? env.NICECHUNK_GAME_PROGRAM_ID ?? "6CurnvneezBuHwPUnrCiFg1QMWeUF67ufQxYebyr2UP7",
 );
+export const NICECHUNK_GAME_PROGRAM_ID = new PublicKey(
+  env.NICECHUNK_GAME_PROGRAM_ID ?? "6CurnvneezBuHwPUnrCiFg1QMWeUF67ufQxYebyr2UP7",
+);
+const UNIFIED_GAME_CHUNK_NAMESPACE = 2;
 export const CHUNK_BROKEN_SEED = "chunk-broken";
 export const RESOURCE_DROP_TABLE_SEED = "resource-drops";
 export const CHUNK_BROKEN_MAGIC = "NCBK";
@@ -56,6 +60,12 @@ export const BLOCK_COAL = 47;
 const TREE_MAX_LEAF_RADIUS = 2;
 const TREE_MAX_BLOCK_HEIGHT_ABOVE_SURFACE = 9;
 const MAX_WATER_LEVEL_ABOVE_SEA = 6;
+
+function chunkInstructionData(programId: PublicKey, data: Buffer): Buffer {
+  return programId.equals(NICECHUNK_GAME_PROGRAM_ID)
+    ? Buffer.concat([Buffer.from([UNIFIED_GAME_CHUNK_NAMESPACE]), data])
+    : data;
+}
 
 export interface GeneratedBlockInput {
   chunkX: number;
@@ -203,7 +213,7 @@ export function createMineBlockInstruction({
       { pubkey: globalConfig, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
-    data,
+    data: chunkInstructionData(chunkProgramId, data),
   });
 }
 
@@ -267,7 +277,7 @@ export function createMineBlockWithRewardsInstruction({
       { pubkey: backpack, isSigner: false, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
-    data,
+    data: chunkInstructionData(chunkProgramId, data),
   });
 }
 
@@ -309,7 +319,7 @@ export function createInitializeResourceDropTableInstruction({
       { pubkey: globalConfig, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
-    data,
+    data: chunkInstructionData(chunkProgramId, data),
   });
 }
 

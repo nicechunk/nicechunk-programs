@@ -662,7 +662,7 @@ fn remove_backpack_resource<'a>(
             solana_program::instruction::AccountMeta::new(*seller.key, true),
             solana_program::instruction::AccountMeta::new(*backpack.key, false),
         ],
-        data: vec![2, source_index as u8],
+        data: backpack_cpi_data(&[2, source_index as u8]),
     };
     invoke(&ix, &[seller.clone(), backpack.clone()])
 }
@@ -692,6 +692,7 @@ fn append_market_resource_to_backpack<'a>(
     data.extend_from_slice(&record.world_x.to_le_bytes());
     data.extend_from_slice(&record.world_y.to_le_bytes());
     data.extend_from_slice(&record.world_z.to_le_bytes());
+    let data = backpack_cpi_data(&data);
     let ix = solana_program::instruction::Instruction {
         program_id: NICECHUNK_BACKPACK_PROGRAM_ID,
         accounts: vec![
@@ -706,6 +707,19 @@ fn append_market_resource_to_backpack<'a>(
         &[market_authority.clone(), owner.clone(), backpack.clone()],
         &[&[MARKET_AUTHORITY_SEED, &[bump]]],
     )
+}
+
+#[cfg(feature = "unified-game")]
+fn backpack_cpi_data(data: &[u8]) -> Vec<u8> {
+    let mut wrapped = Vec::with_capacity(data.len() + 1);
+    wrapped.push(1);
+    wrapped.extend_from_slice(data);
+    wrapped
+}
+
+#[cfg(not(feature = "unified-game"))]
+fn backpack_cpi_data(data: &[u8]) -> Vec<u8> {
+    data.to_vec()
 }
 
 fn validate_token_account(

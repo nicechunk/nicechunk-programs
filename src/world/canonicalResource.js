@@ -57,6 +57,36 @@ export function canonicalAboveSurfaceBlocksInArea({ minX, maxX, minZ, maxZ, worl
   return out;
 }
 
+export function canonicalTreeFellBlocks({ x, y, z, worldSeed = null, config = null } = {}) {
+  const cfg = resolveCanonicalConfig(config, worldSeed);
+  const cutX = Math.trunc(Number(x) || 0);
+  const cutY = Math.trunc(Number(y) || 0);
+  const cutZ = Math.trunc(Number(z) || 0);
+  const cutBlock = canonicalBlockId(cfg, cutX, cutY, cutZ);
+  if (cutBlock !== WorldMapBlock.Trunk && cutBlock !== WorldMapBlock.PineTrunk) return [];
+
+  const surface = canonicalSurfaceHeight(cfg, cutX, cutZ);
+  const tree = canonicalTreeAt(cfg, cutX, cutZ, surface);
+  if (!tree.exists) return [];
+
+  const out = [];
+  const topY = surface + 9;
+  for (let blockY = cutY; blockY <= topY; blockY += 1) {
+    for (let blockZ = cutZ - 2; blockZ <= cutZ + 2; blockZ += 1) {
+      for (let blockX = cutX - 2; blockX <= cutX + 2; blockX += 1) {
+        const treeBlock = canonicalTreeVolumeBlock(cfg, tree, blockX, blockY, blockZ);
+        if (treeBlock === EMPTY_BLOCK) continue;
+        const actualBlock = canonicalBlockId(cfg, blockX, blockY, blockZ);
+        if (actualBlock !== treeBlock) continue;
+        const type = renderTypeForBlock(actualBlock);
+        if (!type) continue;
+        out.push({ x: blockX, y: blockY, z: blockZ, block: actualBlock, type, key: `${blockX},${blockY},${blockZ}` });
+      }
+    }
+  }
+  return out;
+}
+
 export function isCanonicalMineableBlockId(blockId) {
   return ![EMPTY_BLOCK, WorldMapBlock.Water, WorldMapBlock.Bedrock].includes(Number(blockId));
 }

@@ -12,8 +12,12 @@ import {
 const env = typeof process !== "undefined" ? process.env : {};
 
 export const NICECHUNK_BACKPACK_PROGRAM_ID = new PublicKey(
-  env.NICECHUNK_BACKPACK_PROGRAM_ID ?? "FwTrMDGyRg653L9svvt5aoGii9ZjX1WekSFWcwByjxqt",
+  env.NICECHUNK_BACKPACK_PROGRAM_ID ?? env.NICECHUNK_GAME_PROGRAM_ID ?? "6CurnvneezBuHwPUnrCiFg1QMWeUF67ufQxYebyr2UP7",
 );
+export const NICECHUNK_GAME_PROGRAM_ID = new PublicKey(
+  env.NICECHUNK_GAME_PROGRAM_ID ?? "6CurnvneezBuHwPUnrCiFg1QMWeUF67ufQxYebyr2UP7",
+);
+const UNIFIED_GAME_BACKPACK_NAMESPACE = 1;
 export const BACKPACK_SEED = "backpack";
 export const BACKPACK_MAGIC = "NCKBPK01";
 export const BACKPACK_LEGACY_VERSION = 1;
@@ -31,6 +35,12 @@ export const BACKPACK_SLOT_KIND_BLOCK = 1;
 export const BACKPACK_SLOT_KIND_ITEM = 2;
 export const BACKPACK_ITEM_CATEGORY_MATERIAL = 1;
 export const BACKPACK_ITEM_CATEGORY_FORGED = 2;
+
+function backpackInstructionData(programId: PublicKey, data: Buffer): Buffer {
+  return programId.equals(NICECHUNK_GAME_PROGRAM_ID)
+    ? Buffer.concat([Buffer.from([UNIFIED_GAME_BACKPACK_NAMESPACE]), data])
+    : data;
+}
 
 export interface BackpackResourceRecord {
   worldX: number;
@@ -113,7 +123,7 @@ export function createInitializeBackpackInstruction({
       { pubkey: backpack, isSigner: false, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
-    data,
+    data: backpackInstructionData(backpackProgramId, data),
   });
 }
 
@@ -147,7 +157,7 @@ export function createAppendMinedResourceInstruction({
       { pubkey: playerSession, isSigner: false, isWritable: false },
       { pubkey: backpack, isSigner: false, isWritable: true },
     ],
-    data,
+    data: backpackInstructionData(backpackProgramId, data),
   });
 }
 
@@ -171,7 +181,7 @@ export function createAppendSmeltingItemInstruction({
       { pubkey: owner, isSigner: false, isWritable: false },
       { pubkey: backpack, isSigner: false, isWritable: true },
     ],
-    data: Buffer.concat([Buffer.from([5]), encodeBackpackSlotRecord(slot)]),
+    data: backpackInstructionData(backpackProgramId, Buffer.concat([Buffer.from([5]), encodeBackpackSlotRecord(slot)])),
   });
 }
 

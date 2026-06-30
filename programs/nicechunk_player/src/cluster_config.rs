@@ -7,6 +7,9 @@ compile_error!("Only one cluster feature can be enabled");
 #[cfg(all(feature = "testnet", feature = "mainnet"))]
 compile_error!("Only one cluster feature can be enabled");
 
+pub const NICECHUNK_GAME_PROGRAM_ID: Pubkey =
+    pubkey!("6CurnvneezBuHwPUnrCiFg1QMWeUF67ufQxYebyr2UP7");
+
 #[cfg(feature = "devnet")]
 pub const NICECHUNK_CORE_PROGRAM_ID: Pubkey =
     pubkey!("9EhMCRYMJej1F21KzaA5Zao3khGGc5aJbDGbnxaogQHu");

@@ -248,6 +248,7 @@ fn remove_backpack_resources<'a>(
     data.push((indexes.len() + fuel_indexes.len()) as u8);
     data.extend_from_slice(indexes);
     data.extend_from_slice(fuel_indexes);
+    let data = backpack_cpi_data(&data);
     let ix = Instruction {
         program_id: NICECHUNK_BACKPACK_PROGRAM_ID,
         accounts: vec![
@@ -283,6 +284,7 @@ fn append_smelting_output_to_backpack<'a>(
     };
     output.volume_mm3 = base_volume.saturating_mul(multiplier as u32).max(1);
     output.pack(&mut data[1..])?;
+    let data = backpack_cpi_data(&data);
     let ix = Instruction {
         program_id: NICECHUNK_BACKPACK_PROGRAM_ID,
         accounts: vec![
@@ -297,6 +299,19 @@ fn append_smelting_output_to_backpack<'a>(
         &[smelting_authority.clone(), owner.clone(), backpack.clone()],
         &[&[SMELTING_AUTHORITY_SEED, &[bump]]],
     )
+}
+
+#[cfg(feature = "unified-game")]
+fn backpack_cpi_data(data: &[u8]) -> Vec<u8> {
+    let mut wrapped = Vec::with_capacity(data.len() + 1);
+    wrapped.push(1);
+    wrapped.extend_from_slice(data);
+    wrapped
+}
+
+#[cfg(not(feature = "unified-game"))]
+fn backpack_cpi_data(data: &[u8]) -> Vec<u8> {
+    data.to_vec()
 }
 
 fn validate_recipe_table_pda(

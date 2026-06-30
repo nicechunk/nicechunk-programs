@@ -131,6 +131,34 @@ impl BackpackAccount {
         Ok(())
     }
 
+    pub fn append_resources_lossy(
+        data: &mut [u8],
+        owner: &Pubkey,
+        records: &[BackpackResourceRecord],
+        updated_slot: u64,
+    ) -> ProgramResult {
+        Self::validate_owner(data, owner)?;
+        let capacity = data[Self::CAPACITY_OFFSET];
+        let mut item_count = data[Self::ITEM_COUNT_OFFSET];
+        if records.is_empty() || item_count >= capacity {
+            return Ok(());
+        }
+
+        for record in records {
+            if item_count >= capacity {
+                break;
+            }
+            let offset = Self::RECORDS_OFFSET + item_count as usize * BACKPACK_SLOT_RECORD_LEN;
+            BackpackSlotRecord::from_block_resource(*record)
+                .pack(&mut data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
+            item_count = item_count.saturating_add(1);
+        }
+        data[Self::ITEM_COUNT_OFFSET] = item_count;
+        data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
+            .copy_from_slice(&updated_slot.to_le_bytes());
+        Ok(())
+    }
+
     pub fn append_item(
         data: &mut [u8],
         owner: &Pubkey,
@@ -176,7 +204,8 @@ impl BackpackAccount {
         if start + BACKPACK_SLOT_RECORD_LEN < end {
             data.copy_within(start + BACKPACK_SLOT_RECORD_LEN..end, start);
         }
-        let last_start = Self::RECORDS_OFFSET + (item_count - 1) as usize * BACKPACK_SLOT_RECORD_LEN;
+        let last_start =
+            Self::RECORDS_OFFSET + (item_count - 1) as usize * BACKPACK_SLOT_RECORD_LEN;
         data[last_start..last_start + BACKPACK_SLOT_RECORD_LEN].fill(0);
         data[Self::ITEM_COUNT_OFFSET] = item_count.saturating_sub(1);
         data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
@@ -357,7 +386,6 @@ impl PlayerProfileView {
         }
         Ok(())
     }
-
 }
 
 fn is_supported_player_profile_len(len: usize) -> bool {

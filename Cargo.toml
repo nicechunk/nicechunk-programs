@@ -3,6 +3,7 @@ members = [
   "programs/nicechunk_core",
   "programs/nicechunk_player",
   "programs/nicechunk_chunk",
+  "programs/nicechunk_game",
   "programs/nicechunk_guardian",
   "programs/nicechunk_backpack",
   "programs/nicechunk_market",

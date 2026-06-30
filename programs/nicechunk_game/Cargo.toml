@@ -1,0 +1,23 @@
+[package]
+name = "nicechunk_game"
+version = "0.1.0"
+description = "NiceChunk unified gameplay program"
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "nicechunk_game"
+
+[features]
+default = ["devnet"]
+devnet = []
+testnet = []
+mainnet = []
+no-entrypoint = []
+
+[dependencies]
+solana-program.workspace = true
+nicechunk_backpack = { path = "../nicechunk_backpack", default-features = false, features = ["devnet", "no-entrypoint", "unified-game"] }
+nicechunk_chunk = { path = "../nicechunk_chunk", default-features = false, features = ["devnet", "no-entrypoint", "unified-game"] }
+nicechunk_market = { path = "../nicechunk_market", default-features = false, features = ["devnet", "no-entrypoint", "unified-game"] }
+nicechunk_smelting = { path = "../nicechunk_smelting", default-features = false, features = ["devnet", "no-entrypoint", "unified-game"] }
