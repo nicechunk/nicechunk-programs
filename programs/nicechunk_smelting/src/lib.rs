@@ -23,8 +23,9 @@ pub mod state;
 use cluster_config::NICECHUNK_BACKPACK_PROGRAM_ID;
 use errors::{require_key_eq, NicechunkSmeltingError};
 use state::{
-    BackpackAccountView, RecipeRecord, RecipeTable, RecipeTableInitArgs, RECIPE_MAX_INPUTS,
-    RECIPE_TABLE_SEED, SMELTING_AUTHORITY_SEED,
+    BackpackAccountView, RecipeRecord, RecipeTable, RecipeTableInitArgs,
+    DEFAULT_OUTPUT_VOLUME_DIVISOR, DEFAULT_RESOURCE_VOLUME_MM3, RECIPE_TABLE_SEED,
+    SMELTING_AUTHORITY_SEED,
 };
 
 declare_id!("7imEiNtpiN487HRwrftdLrMFs8TcAnjLE94vKsDgU6L7");
@@ -166,16 +167,19 @@ fn execute_smelting(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8
     let recipe_id = read_u64(payload, 0);
     let input_count = payload[8] as usize;
     let fuel_count = payload[9] as usize;
+    let has_multiplier = payload.len() == 12 + input_count + fuel_count;
+    let multiplier = if has_multiplier { read_u16(payload, 10) } else { 1 };
+    let index_offset = if has_multiplier { 12 } else { 10 };
     if input_count == 0
-        || input_count > RECIPE_MAX_INPUTS
         || fuel_count == 0
         || input_count + fuel_count > 99
-        || payload.len() != 10 + input_count + fuel_count
+        || multiplier == 0
+        || (!has_multiplier && payload.len() != 10 + input_count + fuel_count)
     {
         return Err(NicechunkSmeltingError::InvalidInstruction.into());
     }
-    let indexes = &payload[10..10 + input_count];
-    let fuel_indexes = &payload[10 + input_count..];
+    let indexes = &payload[index_offset..index_offset + input_count];
+    let fuel_indexes = &payload[index_offset + input_count..];
 
     let account_info_iter = &mut accounts.iter();
     let owner = next_account_info(account_info_iter)?;
@@ -213,7 +217,7 @@ fn execute_smelting(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8
 
     {
         let backpack_data = backpack.try_borrow_data()?;
-        BackpackAccountView::validate_recipe_inputs(&backpack_data, owner.key, indexes, fuel_indexes, &recipe)?;
+        BackpackAccountView::validate_recipe_inputs(&backpack_data, owner.key, indexes, fuel_indexes, &recipe, multiplier)?;
     }
 
     remove_backpack_resources(owner, backpack, backpack_program, indexes, fuel_indexes)?;
@@ -225,6 +229,8 @@ fn execute_smelting(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8
             backpack,
             backpack_program,
             &recipe.outputs[output_index],
+            recipe.input_count,
+            multiplier,
         )?;
     }
     Ok(())
@@ -260,11 +266,23 @@ fn append_smelting_output_to_backpack<'a>(
     backpack: &AccountInfo<'a>,
     _backpack_program: &AccountInfo<'a>,
     record: &state::BackpackSlotRecord,
+    recipe_input_count: u8,
+    multiplier: u16,
 ) -> ProgramResult {
     let (_, bump) = Pubkey::find_program_address(&[SMELTING_AUTHORITY_SEED], program_id);
     let mut data = vec![0_u8; 1 + state::BACKPACK_SLOT_RECORD_LEN];
     data[0] = 5;
-    record.pack(&mut data[1..])?;
+    let mut output = *record;
+    let base_volume = if output.volume_mm3 > 0 {
+        output.volume_mm3
+    } else {
+        DEFAULT_RESOURCE_VOLUME_MM3
+            .saturating_mul(recipe_input_count as u32)
+            .saturating_div(DEFAULT_OUTPUT_VOLUME_DIVISOR)
+            .max(1)
+    };
+    output.volume_mm3 = base_volume.saturating_mul(multiplier as u32).max(1);
+    output.pack(&mut data[1..])?;
     let ix = Instruction {
         program_id: NICECHUNK_BACKPACK_PROGRAM_ID,
         accounts: vec![
@@ -350,4 +368,8 @@ fn read_u64(data: &[u8], offset: usize) -> u64 {
         data[offset + 6],
         data[offset + 7],
     ])
+}
+
+fn read_u16(data: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([data[offset], data[offset + 1]])
 }

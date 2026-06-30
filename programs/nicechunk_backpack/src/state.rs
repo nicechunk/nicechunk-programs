@@ -262,6 +262,7 @@ pub struct BackpackSlotRecord {
     pub item_code: u16,
     pub item_id: u64,
     pub item_pda: Pubkey,
+    pub volume_mm3: u32,
 }
 
 impl BackpackSlotRecord {
@@ -277,6 +278,7 @@ impl BackpackSlotRecord {
             item_code: 0,
             item_id: 0,
             item_pda: Pubkey::default(),
+            volume_mm3: 0,
         }
     }
 
@@ -301,6 +303,7 @@ impl BackpackSlotRecord {
                     .try_into()
                     .map_err(|_| NicechunkBackpackError::InvalidInventoryItem)?,
             ),
+            volume_mm3: read_u32(data, 60),
         };
         if record.quantity == 0 {
             return Err(NicechunkBackpackError::InvalidInventoryItem);
@@ -337,6 +340,7 @@ impl BackpackSlotRecord {
         dst[18..20].copy_from_slice(&self.item_code.to_le_bytes());
         dst[20..28].copy_from_slice(&self.item_id.to_le_bytes());
         dst[28..60].copy_from_slice(self.item_pda.as_ref());
+        dst[60..64].copy_from_slice(&self.volume_mm3.to_le_bytes());
         Ok(())
     }
 }

@@ -27,6 +27,10 @@ pub enum NicechunkChunkError {
     UnmineableBlock = 6330,
     ChunkBrokenCapacityExceeded = 6331,
     InvalidPackedCoordinate = 6332,
+    InvalidResourceDropTablePda = 6333,
+    InvalidResourceDropTableData = 6334,
+    InvalidBackpackProgram = 6335,
+    InvalidBackpackOwner = 6336,
 }
 
 impl From<NicechunkChunkError> for ProgramError {

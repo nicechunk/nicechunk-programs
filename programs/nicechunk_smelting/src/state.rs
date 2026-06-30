@@ -15,6 +15,8 @@ pub const BACKPACK_SLOT_RECORD_LEN: usize = 64;
 pub const BACKPACK_SLOT_KIND_BLOCK: u8 = 1;
 pub const BACKPACK_SLOT_KIND_ITEM: u8 = 2;
 pub const BACKPACK_ITEM_CATEGORY_MATERIAL: u8 = 1;
+pub const DEFAULT_RESOURCE_VOLUME_MM3: u32 = 1_000_000;
+pub const DEFAULT_OUTPUT_VOLUME_DIVISOR: u32 = 60;
 const BACKPACK_PACKED_Y_BITS: u16 = 9;
 pub const RECIPE_RECORD_LEN: usize =
     8 + 1 + 1 + 1 + 1 + RECIPE_MAX_INPUTS * BACKPACK_SLOT_RECORD_LEN + RECIPE_MAX_OUTPUTS * BACKPACK_SLOT_RECORD_LEN + 8;
@@ -83,6 +85,7 @@ pub struct BackpackSlotRecord {
     pub item_code: u16,
     pub item_id: u64,
     pub item_pda: Pubkey,
+    pub volume_mm3: u32,
 }
 
 impl BackpackSlotRecord {
@@ -96,6 +99,7 @@ impl BackpackSlotRecord {
             item_code: 0,
             item_id: 0,
             item_pda: Pubkey::default(),
+            volume_mm3: 0,
         }
     }
 
@@ -120,6 +124,7 @@ impl BackpackSlotRecord {
                     .try_into()
                     .map_err(|_| NicechunkSmeltingError::InvalidRecipe)?,
             ),
+            volume_mm3: read_u32(data, 60),
         };
         if record.quantity == 0 {
             return Err(NicechunkSmeltingError::InvalidRecipe);
@@ -156,6 +161,7 @@ impl BackpackSlotRecord {
         dst[18..20].copy_from_slice(&self.item_code.to_le_bytes());
         dst[20..28].copy_from_slice(&self.item_id.to_le_bytes());
         dst[28..60].copy_from_slice(self.item_pda.as_ref());
+        dst[60..64].copy_from_slice(&self.volume_mm3.to_le_bytes());
         Ok(())
     }
 }
@@ -452,9 +458,10 @@ impl BackpackAccountView {
         indexes: &[u8],
         fuel_indexes: &[u8],
         recipe: &RecipeRecord,
+        multiplier: u16,
     ) -> ProgramResult {
         Self::validate_owner(data, owner)?;
-        if indexes.len() != recipe.input_count as usize {
+        if multiplier == 0 || indexes.len() != recipe.input_count as usize * multiplier as usize {
             return Err(NicechunkSmeltingError::InputRecipeMismatch.into());
         }
         let capacity = data[BACKPACK_CAPACITY_OFFSET] as usize;
@@ -465,7 +472,7 @@ impl BackpackAccountView {
         }
 
         let mut seen_indexes = [false; BACKPACK_MAX_CAPACITY];
-        let mut matched_inputs = [false; RECIPE_MAX_INPUTS];
+        let mut matched_inputs = [0_u16; RECIPE_MAX_INPUTS];
         for index in indexes {
             let selected = *index as usize;
             if selected >= item_count || seen_indexes[selected] {
@@ -475,13 +482,18 @@ impl BackpackAccountView {
             let record = Self::slot_at(data, *index)?;
             let mut matched = false;
             for recipe_index in 0..recipe.input_count as usize {
-                if !matched_inputs[recipe_index] && recipe_input_matches(&recipe.inputs[recipe_index], &record) {
-                    matched_inputs[recipe_index] = true;
+                if matched_inputs[recipe_index] < multiplier && recipe_input_matches(&recipe.inputs[recipe_index], &record) {
+                    matched_inputs[recipe_index] = matched_inputs[recipe_index].saturating_add(1);
                     matched = true;
                     break;
                 }
             }
             if !matched {
+                return Err(NicechunkSmeltingError::InputRecipeMismatch.into());
+            }
+        }
+        for matched in matched_inputs.iter().take(recipe.input_count as usize) {
+            if *matched != multiplier {
                 return Err(NicechunkSmeltingError::InputRecipeMismatch.into());
             }
         }

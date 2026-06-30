@@ -8,6 +8,7 @@ export function createWorldState() {
     solidBlocks: new Set(),
     generatedSolidRefs: new Map(),
     removedBlocks: new Set(),
+    pendingMinedBlocks: new Map(),
     placedBlocks: null,
     placedColumnTops: new Map(),
     dynamicWater: new Set(),

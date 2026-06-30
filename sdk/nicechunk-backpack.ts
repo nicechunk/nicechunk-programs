@@ -47,6 +47,7 @@ export interface BackpackSlotRecord {
   itemCode: number;
   itemId: bigint;
   itemPda: PublicKey;
+  volumeMm3?: number;
 }
 
 export interface DecodedBackpack {
@@ -229,6 +230,7 @@ export function backpackSlotFromResource(resource: BackpackResourceRecord): Back
     itemCode: 0,
     itemId: 0n,
     itemPda: PublicKey.default,
+    volumeMm3: 0,
   };
 }
 
@@ -256,6 +258,7 @@ export function decodeBackpackSlotRecord(data: Buffer): BackpackSlotRecord {
     itemCode: data.readUInt16LE(18),
     itemId: data.readBigUInt64LE(20),
     itemPda: new PublicKey(data.subarray(28, 60)),
+    volumeMm3: data.readUInt32LE(60),
   };
 }
 
@@ -271,5 +274,6 @@ export function encodeBackpackSlotRecord(slot: BackpackSlotRecord): Buffer {
   data.writeUInt16LE(slot.itemCode ?? 0, 18);
   data.writeBigUInt64LE(BigInt(slot.itemId ?? 0), 20);
   (slot.itemPda ?? PublicKey.default).toBuffer().copy(data, 28);
+  data.writeUInt32LE(Math.max(0, Math.min(0xffffffff, Math.floor(Number(slot.volumeMm3) || 0))), 60);
   return data;
 }

@@ -12,6 +12,7 @@ import {
   derivePlayerSessionPda,
   NICECHUNK_PLAYER_PROGRAM_ID,
 } from "./nicechunk-player.ts";
+import { NICECHUNK_BACKPACK_PROGRAM_ID } from "./nicechunk-backpack.ts";
 
 const env = typeof process !== "undefined" ? process.env : {};
 
@@ -19,11 +20,13 @@ export const NICECHUNK_CHUNK_PROGRAM_ID = new PublicKey(
   env.NICECHUNK_CHUNK_PROGRAM_ID ?? "7JD6kASAfQeiVLUi51mrfWSbeh96ntRJnRiFQKCqUVhn",
 );
 export const CHUNK_BROKEN_SEED = "chunk-broken";
+export const RESOURCE_DROP_TABLE_SEED = "resource-drops";
 export const CHUNK_BROKEN_MAGIC = "NCBK";
 export const CHUNK_BROKEN_HEADER_LEN = 16;
 export const CHUNK_BROKEN_RECORD_LEN = 3;
 export const CHUNK_BROKEN_INITIAL_CAPACITY = 64;
 export const CHUNK_BROKEN_MAX_CAPACITY = 2048;
+export const RESOURCE_DROP_RULE_LEN = 15;
 export const VERIFY_GENERATED_BLOCK_INSPECT_ONLY = 0xffff;
 export const BLOCK_AIR = 0;
 export const BLOCK_GRASS = 1;
@@ -50,6 +53,9 @@ export const BLOCK_PINE_LEAVES = 25;
 export const BLOCK_MOSS = 37;
 export const BLOCK_SHELL_BED = 46;
 export const BLOCK_COAL = 47;
+const TREE_MAX_LEAF_RADIUS = 2;
+const TREE_MAX_BLOCK_HEIGHT_ABOVE_SURFACE = 9;
+const MAX_WATER_LEVEL_ABOVE_SEA = 6;
 
 export interface GeneratedBlockInput {
   chunkX: number;
@@ -65,6 +71,17 @@ export interface MineBlockInput {
   worldY: number;
   worldZ: number;
   expectedBlockId?: number;
+}
+
+export interface ResourceDropRuleInput {
+  sourceBlockId: number;
+  dropBlockId: number;
+  chanceBps: number;
+  minAltitude: number;
+  maxAltitude: number;
+  minDepth: number;
+  maxDepth: number;
+  salt: number;
 }
 
 export interface MinimalGlobalConfigForBlockVerification {
@@ -115,6 +132,19 @@ export function deriveChunkBrokenPda({
   chunkZBytes.writeInt32LE(chunkZ, 0);
   return PublicKey.findProgramAddressSync(
     [Buffer.from(CHUNK_BROKEN_SEED), globalConfig.toBuffer(), chunkXBytes, chunkZBytes],
+    programId,
+  );
+}
+
+export function deriveResourceDropTablePda({
+  globalConfig,
+  programId = NICECHUNK_CHUNK_PROGRAM_ID,
+}: {
+  globalConfig: PublicKey;
+  programId?: PublicKey;
+}): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from(RESOURCE_DROP_TABLE_SEED), globalConfig.toBuffer()],
     programId,
   );
 }
@@ -177,6 +207,112 @@ export function createMineBlockInstruction({
   });
 }
 
+export function createMineBlockWithRewardsInstruction({
+  payer,
+  owner,
+  block,
+  backpack,
+  sessionAuthority = payer,
+  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
+  playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
+  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
+  chunkSize = 16,
+}: {
+  payer: PublicKey;
+  owner: PublicKey;
+  block: MineBlockInput;
+  backpack: PublicKey;
+  sessionAuthority?: PublicKey;
+  chunkProgramId?: PublicKey;
+  playerProgramId?: PublicKey;
+  coreProgramId?: PublicKey;
+  chunkSize?: number;
+}): TransactionInstruction {
+  if (block.expectedBlockId === undefined) {
+    throw new Error("expectedBlockId is required for canonical mining");
+  }
+  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
+  const [playerProfile] = derivePlayerProfilePda(owner, playerProgramId);
+  const [playerSession] = derivePlayerSessionPda({
+    owner,
+    sessionAuthority,
+    programId: playerProgramId,
+  });
+  const chunkX = Math.floor(block.worldX / chunkSize);
+  const chunkZ = Math.floor(block.worldZ / chunkSize);
+  const [chunkBroken] = deriveChunkBrokenPda({
+    globalConfig,
+    chunkX,
+    chunkZ,
+    programId: chunkProgramId,
+  });
+  const [resourceDropTable] = deriveResourceDropTablePda({ globalConfig, programId: chunkProgramId });
+  const data = Buffer.alloc(13);
+  data.writeUInt8(8, 0);
+  data.writeInt32LE(block.worldX, 1);
+  data.writeInt16LE(block.worldY, 5);
+  data.writeInt32LE(block.worldZ, 7);
+  data.writeUInt16LE(block.expectedBlockId, 11);
+
+  return new TransactionInstruction({
+    programId: chunkProgramId,
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: playerProfile, isSigner: false, isWritable: false },
+      { pubkey: playerSession, isSigner: false, isWritable: false },
+      { pubkey: chunkBroken, isSigner: false, isWritable: true },
+      { pubkey: globalConfig, isSigner: false, isWritable: false },
+      { pubkey: resourceDropTable, isSigner: false, isWritable: false },
+      { pubkey: NICECHUNK_BACKPACK_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: backpack, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+}
+
+export function createInitializeResourceDropTableInstruction({
+  payer,
+  rules,
+  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
+  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
+}: {
+  payer: PublicKey;
+  rules: ResourceDropRuleInput[];
+  chunkProgramId?: PublicKey;
+  coreProgramId?: PublicKey;
+}): TransactionInstruction {
+  if (!rules.length || rules.length > 64) {
+    throw new Error(`Invalid resource drop rule count: ${rules.length}`);
+  }
+  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
+  const [resourceDropTable] = deriveResourceDropTablePda({ globalConfig, programId: chunkProgramId });
+  const data = Buffer.alloc(2 + rules.length * RESOURCE_DROP_RULE_LEN);
+  data.writeUInt8(7, 0);
+  data.writeUInt8(rules.length, 1);
+  rules.forEach((rule, index) => {
+    const offset = 2 + index * RESOURCE_DROP_RULE_LEN;
+    data.writeUInt16LE(rule.sourceBlockId, offset);
+    data.writeUInt16LE(rule.dropBlockId, offset + 2);
+    data.writeUInt16LE(rule.chanceBps, offset + 4);
+    data.writeInt16LE(rule.minAltitude, offset + 6);
+    data.writeInt16LE(rule.maxAltitude, offset + 8);
+    data.writeInt16LE(rule.minDepth, offset + 10);
+    data.writeInt16LE(rule.maxDepth, offset + 12);
+    data.writeUInt8(rule.salt, offset + 14);
+  });
+  return new TransactionInstruction({
+    programId: chunkProgramId,
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: resourceDropTable, isSigner: false, isWritable: true },
+      { pubkey: globalConfig, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+}
+
 export function generatedBlockIdAt(
   globalConfig: MinimalGlobalConfigForBlockVerification,
   block: GeneratedBlockInput,
@@ -204,8 +340,10 @@ function canonicalBlockIdAt(
   if (y > globalConfig.maxBuildY) return BLOCK_AIR;
   const surface = canonicalSurfaceHeight(globalConfig, x, z);
   if (y > surface) {
-    const waterLevel = canonicalWaterLevel(globalConfig, x, z, surface);
-    if (waterLevel !== null && y <= waterLevel) return BLOCK_WATER;
+    if (y <= globalConfig.seaLevel + MAX_WATER_LEVEL_ABOVE_SEA) {
+      const waterLevel = canonicalWaterLevel(globalConfig, x, z, surface);
+      if (waterLevel !== null && y <= waterLevel) return BLOCK_WATER;
+    }
     const treeBlock = canonicalTreeBlockIdAt(globalConfig, x, y, z);
     return treeBlock !== BLOCK_AIR ? treeBlock : BLOCK_AIR;
   }
@@ -330,17 +468,49 @@ function canonicalTreeBlockIdAt(
   y: number,
   z: number,
 ): number {
-  for (let cz = z - 2; cz <= z + 2; cz += 1) {
-    for (let cx = x - 2; cx <= x + 2; cx += 1) {
-      const surface = canonicalSurfaceHeight(globalConfig, cx, cz);
-      if (!canonicalCanGrowTree(globalConfig, cx, cz, surface)) continue;
-      const tree = canonicalTreeAt(globalConfig, cx, cz, surface);
-      if (!tree.exists) continue;
-      const block = canonicalTreeVolumeBlock(globalConfig, tree, x, y, z);
-      if (block !== BLOCK_AIR) return block;
+  let best: { z: number; x: number; block: number } | null = null;
+  for (const cellSize of [7, 9]) {
+    const minCellX = treeCandidateMinCell(x, TREE_MAX_LEAF_RADIUS, cellSize);
+    const maxCellX = treeCandidateMaxCell(x, TREE_MAX_LEAF_RADIUS, cellSize);
+    const minCellZ = treeCandidateMinCell(z, TREE_MAX_LEAF_RADIUS, cellSize);
+    const maxCellZ = treeCandidateMaxCell(z, TREE_MAX_LEAF_RADIUS, cellSize);
+    const inner = Math.max(1, cellSize - 2);
+
+    for (let cellZ = minCellZ; cellZ <= maxCellZ; cellZ += 1) {
+      for (let cellX = minCellX; cellX <= maxCellX; cellX += 1) {
+        const treeX = cellX * cellSize + 1 + (hashCoord3(globalConfig.worldSeed, cellX, 0, cellZ, 401) % inner);
+        const treeZ = cellZ * cellSize + 1 + (hashCoord3(globalConfig.worldSeed, cellX, 0, cellZ, 402) % inner);
+        if (Math.abs(treeX - x) > TREE_MAX_LEAF_RADIUS || Math.abs(treeZ - z) > TREE_MAX_LEAF_RADIUS) continue;
+
+        const wet = canonicalWetAt(globalConfig, treeX, treeZ);
+        if ((wet ? 7 : 9) !== cellSize) continue;
+        const density = wet ? 180 : 218;
+        if ((hashCoord3(globalConfig.worldSeed, cellX, 0, cellZ, 403) & 255) <= density) continue;
+
+        const surface = canonicalSurfaceHeight(globalConfig, treeX, treeZ);
+        if (!treeVerticalBoundsCanContain(surface, y)) continue;
+        if (!canonicalCanGrowTree(globalConfig, treeX, treeZ, surface)) continue;
+        const tree = canonicalTreeFromCandidate(globalConfig, treeX, treeZ, surface);
+        const block = canonicalTreeVolumeBlock(globalConfig, tree, x, y, z);
+        if (block !== BLOCK_AIR && (!best || tree.z < best.z || (tree.z === best.z && tree.x < best.x))) {
+          best = { z: tree.z, x: tree.x, block };
+        }
+      }
     }
   }
-  return BLOCK_AIR;
+  return best?.block ?? BLOCK_AIR;
+}
+
+function treeVerticalBoundsCanContain(surface: number, y: number): boolean {
+  return y >= surface + 1 && y <= surface + TREE_MAX_BLOCK_HEIGHT_ABOVE_SURFACE;
+}
+
+function treeCandidateMinCell(worldCoord: number, radius: number, cellSize: number): number {
+  return divFloor(worldCoord - radius - (cellSize - 2), cellSize);
+}
+
+function treeCandidateMaxCell(worldCoord: number, radius: number, cellSize: number): number {
+  return divFloor(worldCoord + radius - 1, cellSize);
 }
 
 function canonicalCanGrowTree(
@@ -368,11 +538,23 @@ function canonicalTreeAt(globalConfig: MinimalGlobalConfigForBlockVerification, 
   const treeX = originX + 1 + (hashCoord3(globalConfig.worldSeed, cellX, 0, cellZ, 401) % inner);
   const treeZ = originZ + 1 + (hashCoord3(globalConfig.worldSeed, cellX, 0, cellZ, 402) % inner);
   const roll = hashCoord3(globalConfig.worldSeed, cellX, 0, cellZ, 403) & 255;
+  return {
+    ...canonicalTreeFromCandidate(globalConfig, x, z, surface),
+    exists: x === treeX && z === treeZ && roll > density,
+  };
+}
+
+function canonicalTreeFromCandidate(
+  globalConfig: MinimalGlobalConfigForBlockVerification,
+  x: number,
+  z: number,
+  surface: number,
+) {
   const pine = canonicalColdAt(globalConfig, x, z, surface)
     || surface >= globalConfig.seaLevel + 32
     || (hashCoord3(globalConfig.worldSeed, x, surface, z, 404) & 255) > 206;
   const trunkHeight = (pine ? 5 : 4) + (hashCoord3(globalConfig.worldSeed, x, surface, z, 405) % 3);
-  return { exists: x === treeX && z === treeZ && roll > density, x, z, baseY: surface + 1, trunkHeight, pine };
+  return { exists: true, x, z, baseY: surface + 1, trunkHeight, pine };
 }
 
 function canonicalTreeVolumeBlock(
@@ -385,25 +567,34 @@ function canonicalTreeVolumeBlock(
   const top = tree.baseY + tree.trunkHeight;
   if (x === tree.x && z === tree.z && y >= tree.baseY && y < top) return tree.pine ? BLOCK_PINE_TRUNK : BLOCK_TRUNK;
   if (tree.pine) {
-    if (leafLayerContains(globalConfig, tree.x, top - 4, tree.z, x, y, z, 2, 158, 501)) return BLOCK_PINE_LEAVES;
-    if (leafLayerContains(globalConfig, tree.x, top - 3, tree.z, x, y, z, 2, 188, 502)) return BLOCK_PINE_LEAVES;
-    if (leafLayerContains(globalConfig, tree.x, top - 2, tree.z, x, y, z, 1, 218, 503)) return BLOCK_PINE_LEAVES;
-    if (leafLayerContains(globalConfig, tree.x, top - 1, tree.z, x, y, z, 1, 184, 504)) return BLOCK_PINE_LEAVES;
-    if (leafLayerContains(globalConfig, tree.x, top, tree.z, x, y, z, 1, 138, 505)) return BLOCK_PINE_LEAVES;
-    if (x === tree.x && y === top + 1 && z === tree.z) return BLOCK_PINE_LEAVES;
+    const dy = y - top;
+    const layer = dy === -4 ? [2, 158, 501]
+      : dy === -3 ? [2, 188, 502]
+      : dy === -2 ? [1, 218, 503]
+      : dy === -1 ? [1, 184, 504]
+      : dy === 0 ? [1, 138, 505]
+      : null;
+    if (layer && leafLayerContainsAtY(globalConfig, tree.x, tree.z, x, y, z, layer[0], layer[1], layer[2])) {
+      return BLOCK_PINE_LEAVES;
+    }
+    if (dy === 1 && x === tree.x && z === tree.z) return BLOCK_PINE_LEAVES;
     return BLOCK_AIR;
   }
-  if (leafLayerContains(globalConfig, tree.x, top - 2, tree.z, x, y, z, 2, 174, 511)) return BLOCK_LEAVES;
-  if (leafLayerContains(globalConfig, tree.x, top - 1, tree.z, x, y, z, 2, 214, 512)) return BLOCK_LEAVES;
-  if (leafLayerContains(globalConfig, tree.x, top, tree.z, x, y, z, 2, 148, 513)) return BLOCK_LEAVES;
-  if (leafLayerContains(globalConfig, tree.x, top + 1, tree.z, x, y, z, 1, 194, 514)) return BLOCK_LEAVES;
+  const dy = y - top;
+  const layer = dy === -2 ? [2, 174, 511]
+    : dy === -1 ? [2, 214, 512]
+    : dy === 0 ? [2, 148, 513]
+    : dy === 1 ? [1, 194, 514]
+    : null;
+  if (layer && leafLayerContainsAtY(globalConfig, tree.x, tree.z, x, y, z, layer[0], layer[1], layer[2])) {
+    return BLOCK_LEAVES;
+  }
   return BLOCK_AIR;
 }
 
-function leafLayerContains(
+function leafLayerContainsAtY(
   globalConfig: MinimalGlobalConfigForBlockVerification,
   centerX: number,
-  centerY: number,
   centerZ: number,
   x: number,
   y: number,
@@ -412,13 +603,12 @@ function leafLayerContains(
   density: number,
   salt: number,
 ): boolean {
-  if (y !== centerY) return false;
   const dx = x - centerX;
   const dz = z - centerZ;
   if (Math.abs(dx) > radius || Math.abs(dz) > radius) return false;
   if (Math.abs(dx) + Math.abs(dz) > radius + 1) return false;
   const corner = Math.abs(dx) === radius && Math.abs(dz) === radius;
-  const roll = hashCoord3(globalConfig.worldSeed, centerX + dx * 23, centerY, centerZ + dz * 29, salt) & 255;
+  const roll = hashCoord3(globalConfig.worldSeed, centerX + dx * 23, y, centerZ + dz * 29, salt) & 255;
   if (corner && roll < 178) return false;
   return roll <= density;
 }

@@ -5,6 +5,7 @@ use solana_program::{
     clock::Clock,
     declare_id,
     entrypoint::ProgramResult,
+    instruction::{AccountMeta, Instruction},
     msg,
     program::{invoke, invoke_signed},
     pubkey::Pubkey,
@@ -20,13 +21,17 @@ pub mod cluster_config;
 pub mod errors;
 pub mod state;
 
-use cluster_config::{NICECHUNK_CORE_PROGRAM_ID, NICECHUNK_PLAYER_PROGRAM_ID};
+use cluster_config::{
+    NICECHUNK_BACKPACK_PROGRAM_ID, NICECHUNK_CORE_PROGRAM_ID, NICECHUNK_PLAYER_PROGRAM_ID,
+};
 use errors::{require_key_eq, NicechunkChunkError};
 use state::{
-    generated_block_id_at, pack_broken_coord, ChunkBrokenInitArgs, ChunkBrokenState,
-    GlobalConfigView, MineBlockArgs, PlayerProfileView, PlayerSessionView, BLOCK_AIR,
-    BLOCK_BEDROCK, BLOCK_WATER, CHUNK_BROKEN_GROW_BY, CHUNK_BROKEN_INITIAL_CAPACITY,
-    CHUNK_BROKEN_MAX_CAPACITY, CHUNK_BROKEN_SEED,
+    extra_drop_block_id_at, generated_block_id_at, pack_backpack_resource_y, pack_broken_coord,
+    unpack_resource_drop_rules, ChunkBrokenInitArgs, ChunkBrokenState, GlobalConfigView,
+    MineBlockArgs, PlayerProfileView, PlayerSessionView, ResourceDropRule,
+    ResourceDropTableState, BLOCK_AIR, BLOCK_BEDROCK, BLOCK_WATER, CHUNK_BROKEN_GROW_BY,
+    CHUNK_BROKEN_INITIAL_CAPACITY, CHUNK_BROKEN_MAX_CAPACITY, CHUNK_BROKEN_SEED,
+    RESOURCE_DROP_RULE_LEN, RESOURCE_DROP_TABLE_SEED,
 };
 
 declare_id!("7JD6kASAfQeiVLUi51mrfWSbeh96ntRJnRiFQKCqUVhn");
@@ -46,6 +51,8 @@ pub fn process_instruction(
     match tag {
         5 => mine_block(program_id, accounts, payload),
         6 => initialize_chunk_broken(program_id, accounts, payload),
+        7 => initialize_resource_drop_table(program_id, accounts, payload),
+        8 => mine_block_with_rewards(program_id, accounts, payload),
         _ => Err(NicechunkChunkError::InvalidInstruction.into()),
     }
 }
@@ -189,6 +196,289 @@ fn mine_block(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8]) -> 
     ChunkBrokenState::append_packed(&mut data, global_config_view.min_build_y, packed)
 }
 
+fn mine_block_with_rewards(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    payload: &[u8],
+) -> ProgramResult {
+    if accounts.len() != 9 {
+        return Err(NicechunkChunkError::InvalidAccountCount.into());
+    }
+
+    let args = MineBlockArgs::unpack(payload)?;
+    let account_info_iter = &mut accounts.iter();
+    let session_authority = next_account_info(account_info_iter)?;
+    let player_profile = next_account_info(account_info_iter)?;
+    let player_session = next_account_info(account_info_iter)?;
+    let chunk_broken = next_account_info(account_info_iter)?;
+    let global_config = next_account_info(account_info_iter)?;
+    let resource_drop_table = next_account_info(account_info_iter)?;
+    let backpack_program = next_account_info(account_info_iter)?;
+    let backpack = next_account_info(account_info_iter)?;
+    let system_program_account = next_account_info(account_info_iter)?;
+
+    if !session_authority.is_signer || !session_authority.is_writable {
+        return Err(NicechunkChunkError::InvalidSessionAuthority.into());
+    }
+    if !chunk_broken.is_writable || !backpack.is_writable {
+        return Err(NicechunkChunkError::InvalidWritableAccount.into());
+    }
+    require_key_eq(
+        system_program_account.key,
+        &system_program::ID,
+        NicechunkChunkError::InvalidSystemProgram,
+    )?;
+    require_key_eq(
+        player_profile.owner,
+        &NICECHUNK_PLAYER_PROGRAM_ID,
+        NicechunkChunkError::InvalidPlayerProgram,
+    )?;
+    require_key_eq(
+        player_session.owner,
+        &NICECHUNK_PLAYER_PROGRAM_ID,
+        NicechunkChunkError::InvalidPlayerProgram,
+    )?;
+    require_key_eq(
+        backpack_program.key,
+        &NICECHUNK_BACKPACK_PROGRAM_ID,
+        NicechunkChunkError::InvalidBackpackProgram,
+    )?;
+    require_key_eq(
+        backpack.owner,
+        &NICECHUNK_BACKPACK_PROGRAM_ID,
+        NicechunkChunkError::InvalidBackpackOwner,
+    )?;
+
+    let global_config_view = validate_global_config(global_config)?;
+    let generated_args = args.generated_args(&global_config_view)?;
+    generated_args.validate(&global_config_view)?;
+
+    let clock = Clock::get()?;
+    let player_session_data = player_session.try_borrow_data()?;
+    let session = PlayerSessionView::validate(
+        &player_session_data,
+        session_authority.key,
+        player_profile.key,
+        global_config.key,
+        1,
+        clock.unix_timestamp,
+    )?;
+    drop(player_session_data);
+
+    let player_profile_data = player_profile.try_borrow_data()?;
+    PlayerProfileView::validate(&player_profile_data, &session.owner, global_config.key)?;
+    drop(player_profile_data);
+
+    let (chunk_x, chunk_z, local_x, local_z) = args.chunk_coords(&global_config_view)?;
+    let bump = validate_chunk_broken_pda(
+        program_id,
+        chunk_broken.key,
+        global_config.key,
+        chunk_x,
+        chunk_z,
+    )?;
+    validate_resource_drop_table_pda(
+        program_id,
+        resource_drop_table.key,
+        global_config.key,
+    )?;
+
+    let block_id = generated_block_id_at(&global_config_view, &generated_args);
+    if args.expected_block_id != block_id {
+        msg!(
+            "NCKM mismatch x={} y={} z={} cx={} cz={} lx={} lz={} expected={} actual={}",
+            args.world_x,
+            args.world_y,
+            args.world_z,
+            chunk_x,
+            chunk_z,
+            local_x,
+            local_z,
+            args.expected_block_id,
+            block_id
+        );
+        return Err(NicechunkChunkError::GeneratedBlockMismatch.into());
+    }
+    if matches!(block_id, BLOCK_AIR | BLOCK_WATER | BLOCK_BEDROCK) {
+        return Err(NicechunkChunkError::UnmineableBlock.into());
+    }
+
+    let rules = {
+        require_key_eq(
+            resource_drop_table.owner,
+            program_id,
+            NicechunkChunkError::InvalidResourceDropTableData,
+        )?;
+        let data = resource_drop_table.try_borrow_data()?;
+        unpack_resource_drop_rules(&data)?
+    };
+
+    create_or_grow_chunk_broken_if_needed(
+        session_authority,
+        chunk_broken,
+        global_config,
+        system_program_account,
+        program_id,
+        global_config_view.min_build_y,
+        chunk_x,
+        chunk_z,
+        bump,
+        false,
+    )?;
+
+    let packed = pack_broken_coord(
+        local_x,
+        args.world_y,
+        local_z,
+        global_config_view.min_build_y,
+    )?;
+
+    let already_mined = {
+        let data = chunk_broken.try_borrow_data()?;
+        ChunkBrokenState::validate_header(&data, global_config_view.min_build_y)?;
+        ChunkBrokenState::contains_packed(&data, packed)?
+    };
+    if already_mined {
+        return Err(NicechunkChunkError::BlockAlreadyMined.into());
+    }
+
+    {
+        let data = chunk_broken.try_borrow_data()?;
+        let (count, capacity) =
+            ChunkBrokenState::validate_header(&data, global_config_view.min_build_y)?;
+        if count >= capacity {
+            drop(data);
+            create_or_grow_chunk_broken_if_needed(
+                session_authority,
+                chunk_broken,
+                global_config,
+                system_program_account,
+                program_id,
+                global_config_view.min_build_y,
+                chunk_x,
+                chunk_z,
+                bump,
+                true,
+            )?;
+        }
+    }
+
+    {
+        let mut data = chunk_broken.try_borrow_mut_data()?;
+        ChunkBrokenState::append_packed(&mut data, global_config_view.min_build_y, packed)?;
+    }
+
+    append_backpack_block_resource(
+        backpack_program,
+        session_authority,
+        player_profile,
+        player_session,
+        backpack,
+        args.world_x,
+        pack_backpack_resource_y(args.world_y, block_id, global_config_view.min_build_y),
+        args.world_z,
+    )?;
+
+    if let Some(drop_block_id) = extra_drop_block_id_at(
+        &global_config_view,
+        &rules,
+        args.world_x,
+        args.world_y,
+        args.world_z,
+        block_id,
+    ) {
+        append_backpack_block_resource(
+            backpack_program,
+            session_authority,
+            player_profile,
+            player_session,
+            backpack,
+            args.world_x,
+            pack_backpack_resource_y(args.world_y, drop_block_id, global_config_view.min_build_y),
+            args.world_z,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn initialize_resource_drop_table(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    payload: &[u8],
+) -> ProgramResult {
+    if accounts.len() != 4 || payload.is_empty() {
+        return Err(NicechunkChunkError::InvalidInstruction.into());
+    }
+
+    let rule_count = payload[0] as usize;
+    if rule_count == 0 || payload.len() != 1 + rule_count * RESOURCE_DROP_RULE_LEN {
+        return Err(NicechunkChunkError::InvalidResourceDropTableData.into());
+    }
+
+    let mut rules = Vec::with_capacity(rule_count);
+    for index in 0..rule_count {
+        let offset = 1 + index * RESOURCE_DROP_RULE_LEN;
+        rules.push(ResourceDropRule::unpack(
+            &payload[offset..offset + RESOURCE_DROP_RULE_LEN],
+        )?);
+    }
+
+    let account_info_iter = &mut accounts.iter();
+    let payer = next_account_info(account_info_iter)?;
+    let resource_drop_table = next_account_info(account_info_iter)?;
+    let global_config = next_account_info(account_info_iter)?;
+    let system_program_account = next_account_info(account_info_iter)?;
+
+    if !payer.is_signer || !payer.is_writable {
+        return Err(NicechunkChunkError::InvalidPayer.into());
+    }
+    if !resource_drop_table.is_writable {
+        return Err(NicechunkChunkError::InvalidWritableAccount.into());
+    }
+    require_key_eq(
+        system_program_account.key,
+        &system_program::ID,
+        NicechunkChunkError::InvalidSystemProgram,
+    )?;
+    validate_global_config(global_config)?;
+    let bump = validate_resource_drop_table_pda(
+        program_id,
+        resource_drop_table.key,
+        global_config.key,
+    )?;
+    if resource_drop_table.owner == program_id {
+        return Err(NicechunkChunkError::InvalidResourceDropTableData.into());
+    }
+    if resource_drop_table.owner != &system_program::ID || resource_drop_table.data_len() != 0 {
+        return Err(NicechunkChunkError::InvalidSystemAccount.into());
+    }
+
+    let len = ResourceDropTableState::len_for_rules(rules.len());
+    let rent = Rent::get()?;
+    let lamports = rent.minimum_balance(len);
+    let seeds = &[RESOURCE_DROP_TABLE_SEED, global_config.key.as_ref(), &[bump]];
+    let create = system_instruction::create_account(
+        payer.key,
+        resource_drop_table.key,
+        lamports,
+        len as u64,
+        program_id,
+    );
+    invoke_signed(
+        &create,
+        &[
+            payer.clone(),
+            resource_drop_table.clone(),
+            system_program_account.clone(),
+        ],
+        &[seeds],
+    )?;
+
+    let mut data = resource_drop_table.try_borrow_mut_data()?;
+    ResourceDropTableState::pack(&mut data, bump, &rules)
+}
+
 fn initialize_chunk_broken(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -288,6 +578,59 @@ fn validate_chunk_broken_pda(
         NicechunkChunkError::InvalidChunkBrokenPda,
     )?;
     Ok(bump)
+}
+
+fn validate_resource_drop_table_pda(
+    program_id: &Pubkey,
+    resource_drop_table: &Pubkey,
+    global_config: &Pubkey,
+) -> Result<u8, solana_program::program_error::ProgramError> {
+    let (expected_table, bump) = Pubkey::find_program_address(
+        &[RESOURCE_DROP_TABLE_SEED, global_config.as_ref()],
+        program_id,
+    );
+    require_key_eq(
+        resource_drop_table,
+        &expected_table,
+        NicechunkChunkError::InvalidResourceDropTablePda,
+    )?;
+    Ok(bump)
+}
+
+fn append_backpack_block_resource<'a>(
+    backpack_program: &AccountInfo<'a>,
+    session_authority: &AccountInfo<'a>,
+    player_profile: &AccountInfo<'a>,
+    player_session: &AccountInfo<'a>,
+    backpack: &AccountInfo<'a>,
+    world_x: i32,
+    packed_y: i16,
+    world_z: i32,
+) -> ProgramResult {
+    let mut data = [0_u8; 11];
+    data[0] = 1;
+    data[1..5].copy_from_slice(&world_x.to_le_bytes());
+    data[5..7].copy_from_slice(&packed_y.to_le_bytes());
+    data[7..11].copy_from_slice(&world_z.to_le_bytes());
+    let ix = Instruction {
+        program_id: *backpack_program.key,
+        accounts: vec![
+            AccountMeta::new_readonly(*session_authority.key, true),
+            AccountMeta::new_readonly(*player_profile.key, false),
+            AccountMeta::new_readonly(*player_session.key, false),
+            AccountMeta::new(*backpack.key, false),
+        ],
+        data: data.to_vec(),
+    };
+    invoke(
+        &ix,
+        &[
+            session_authority.clone(),
+            player_profile.clone(),
+            player_session.clone(),
+            backpack.clone(),
+        ],
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

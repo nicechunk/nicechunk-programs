@@ -103,7 +103,10 @@ export function createChunkGroup({ THREE, chunkX, chunkZ, state, geometryByType,
     reedTip: [],
     mushroomStem: [],
     mushroomCap: [],
+    pendingMine: [],
   };
+  const previousPendingMineMatrixList = state.pendingMineMatrixList;
+  state.pendingMineMatrixList = matrices.pendingMine;
 
   const transform = new THREE.Matrix4();
   const scale = new THREE.Vector3(1, 1, 1);
@@ -207,7 +210,9 @@ export function createChunkGroup({ THREE, chunkX, chunkZ, state, geometryByType,
   const chunkMeshSolidKeys = new Set();
   for (const list of Object.values(matrices)) {
     for (const entry of list) {
-      if (entry.meshable && entry.block && !state.removedBlocks.has(entry.block.key)) chunkMeshSolidKeys.add(entry.block.key);
+      if ((entry.meshable || entry.occludesVoxelFaces) && entry.block && !state.removedBlocks.has(entry.block.key)) {
+        chunkMeshSolidKeys.add(entry.block.key);
+      }
     }
   }
 
@@ -250,6 +255,8 @@ export function createChunkGroup({ THREE, chunkX, chunkZ, state, geometryByType,
     group.add(mesh);
   }
 
+  if (previousPendingMineMatrixList === undefined) delete state.pendingMineMatrixList;
+  else state.pendingMineMatrixList = previousPendingMineMatrixList;
   return group;
 }
 
@@ -1102,6 +1109,17 @@ function pushBlock(state, list, type, x, y, z, transform, rotation, scale, THREE
   const visualY = isShortWaterVisualType(type) ? y + waterVisualCenterOffset : y;
   const visualScale = isShortWaterVisualType(type) ? new THREE.Vector3(1, waterVisualHeightScale, 1) : scale;
   const block = { x, y, z, type, key };
+  if (state.pendingMinedBlocks?.has(key)) {
+    const pendingList = state.pendingMineMatrixList ?? null;
+    const targetList = pendingList || list;
+    targetList.push({
+      matrix: composeMatrix(x, visualY, z, transform, rotation, visualScale, THREE),
+      block,
+      tint: blockTint(type, x, y, z),
+      occludesVoxelFaces: true,
+    });
+    return;
+  }
   if (isMeshableVoxelType(type)) {
     list.push({
       x,

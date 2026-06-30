@@ -11,6 +11,15 @@ pub const CHUNK_BROKEN_INITIAL_CAPACITY: u16 = 64;
 pub const CHUNK_BROKEN_GROW_BY: u16 = 64;
 pub const CHUNK_BROKEN_MAX_CAPACITY: u16 = 2048;
 pub const CHUNK_BROKEN_MAX_Y_OFFSET: i32 = 511;
+pub const RESOURCE_DROP_TABLE_MAGIC: [u8; 8] = *b"NCKDRP01";
+pub const RESOURCE_DROP_TABLE_VERSION: u8 = 1;
+pub const RESOURCE_DROP_TABLE_SEED: &[u8] = b"resource-drops";
+pub const RESOURCE_DROP_TABLE_HEADER_LEN: usize = 16;
+pub const RESOURCE_DROP_RULE_LEN: usize = 15;
+pub const RESOURCE_DROP_RULE_MAX_COUNT: usize = 64;
+pub const RESOURCE_DROP_CHANCE_DENOMINATOR: u32 = 10_000;
+pub const BACKPACK_PACKED_Y_BITS: i32 = 9;
+pub const BACKPACK_PACKED_Y_MASK: i32 = (1 << BACKPACK_PACKED_Y_BITS) - 1;
 
 pub const GLOBAL_CONFIG_LEN: usize = 293;
 pub const GLOBAL_CONFIG_MAGIC: [u8; 8] = *b"NCKCFG01";
@@ -46,6 +55,9 @@ pub const BLOCK_PINE_LEAVES: u16 = 25;
 pub const BLOCK_MOSS: u16 = 37;
 pub const BLOCK_SHELL_BED: u16 = 46;
 pub const BLOCK_COAL: u16 = 47;
+const TREE_MAX_LEAF_RADIUS: i32 = 2;
+const TREE_MAX_BLOCK_HEIGHT_ABOVE_SURFACE: i16 = 9;
+const MAX_WATER_LEVEL_ABOVE_SEA: i16 = 6;
 
 pub const LEGACY_PLAYER_PROFILE_LEN: usize = 417;
 pub const PLAYER_PROFILE_LEN: usize = 449;
@@ -135,12 +147,22 @@ pub fn generated_block_id_at(global_config: &GlobalConfigView, args: &GeneratedB
         return BLOCK_AIR;
     }
     if args.y > surface {
-        let water_level = generated_water_level(global_config, world_x, world_z, surface);
-        if water_level.map(|level| args.y <= level).unwrap_or(false) {
-            return BLOCK_WATER;
+        if args.y
+            <= global_config
+                .sea_level
+                .saturating_add(MAX_WATER_LEVEL_ABOVE_SEA)
+        {
+            let water_level = generated_water_level(global_config, world_x, world_z, surface);
+            if water_level.map(|level| args.y <= level).unwrap_or(false) {
+                return BLOCK_WATER;
+            }
         }
         let tree_block = generated_tree_block_id_at(global_config, world_x, args.y, world_z);
-        return if tree_block != BLOCK_AIR { tree_block } else { BLOCK_AIR };
+        return if tree_block != BLOCK_AIR {
+            tree_block
+        } else {
+            BLOCK_AIR
+        };
     }
     if args.y == surface {
         return generated_surface_block_id(global_config, world_x, world_z, surface);
@@ -157,7 +179,13 @@ pub fn generated_block_id_at(global_config: &GlobalConfigView, args: &GeneratedB
         return BLOCK_DEEP_STONE;
     }
     if generated_volcanic_at(global_config, world_x, world_z) > 238
-        && hash_coord3(&global_config.world_seed, world_x, args.y as i32, world_z, 601) > 210
+        && hash_coord3(
+            &global_config.world_seed,
+            world_x,
+            args.y as i32,
+            world_z,
+            601,
+        ) > 210
     {
         return BLOCK_BASALT;
     }
@@ -190,7 +218,8 @@ fn generated_coal_seam_at(
         y as i32,
         world_z.saturating_sub((y as i32).saturating_mul(5)),
         302,
-    ) % 100 >= 38
+    ) % 100
+        >= 38
 }
 
 pub fn generated_surface_height(
@@ -213,17 +242,15 @@ pub fn generated_surface_height(
     let shelf = terrain.shelf;
     let inland = terrain.inland;
 
-    let ocean = global_config.sea_level as i32
-        - 16
+    let ocean = global_config.sea_level as i32 - 16
         + ((value_noise2(&global_config.world_seed, wx, wz, 96, 24) as i32 - 128) * 5) / 128
         + ((value_noise2(&global_config.world_seed, wx, wz, 36, 25) as i32 - 128) * 2) / 128;
     let coast = global_config.sea_level as i32 - 3 + (shelf as i32 * 8) / 1024;
-    let plains = ((value_noise2(&global_config.world_seed, wx, wz, 120, 26) as i32 - 128) * 4)
-        / 128;
-    let hills = ((value_noise2(&global_config.world_seed, wx, wz, 56, 27) as i32 - 128) * 7)
-        / 128;
-    let rolling = ((value_noise2(&global_config.world_seed, wx, wz, 28, 28) as i32 - 128) * 2)
-        / 128;
+    let plains =
+        ((value_noise2(&global_config.world_seed, wx, wz, 120, 26) as i32 - 128) * 4) / 128;
+    let hills = ((value_noise2(&global_config.world_seed, wx, wz, 56, 27) as i32 - 128) * 7) / 128;
+    let rolling =
+        ((value_noise2(&global_config.world_seed, wx, wz, 28, 28) as i32 - 128) * 2) / 128;
     let roughness = smooth_range_fixed(
         (value_noise2(&global_config.world_seed, wx, wz, 180, 40) as i32 - 128).abs(),
         54,
@@ -234,13 +261,14 @@ pub fn generated_surface_height(
         (value_noise2(&global_config.world_seed, wx, wz, 96, 29) as i32 - 128).abs();
     let ridge_lift = smooth_range_fixed(mountain_ridge, 70, 124);
     let mountain_mass = scale_by_fixed(
-        smooth_range_fixed(value_noise2(&global_config.world_seed, wx, wz, 300, 30) as i32, 194, 244) as i32,
+        smooth_range_fixed(
+            value_noise2(&global_config.world_seed, wx, wz, 300, 30) as i32,
+            194,
+            244,
+        ) as i32,
         inland,
     );
-    let mountain = scale_by_fixed(
-        6 + scale_by_fixed(20, ridge_lift),
-        mountain_mass as u32,
-    );
+    let mountain = scale_by_fixed(6 + scale_by_fixed(20, ridge_lift), mountain_mass as u32);
 
     let mut land = global_config.sea_level as i32
         + 7
@@ -249,15 +277,13 @@ pub fn generated_surface_height(
         + mountain;
     if terrain.water_mask > 0 {
         let water_level = generated_inland_water_level(global_config, wx, wz);
-        let water_bed = water_level as i32
-            - 3
-            - (terrain.water_mask as i32 * 2) / 1024
+        let water_bed = water_level as i32 - 3 - (terrain.water_mask as i32 * 2) / 1024
             + (value_noise2(&global_config.world_seed, wx, wz, 32, 39) as i32 - 128) / 128;
         land = lerp_i32_fixed(land, water_bed, terrain.water_mask);
     }
 
-    lerp_i32_fixed(ocean, coast.max(land), shelf)
-        .clamp(min_surface as i32, max_surface as i32) as i16
+    lerp_i32_fixed(ocean, coast.max(land), shelf).clamp(min_surface as i32, max_surface as i32)
+        as i16
 }
 
 fn generated_surface_block_id(
@@ -286,24 +312,43 @@ fn generated_surface_block_id(
         return BLOCK_SAND;
     }
     if generated_volcanic_at(global_config, world_x, world_z) > 246 {
-        return if value_noise2(&global_config.world_seed, world_x, world_z, 64, 106) > 180 { BLOCK_BASALT } else { BLOCK_ASH };
+        return if value_noise2(&global_config.world_seed, world_x, world_z, 64, 106) > 180 {
+            BLOCK_BASALT
+        } else {
+            BLOCK_ASH
+        };
     }
     if generated_cold_at(global_config, world_x, world_z, surface) {
         return if surface > global_config.sea_level.saturating_add(34)
             || value_noise2(&global_config.world_seed, world_x, world_z, 72, 107) > 164
-        { BLOCK_SNOW } else { BLOCK_FROZEN_SOIL };
+        {
+            BLOCK_SNOW
+        } else {
+            BLOCK_FROZEN_SOIL
+        };
     }
     if desert > 178 {
-        if desert > 226 && value_noise2(&global_config.world_seed, world_x, world_z, 88, 108) > 188 {
+        if desert > 226 && value_noise2(&global_config.world_seed, world_x, world_z, 88, 108) > 188
+        {
             return BLOCK_SALT_FLAT;
         }
-        return if desert > 204 { BLOCK_SAND } else { BLOCK_DRY_DIRT };
+        return if desert > 204 {
+            BLOCK_SAND
+        } else {
+            BLOCK_DRY_DIRT
+        };
     }
     if moisture > 188 {
-        if moisture > 224 && value_noise2(&global_config.world_seed, world_x, world_z, 72, 109) > 168 {
+        if moisture > 224
+            && value_noise2(&global_config.world_seed, world_x, world_z, 72, 109) > 168
+        {
             return BLOCK_MOSS;
         }
-        return if moisture > 208 { BLOCK_MUD } else { BLOCK_GRASS };
+        return if moisture > 208 {
+            BLOCK_MUD
+        } else {
+            BLOCK_GRASS
+        };
     }
     if surface >= global_config.sea_level.saturating_add(36) {
         return BLOCK_STONE;
@@ -320,7 +365,18 @@ fn generated_subsurface_block_id(
     match generated_surface_block_id(global_config, world_x, world_z, surface) {
         BLOCK_SAND | BLOCK_SALT_FLAT | BLOCK_QUICKSAND => BLOCK_SAND,
         BLOCK_MUD | BLOCK_CLAY | BLOCK_MOSS => {
-            if hash_coord3(&global_config.world_seed, world_x, surface as i32 - 1, world_z, 121) > 112 { BLOCK_CLAY } else { BLOCK_MUD }
+            if hash_coord3(
+                &global_config.world_seed,
+                world_x,
+                surface as i32 - 1,
+                world_z,
+                121,
+            ) > 112
+            {
+                BLOCK_CLAY
+            } else {
+                BLOCK_MUD
+            }
         }
         BLOCK_SNOW | BLOCK_FROZEN_SOIL => BLOCK_FROZEN_SOIL,
         BLOCK_BASALT | BLOCK_ASH => BLOCK_BASALT,
@@ -335,23 +391,87 @@ fn generated_tree_block_id_at(
     y: i16,
     world_z: i32,
 ) -> u16 {
-    for tree_z in world_z.saturating_sub(2)..=world_z.saturating_add(2) {
-        for tree_x in world_x.saturating_sub(2)..=world_x.saturating_add(2) {
-            let surface = generated_surface_height(global_config, tree_x, tree_z);
-            if !generated_can_grow_tree(global_config, tree_x, tree_z, surface) {
-                continue;
-            }
-            let tree = generated_tree_at(global_config, tree_x, tree_z, surface);
-            if !tree.exists {
-                continue;
-            }
-            let block = generated_tree_volume_block(global_config, &tree, world_x, y, world_z);
-            if block != BLOCK_AIR {
-                return block;
+    let mut best: Option<(i32, i32, u16)> = None;
+    let tree_x_hash_base = seed_salt_hash(&global_config.world_seed, 401);
+    let tree_z_hash_base = seed_salt_hash(&global_config.world_seed, 402);
+    let tree_roll_hash_base = seed_salt_hash(&global_config.world_seed, 403);
+    for cell_size in [7_i32, 9_i32] {
+        let min_cell_x = tree_candidate_min_cell(world_x, TREE_MAX_LEAF_RADIUS, cell_size);
+        let max_cell_x = tree_candidate_max_cell(world_x, TREE_MAX_LEAF_RADIUS, cell_size);
+        let min_cell_z = tree_candidate_min_cell(world_z, TREE_MAX_LEAF_RADIUS, cell_size);
+        let max_cell_z = tree_candidate_max_cell(world_z, TREE_MAX_LEAF_RADIUS, cell_size);
+        let inner = (cell_size - 2).max(1) as u32;
+
+        for cell_z in min_cell_z..=max_cell_z {
+            for cell_x in min_cell_x..=max_cell_x {
+                let tree_x = cell_x
+                    .saturating_mul(cell_size)
+                    .saturating_add(1)
+                    .saturating_add(
+                        (hash_coord3_from_base(tree_x_hash_base, cell_x, 0, cell_z) % inner) as i32,
+                    );
+                let tree_z = cell_z
+                    .saturating_mul(cell_size)
+                    .saturating_add(1)
+                    .saturating_add(
+                        (hash_coord3_from_base(tree_z_hash_base, cell_x, 0, cell_z) % inner) as i32,
+                    );
+                if tree_x.saturating_sub(world_x).abs() > TREE_MAX_LEAF_RADIUS
+                    || tree_z.saturating_sub(world_z).abs() > TREE_MAX_LEAF_RADIUS
+                {
+                    continue;
+                }
+
+                let wet = generated_wet_at(global_config, tree_x, tree_z);
+                if (if wet { 7 } else { 9 }) != cell_size {
+                    continue;
+                }
+                let density = if wet { 180 } else { 218 };
+                if hash_coord3_from_base(tree_roll_hash_base, cell_x, 0, cell_z) & 255 <= density {
+                    continue;
+                }
+
+                let surface = generated_surface_height(global_config, tree_x, tree_z);
+                if !tree_vertical_bounds_can_contain(surface, y) {
+                    continue;
+                }
+                if !generated_can_grow_tree(global_config, tree_x, tree_z, surface) {
+                    continue;
+                }
+                let tree = generated_tree_from_candidate(global_config, tree_x, tree_z, surface);
+                let block = generated_tree_volume_block(global_config, &tree, world_x, y, world_z);
+                if block != BLOCK_AIR {
+                    match best {
+                        Some((best_z, best_x, _))
+                            if tree.z > best_z || (tree.z == best_z && tree.x >= best_x) => {}
+                        _ => best = Some((tree.z, tree.x, block)),
+                    }
+                }
             }
         }
     }
-    BLOCK_AIR
+    best.map(|(_, _, block)| block).unwrap_or(BLOCK_AIR)
+}
+
+fn tree_vertical_bounds_can_contain(surface: i16, y: i16) -> bool {
+    y >= surface.saturating_add(1)
+        && y <= surface.saturating_add(TREE_MAX_BLOCK_HEIGHT_ABOVE_SURFACE)
+}
+
+fn tree_candidate_min_cell(world_coord: i32, radius: i32, cell_size: i32) -> i32 {
+    div_floor_i32(
+        world_coord
+            .saturating_sub(radius)
+            .saturating_sub(cell_size.saturating_sub(2)),
+        cell_size,
+    )
+}
+
+fn tree_candidate_max_cell(world_coord: i32, radius: i32, cell_size: i32) -> i32 {
+    div_floor_i32(
+        world_coord.saturating_add(radius).saturating_sub(1),
+        cell_size,
+    )
 }
 
 fn generated_can_grow_tree(
@@ -372,6 +492,7 @@ fn generated_can_grow_tree(
 }
 
 struct GeneratedTree {
+    #[allow(dead_code)]
     exists: bool,
     x: i32,
     z: i32,
@@ -380,6 +501,7 @@ struct GeneratedTree {
     pine: bool,
 }
 
+#[allow(dead_code)]
 fn generated_tree_at(
     global_config: &GlobalConfigView,
     world_x: i32,
@@ -392,14 +514,58 @@ fn generated_tree_at(
     let cell_x = div_floor_i32(world_x, cell_size);
     let cell_z = div_floor_i32(world_z, cell_size);
     let inner = (cell_size - 2).max(1) as u32;
-    let tree_x = cell_x.saturating_mul(cell_size).saturating_add(1).saturating_add((hash_coord3(&global_config.world_seed, cell_x, 0, cell_z, 401) % inner) as i32);
-    let tree_z = cell_z.saturating_mul(cell_size).saturating_add(1).saturating_add((hash_coord3(&global_config.world_seed, cell_x, 0, cell_z, 402) % inner) as i32);
+    let tree_x = cell_x
+        .saturating_mul(cell_size)
+        .saturating_add(1)
+        .saturating_add(
+            (hash_coord3(&global_config.world_seed, cell_x, 0, cell_z, 401) % inner) as i32,
+        );
+    let tree_z = cell_z
+        .saturating_mul(cell_size)
+        .saturating_add(1)
+        .saturating_add(
+            (hash_coord3(&global_config.world_seed, cell_x, 0, cell_z, 402) % inner) as i32,
+        );
     let roll = hash_coord3(&global_config.world_seed, cell_x, 0, cell_z, 403) & 255;
+    let tree = generated_tree_from_candidate(global_config, world_x, world_z, surface);
+    GeneratedTree {
+        exists: world_x == tree_x && world_z == tree_z && roll > density,
+        ..tree
+    }
+}
+
+fn generated_tree_from_candidate(
+    global_config: &GlobalConfigView,
+    world_x: i32,
+    world_z: i32,
+    surface: i16,
+) -> GeneratedTree {
     let pine = generated_cold_at(global_config, world_x, world_z, surface)
         || surface >= global_config.sea_level.saturating_add(32)
-        || (hash_coord3(&global_config.world_seed, world_x, surface as i32, world_z, 404) & 255) > 206;
-    let trunk_height = (if pine { 5 } else { 4 }) + (hash_coord3(&global_config.world_seed, world_x, surface as i32, world_z, 405) % 3) as i16;
-    GeneratedTree { exists: world_x == tree_x && world_z == tree_z && roll > density, x: world_x, z: world_z, base_y: surface.saturating_add(1), trunk_height, pine }
+        || (hash_coord3(
+            &global_config.world_seed,
+            world_x,
+            surface as i32,
+            world_z,
+            404,
+        ) & 255)
+            > 206;
+    let trunk_height = (if pine { 5 } else { 4 })
+        + (hash_coord3(
+            &global_config.world_seed,
+            world_x,
+            surface as i32,
+            world_z,
+            405,
+        ) % 3) as i16;
+    GeneratedTree {
+        exists: true,
+        x: world_x,
+        z: world_z,
+        base_y: surface.saturating_add(1),
+        trunk_height,
+        pine,
+    }
 }
 
 fn generated_tree_volume_block(
@@ -411,35 +577,71 @@ fn generated_tree_volume_block(
 ) -> u16 {
     let top = tree.base_y.saturating_add(tree.trunk_height);
     if world_x == tree.x && world_z == tree.z && y >= tree.base_y && y < top {
-        return if tree.pine { BLOCK_PINE_TRUNK } else { BLOCK_TRUNK };
+        return if tree.pine {
+            BLOCK_PINE_TRUNK
+        } else {
+            BLOCK_TRUNK
+        };
     }
     if tree.pine {
-        if leaf_layer_contains(global_config, tree.x, top - 4, tree.z, world_x, y, world_z, 2, 158, 501)
-            || leaf_layer_contains(global_config, tree.x, top - 3, tree.z, world_x, y, world_z, 2, 188, 502)
-            || leaf_layer_contains(global_config, tree.x, top - 2, tree.z, world_x, y, world_z, 1, 218, 503)
-            || leaf_layer_contains(global_config, tree.x, top - 1, tree.z, world_x, y, world_z, 1, 184, 504)
-            || leaf_layer_contains(global_config, tree.x, top, tree.z, world_x, y, world_z, 1, 138, 505)
-            || (world_x == tree.x && y == top.saturating_add(1) && world_z == tree.z)
-        {
+        let dy = y as i32 - top as i32;
+        let layer = match dy {
+            -4 => Some((2, 158, 501)),
+            -3 => Some((2, 188, 502)),
+            -2 => Some((1, 218, 503)),
+            -1 => Some((1, 184, 504)),
+            0 => Some((1, 138, 505)),
+            _ => None,
+        };
+        if let Some((radius, density, salt)) = layer {
+            if leaf_layer_contains_at_y(
+                global_config,
+                tree.x,
+                tree.z,
+                world_x,
+                y,
+                world_z,
+                radius,
+                density,
+                salt,
+            ) {
+                return BLOCK_PINE_LEAVES;
+            }
+        } else if dy == 1 && world_x == tree.x && world_z == tree.z {
             return BLOCK_PINE_LEAVES;
         }
         return BLOCK_AIR;
     }
-    if leaf_layer_contains(global_config, tree.x, top - 2, tree.z, world_x, y, world_z, 2, 174, 511)
-        || leaf_layer_contains(global_config, tree.x, top - 1, tree.z, world_x, y, world_z, 2, 214, 512)
-        || leaf_layer_contains(global_config, tree.x, top, tree.z, world_x, y, world_z, 2, 148, 513)
-        || leaf_layer_contains(global_config, tree.x, top + 1, tree.z, world_x, y, world_z, 1, 194, 514)
-    {
-        return BLOCK_LEAVES;
+    let dy = y as i32 - top as i32;
+    let layer = match dy {
+        -2 => Some((2, 174, 511)),
+        -1 => Some((2, 214, 512)),
+        0 => Some((2, 148, 513)),
+        1 => Some((1, 194, 514)),
+        _ => None,
+    };
+    if let Some((radius, density, salt)) = layer {
+        if leaf_layer_contains_at_y(
+            global_config,
+            tree.x,
+            tree.z,
+            world_x,
+            y,
+            world_z,
+            radius,
+            density,
+            salt,
+        ) {
+            return BLOCK_LEAVES;
+        }
     }
     BLOCK_AIR
 }
 
 #[allow(clippy::too_many_arguments)]
-fn leaf_layer_contains(
+fn leaf_layer_contains_at_y(
     global_config: &GlobalConfigView,
     center_x: i32,
-    center_y: i16,
     center_z: i32,
     world_x: i32,
     y: i16,
@@ -448,9 +650,6 @@ fn leaf_layer_contains(
     density: u32,
     salt: u32,
 ) -> bool {
-    if y != center_y {
-        return false;
-    }
     let dx = world_x.saturating_sub(center_x);
     let dz = world_z.saturating_sub(center_z);
     if dx.abs() > radius || dz.abs() > radius || dx.abs().saturating_add(dz.abs()) > radius + 1 {
@@ -459,7 +658,7 @@ fn leaf_layer_contains(
     let roll = hash_coord3(
         &global_config.world_seed,
         center_x.saturating_add(dx.saturating_mul(23)),
-        center_y as i32,
+        y as i32,
         center_z.saturating_add(dz.saturating_mul(29)),
         salt,
     ) & 255;
@@ -506,16 +705,18 @@ fn generated_terrain_factors(
     world_z: i32,
 ) -> GeneratedTerrainFactors {
     let warp_x =
-        ((value_noise2(&global_config.world_seed, world_x, world_z, 160, 31) as i32 - 128) * 22) / 128;
+        ((value_noise2(&global_config.world_seed, world_x, world_z, 160, 31) as i32 - 128) * 22)
+            / 128;
     let warp_z =
-        ((value_noise2(&global_config.world_seed, world_x, world_z, 160, 32) as i32 - 128) * 22) / 128;
+        ((value_noise2(&global_config.world_seed, world_x, world_z, 160, 32) as i32 - 128) * 22)
+            / 128;
     let wx = world_x.saturating_add(warp_x);
     let wz = world_z.saturating_add(warp_z);
-    let continent =
-        ((value_noise2(&global_config.world_seed, wx, wz, 520, 21) as i32 - 128) * 86) / 128
-            + ((value_noise2(&global_config.world_seed, wx, wz, 220, 22) as i32 - 128) * 42) / 128
-            + ((value_noise2(&global_config.world_seed, wx, wz, 96, 23) as i32 - 128) * 14) / 128
-            + 46;
+    let continent = ((value_noise2(&global_config.world_seed, wx, wz, 520, 21) as i32 - 128) * 86)
+        / 128
+        + ((value_noise2(&global_config.world_seed, wx, wz, 220, 22) as i32 - 128) * 42) / 128
+        + ((value_noise2(&global_config.world_seed, wx, wz, 96, 23) as i32 - 128) * 14) / 128
+        + 46;
     let shelf = smooth_range_fixed(continent, -50, 34);
     let inland = smooth_range_fixed(continent, -8, 78);
     let river_warp_x =
@@ -534,7 +735,11 @@ fn generated_terrain_factors(
             .abs();
     let river = scale_by_fixed(smooth_range_fixed(river_line, 118, 128) as i32, inland);
     let lake = scale_by_fixed(
-        smooth_range_fixed(value_noise2(&global_config.world_seed, wx, wz, 220, 37) as i32, 210, 242) as i32,
+        smooth_range_fixed(
+            value_noise2(&global_config.world_seed, wx, wz, 220, 37) as i32,
+            210,
+            242,
+        ) as i32,
         inland,
     );
     GeneratedTerrainFactors {
@@ -559,7 +764,11 @@ fn generated_water_level(
     if terrain.water_mask <= 96 {
         return None;
     }
-    Some(generated_inland_water_level(global_config, terrain.wx, terrain.wz))
+    Some(generated_inland_water_level(
+        global_config,
+        terrain.wx,
+        terrain.wz,
+    ))
 }
 
 fn generated_inland_water_level(global_config: &GlobalConfigView, wx: i32, wz: i32) -> i16 {
@@ -569,17 +778,15 @@ fn generated_inland_water_level(global_config: &GlobalConfigView, wx: i32, wz: i
 }
 
 fn generated_moisture_at(global_config: &GlobalConfigView, world_x: i32, world_z: i32) -> u32 {
-    (
-        value_noise2(&global_config.world_seed, world_x, world_z, 176, 211) * 3
-            + value_noise2(&global_config.world_seed, world_x, world_z, 72, 212)
-    ) / 4
+    (value_noise2(&global_config.world_seed, world_x, world_z, 176, 211) * 3
+        + value_noise2(&global_config.world_seed, world_x, world_z, 72, 212))
+        / 4
 }
 
 fn generated_desert_score_at(global_config: &GlobalConfigView, world_x: i32, world_z: i32) -> u32 {
-    (
-        value_noise2(&global_config.world_seed, world_x, world_z, 224, 213) * 3
-            + (255 - generated_moisture_at(global_config, world_x, world_z))
-    ) / 4
+    (value_noise2(&global_config.world_seed, world_x, world_z, 224, 213) * 3
+        + (255 - generated_moisture_at(global_config, world_x, world_z)))
+        / 4
 }
 
 fn value_noise2(seed: &[u8; 32], x: i32, z: i32, scale: i32, salt: u32) -> u32 {
@@ -593,7 +800,8 @@ fn value_noise2(seed: &[u8; 32], x: i32, z: i32, scale: i32, salt: u32) -> u32 {
     let a = hash_coord3_from_base(base, cell_x, 0, cell_z) & 255;
     let b = hash_coord3_from_base(base, cell_x.saturating_add(1), 0, cell_z) & 255;
     let c = hash_coord3_from_base(base, cell_x, 0, cell_z.saturating_add(1)) & 255;
-    let d = hash_coord3_from_base(base, cell_x.saturating_add(1), 0, cell_z.saturating_add(1)) & 255;
+    let d =
+        hash_coord3_from_base(base, cell_x.saturating_add(1), 0, cell_z.saturating_add(1)) & 255;
     lerp_fixed(lerp_fixed(a, b, tx), lerp_fixed(c, d, tx), tz)
 }
 
@@ -612,7 +820,12 @@ fn seed_salt_hash(seed: &[u8; 32], salt: u32) -> u32 {
 
 fn hash_coord3_from_base(base: u32, x: i32, y: i32, z: i32) -> u32 {
     let mut hash = base;
-    for byte in x.to_le_bytes().iter().chain(y.to_le_bytes().iter()).chain(z.to_le_bytes().iter()) {
+    for byte in x
+        .to_le_bytes()
+        .iter()
+        .chain(y.to_le_bytes().iter())
+        .chain(z.to_le_bytes().iter())
+    {
         hash ^= *byte as u32;
         hash = hash.wrapping_mul(0x0100_0193);
     }
@@ -626,12 +839,20 @@ fn hash_coord3_from_base(base: u32, x: i32, y: i32, z: i32) -> u32 {
 fn div_floor_i32(value: i32, divisor: i32) -> i32 {
     let quotient = value / divisor;
     let remainder = value % divisor;
-    if remainder != 0 && ((remainder < 0) != (divisor < 0)) { quotient - 1 } else { quotient }
+    if remainder != 0 && ((remainder < 0) != (divisor < 0)) {
+        quotient - 1
+    } else {
+        quotient
+    }
 }
 
 fn positive_mod_i32(value: i32, divisor: i32) -> i32 {
     let remainder = value % divisor;
-    if remainder < 0 { remainder + divisor.abs() } else { remainder }
+    if remainder < 0 {
+        remainder + divisor.abs()
+    } else {
+        remainder
+    }
 }
 
 fn smooth_fixed(distance: i32, scale: i32) -> u32 {
@@ -668,10 +889,14 @@ impl PlayerProfileView {
         if !is_supported_player_profile_len(data.len()) || data[0..8] != PLAYER_PROFILE_MAGIC {
             return Err(NicechunkChunkError::InvalidPlayerProfile.into());
         }
-        if &data[PLAYER_PROFILE_OWNER_OFFSET..PLAYER_PROFILE_OWNER_OFFSET + 32] != authority.as_ref() {
+        if &data[PLAYER_PROFILE_OWNER_OFFSET..PLAYER_PROFILE_OWNER_OFFSET + 32]
+            != authority.as_ref()
+        {
             return Err(NicechunkChunkError::InvalidPlayerAuthority.into());
         }
-        if &data[PLAYER_PROFILE_GLOBAL_CONFIG_OFFSET..PLAYER_PROFILE_GLOBAL_CONFIG_OFFSET + 32] != global_config.as_ref() {
+        if &data[PLAYER_PROFILE_GLOBAL_CONFIG_OFFSET..PLAYER_PROFILE_GLOBAL_CONFIG_OFFSET + 32]
+            != global_config.as_ref()
+        {
             return Err(NicechunkChunkError::InvalidGlobalConfig.into());
         }
         Ok(())
@@ -698,13 +923,19 @@ impl PlayerSessionView {
         if data.len() != PLAYER_SESSION_LEN || data[0..8] != PLAYER_SESSION_MAGIC {
             return Err(NicechunkChunkError::InvalidPlayerSession);
         }
-        if &data[PLAYER_SESSION_AUTHORITY_OFFSET..PLAYER_SESSION_AUTHORITY_OFFSET + 32] != session_authority.as_ref() {
+        if &data[PLAYER_SESSION_AUTHORITY_OFFSET..PLAYER_SESSION_AUTHORITY_OFFSET + 32]
+            != session_authority.as_ref()
+        {
             return Err(NicechunkChunkError::InvalidSessionAuthority);
         }
-        if &data[PLAYER_SESSION_PROFILE_OFFSET..PLAYER_SESSION_PROFILE_OFFSET + 32] != player_profile.as_ref() {
+        if &data[PLAYER_SESSION_PROFILE_OFFSET..PLAYER_SESSION_PROFILE_OFFSET + 32]
+            != player_profile.as_ref()
+        {
             return Err(NicechunkChunkError::InvalidPlayerProfile);
         }
-        if &data[PLAYER_SESSION_GLOBAL_CONFIG_OFFSET..PLAYER_SESSION_GLOBAL_CONFIG_OFFSET + 32] != global_config.as_ref() {
+        if &data[PLAYER_SESSION_GLOBAL_CONFIG_OFFSET..PLAYER_SESSION_GLOBAL_CONFIG_OFFSET + 32]
+            != global_config.as_ref()
+        {
             return Err(NicechunkChunkError::InvalidGlobalConfig);
         }
         if read_i64(data, PLAYER_SESSION_EXPIRES_AT_OFFSET) <= now {
@@ -771,7 +1002,13 @@ impl MineBlockArgs {
         global_config: &GlobalConfigView,
     ) -> Result<GeneratedBlockArgs, NicechunkChunkError> {
         let (chunk_x, chunk_z, local_x, local_z) = self.chunk_coords(global_config)?;
-        Ok(GeneratedBlockArgs { chunk_x, chunk_z, local_x, y: self.world_y, local_z })
+        Ok(GeneratedBlockArgs {
+            chunk_x,
+            chunk_z,
+            local_x,
+            y: self.world_y,
+            local_z,
+        })
     }
 }
 
@@ -811,7 +1048,10 @@ impl ChunkBrokenState {
         }
         let count = read_u16(data, 6);
         let capacity = read_u16(data, 8);
-        if read_i16(data, 10) != min_y || count > capacity || data.len() != Self::len_for_capacity(capacity) {
+        if read_i16(data, 10) != min_y
+            || count > capacity
+            || data.len() != Self::len_for_capacity(capacity)
+        {
             return Err(NicechunkChunkError::InvalidChunkBrokenData);
         }
         Ok((count, capacity))
@@ -843,6 +1083,172 @@ impl ChunkBrokenState {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct ResourceDropRule {
+    pub source_block_id: u16,
+    pub drop_block_id: u16,
+    pub chance_bps: u16,
+    pub min_altitude: i16,
+    pub max_altitude: i16,
+    pub min_depth: i16,
+    pub max_depth: i16,
+    pub salt: u8,
+}
+
+impl ResourceDropRule {
+    pub fn unpack(data: &[u8]) -> Result<Self, NicechunkChunkError> {
+        if data.len() != RESOURCE_DROP_RULE_LEN {
+            return Err(NicechunkChunkError::InvalidResourceDropTableData);
+        }
+        let rule = Self {
+            source_block_id: read_u16(data, 0),
+            drop_block_id: read_u16(data, 2),
+            chance_bps: read_u16(data, 4),
+            min_altitude: read_i16(data, 6),
+            max_altitude: read_i16(data, 8),
+            min_depth: read_i16(data, 10),
+            max_depth: read_i16(data, 12),
+            salt: data[14],
+        };
+        rule.validate()?;
+        Ok(rule)
+    }
+
+    pub fn pack(&self, dst: &mut [u8]) -> ProgramResult {
+        if dst.len() != RESOURCE_DROP_RULE_LEN {
+            return Err(NicechunkChunkError::InvalidResourceDropTableData.into());
+        }
+        self.validate()?;
+        dst[0..2].copy_from_slice(&self.source_block_id.to_le_bytes());
+        dst[2..4].copy_from_slice(&self.drop_block_id.to_le_bytes());
+        dst[4..6].copy_from_slice(&self.chance_bps.to_le_bytes());
+        dst[6..8].copy_from_slice(&self.min_altitude.to_le_bytes());
+        dst[8..10].copy_from_slice(&self.max_altitude.to_le_bytes());
+        dst[10..12].copy_from_slice(&self.min_depth.to_le_bytes());
+        dst[12..14].copy_from_slice(&self.max_depth.to_le_bytes());
+        dst[14] = self.salt;
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), NicechunkChunkError> {
+        if self.source_block_id == BLOCK_AIR
+            || self.source_block_id == BLOCK_WATER
+            || self.source_block_id == BLOCK_BEDROCK
+            || self.drop_block_id == BLOCK_AIR
+            || self.drop_block_id == BLOCK_WATER
+            || self.drop_block_id == BLOCK_BEDROCK
+            || self.chance_bps > RESOURCE_DROP_CHANCE_DENOMINATOR as u16
+            || self.min_altitude > self.max_altitude
+            || self.min_depth > self.max_depth
+        {
+            return Err(NicechunkChunkError::InvalidResourceDropTableData);
+        }
+        Ok(())
+    }
+}
+
+pub struct ResourceDropTableState;
+
+impl ResourceDropTableState {
+    pub fn len_for_rules(rule_count: usize) -> usize {
+        RESOURCE_DROP_TABLE_HEADER_LEN + rule_count * RESOURCE_DROP_RULE_LEN
+    }
+
+    pub fn pack(dst: &mut [u8], bump: u8, rules: &[ResourceDropRule]) -> ProgramResult {
+        if rules.is_empty()
+            || rules.len() > RESOURCE_DROP_RULE_MAX_COUNT
+            || dst.len() != Self::len_for_rules(rules.len())
+        {
+            return Err(NicechunkChunkError::InvalidResourceDropTableData.into());
+        }
+        dst.fill(0);
+        dst[0..8].copy_from_slice(&RESOURCE_DROP_TABLE_MAGIC);
+        dst[8] = RESOURCE_DROP_TABLE_VERSION;
+        dst[9] = bump;
+        dst[10] = rules.len() as u8;
+        for (index, rule) in rules.iter().enumerate() {
+            let offset = RESOURCE_DROP_TABLE_HEADER_LEN + index * RESOURCE_DROP_RULE_LEN;
+            rule.pack(&mut dst[offset..offset + RESOURCE_DROP_RULE_LEN])?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_header(data: &[u8]) -> Result<usize, NicechunkChunkError> {
+        if data.len() < RESOURCE_DROP_TABLE_HEADER_LEN
+            || data[0..8] != RESOURCE_DROP_TABLE_MAGIC
+            || data[8] != RESOURCE_DROP_TABLE_VERSION
+        {
+            return Err(NicechunkChunkError::InvalidResourceDropTableData);
+        }
+        let rule_count = data[10] as usize;
+        if rule_count == 0
+            || rule_count > RESOURCE_DROP_RULE_MAX_COUNT
+            || data.len() != Self::len_for_rules(rule_count)
+        {
+            return Err(NicechunkChunkError::InvalidResourceDropTableData);
+        }
+        Ok(rule_count)
+    }
+}
+
+pub fn unpack_resource_drop_rules(data: &[u8]) -> Result<Vec<ResourceDropRule>, NicechunkChunkError> {
+    let rule_count = ResourceDropTableState::validate_header(data)?;
+    let mut rules = Vec::with_capacity(rule_count);
+    for index in 0..rule_count {
+        let offset = RESOURCE_DROP_TABLE_HEADER_LEN + index * RESOURCE_DROP_RULE_LEN;
+        rules.push(ResourceDropRule::unpack(
+            &data[offset..offset + RESOURCE_DROP_RULE_LEN],
+        )?);
+    }
+    Ok(rules)
+}
+
+pub fn extra_drop_block_id_at(
+    global_config: &GlobalConfigView,
+    rules: &[ResourceDropRule],
+    world_x: i32,
+    world_y: i16,
+    world_z: i32,
+    source_block_id: u16,
+) -> Option<u16> {
+    let surface = generated_surface_height(global_config, world_x, world_z);
+    let altitude = world_y.saturating_sub(global_config.sea_level);
+    let depth = surface.saturating_sub(world_y);
+    for rule in rules {
+        if rule.source_block_id != source_block_id
+            || altitude < rule.min_altitude
+            || altitude > rule.max_altitude
+            || depth < rule.min_depth
+            || depth > rule.max_depth
+        {
+            continue;
+        }
+        let roll = hash_coord3(
+            &global_config.world_seed,
+            world_x,
+            world_y as i32,
+            world_z,
+            700_u32.saturating_add(rule.salt as u32),
+        ) % RESOURCE_DROP_CHANCE_DENOMINATOR;
+        if roll < rule.chance_bps as u32 {
+            return Some(rule.drop_block_id);
+        }
+    }
+    None
+}
+
+pub fn pack_backpack_resource_y(world_y: i16, block_id: u16, min_y: i16) -> i16 {
+    let y_offset = world_y as i32 - min_y as i32;
+    if (0..=BACKPACK_PACKED_Y_MASK).contains(&y_offset)
+        && block_id > 0
+        && block_id < (1_u16 << (16 - BACKPACK_PACKED_Y_BITS))
+    {
+        ((block_id as i32) << BACKPACK_PACKED_Y_BITS | y_offset) as i16
+    } else {
+        world_y
+    }
+}
+
 pub fn pack_broken_coord(
     local_x: u8,
     y: i16,
@@ -857,7 +1263,11 @@ pub fn pack_broken_coord(
         return Err(NicechunkChunkError::InvalidPackedCoordinate);
     }
     let packed = (local_x as u32) | ((local_z as u32) << 4) | ((y_offset as u32) << 8);
-    Ok([(packed & 0xff) as u8, ((packed >> 8) & 0xff) as u8, ((packed >> 16) & 0xff) as u8])
+    Ok([
+        (packed & 0xff) as u8,
+        ((packed >> 8) & 0xff) as u8,
+        ((packed >> 16) & 0xff) as u8,
+    ])
 }
 
 fn read_u16(data: &[u8], offset: usize) -> u16 {
@@ -869,7 +1279,12 @@ fn read_i16(data: &[u8], offset: usize) -> i16 {
 }
 
 fn read_i32(data: &[u8], offset: usize) -> i32 {
-    i32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+    i32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
 }
 
 fn read_i64(data: &[u8], offset: usize) -> i64 {
@@ -914,12 +1329,33 @@ mod tests {
     fn generated_block_id_matches_basic_layers() {
         let config = test_global_config_view();
         let surface = generated_surface_height(&config, 1, 2);
-        let at_surface = GeneratedBlockArgs { chunk_x: 0, chunk_z: 0, local_x: 1, y: surface, local_z: 2 };
-        let below_surface = GeneratedBlockArgs { y: surface - 1, ..at_surface };
-        let deep = GeneratedBlockArgs { y: config.min_build_y + 1, ..at_surface };
-        let bedrock = GeneratedBlockArgs { y: config.min_build_y, ..at_surface };
-        assert_eq!(generated_block_id_at(&config, &at_surface), generated_surface_block_id(&config, 1, 2, surface));
-        assert_eq!(generated_block_id_at(&config, &below_surface), generated_subsurface_block_id(&config, 1, 2, surface));
+        let at_surface = GeneratedBlockArgs {
+            chunk_x: 0,
+            chunk_z: 0,
+            local_x: 1,
+            y: surface,
+            local_z: 2,
+        };
+        let below_surface = GeneratedBlockArgs {
+            y: surface - 1,
+            ..at_surface
+        };
+        let deep = GeneratedBlockArgs {
+            y: config.min_build_y + 1,
+            ..at_surface
+        };
+        let bedrock = GeneratedBlockArgs {
+            y: config.min_build_y,
+            ..at_surface
+        };
+        assert_eq!(
+            generated_block_id_at(&config, &at_surface),
+            generated_surface_block_id(&config, 1, 2, surface)
+        );
+        assert_eq!(
+            generated_block_id_at(&config, &below_surface),
+            generated_subsurface_block_id(&config, 1, 2, surface)
+        );
         assert_eq!(generated_block_id_at(&config, &deep), BLOCK_DEEP_STONE);
         assert_eq!(generated_block_id_at(&config, &bedrock), BLOCK_BEDROCK);
     }
@@ -948,6 +1384,97 @@ mod tests {
     }
 
     #[test]
+    fn tree_candidate_scan_matches_nearby_block_scan() {
+        let config = test_global_config_view();
+        for world_x in -8..8 {
+            for world_z in -8..8 {
+                for y in -2..6 {
+                    assert_eq!(
+                        generated_tree_block_id_at(&config, world_x, y, world_z),
+                        slow_generated_tree_block_id_at(&config, world_x, y, world_z),
+                        "tree query mismatch at {world_x},{y},{world_z}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_candidate_cell_range_covers_nearby_scan_roots() {
+        let config = test_global_config_view();
+        let mut checked_candidates = 0;
+        for world_coord in -128..128 {
+            for cell_size in [7_i32, 9_i32] {
+                let min_cell =
+                    tree_candidate_min_cell(world_coord, TREE_MAX_LEAF_RADIUS, cell_size);
+                let max_cell =
+                    tree_candidate_max_cell(world_coord, TREE_MAX_LEAF_RADIUS, cell_size);
+                let inner = (cell_size - 2).max(1) as u32;
+                for candidate_coord in
+                    world_coord - TREE_MAX_LEAF_RADIUS..=world_coord + TREE_MAX_LEAF_RADIUS
+                {
+                    let cell = div_floor_i32(candidate_coord, cell_size);
+                    let tree_coord = cell
+                        .saturating_mul(cell_size)
+                        .saturating_add(1)
+                        .saturating_add(
+                            (hash_coord3(&config.world_seed, cell, 0, cell, 401) % inner) as i32,
+                        );
+                    if tree_coord == candidate_coord {
+                        checked_candidates += 1;
+                        assert!(
+                            cell >= min_cell && cell <= max_cell,
+                            "candidate cell {cell} outside optimized range {min_cell}..={max_cell}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(checked_candidates > 0);
+    }
+
+    #[test]
+    fn generated_water_level_never_exceeds_static_upper_bound() {
+        let config = test_global_config_view();
+        for world_x in -96..96 {
+            for world_z in -96..96 {
+                let surface = generated_surface_height(&config, world_x, world_z);
+                if let Some(level) = generated_water_level(&config, world_x, world_z, surface) {
+                    assert!(
+                        level <= config.sea_level + MAX_WATER_LEVEL_ABOVE_SEA,
+                        "water level {level} exceeded static bound at {world_x},{world_z}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn slow_generated_tree_block_id_at(
+        global_config: &GlobalConfigView,
+        world_x: i32,
+        y: i16,
+        world_z: i32,
+    ) -> u16 {
+        for tree_z in world_z - TREE_MAX_LEAF_RADIUS..=world_z + TREE_MAX_LEAF_RADIUS {
+            for tree_x in world_x - TREE_MAX_LEAF_RADIUS..=world_x + TREE_MAX_LEAF_RADIUS {
+                let surface = generated_surface_height(global_config, tree_x, tree_z);
+                if !generated_can_grow_tree(global_config, tree_x, tree_z, surface) {
+                    continue;
+                }
+                let tree = generated_tree_at(global_config, tree_x, tree_z, surface);
+                if !tree.exists {
+                    continue;
+                }
+                let block = generated_tree_volume_block(global_config, &tree, world_x, y, world_z);
+                if block != BLOCK_AIR {
+                    return block;
+                }
+            }
+        }
+        BLOCK_AIR
+    }
+
+    #[test]
     fn generated_block_id_can_return_coal_in_deep_seams() {
         let config = test_global_config_view();
         let y = config.min_build_y + 6;
@@ -973,14 +1500,25 @@ mod tests {
     #[test]
     fn generated_block_args_rejects_out_of_range_local_coordinate() {
         let config = test_global_config_view();
-        let args = GeneratedBlockArgs { chunk_x: 0, chunk_z: 0, local_x: 16, y: 0, local_z: 0 };
+        let args = GeneratedBlockArgs {
+            chunk_x: 0,
+            chunk_z: 0,
+            local_x: 16,
+            y: 0,
+            local_z: 0,
+        };
         assert!(args.validate(&config).is_err());
     }
 
     #[test]
     fn mine_block_args_uses_floor_chunk_coords_for_negative_world_coords() {
         let config = test_global_config_view();
-        let args = MineBlockArgs { world_x: -1, world_y: 8, world_z: -17, expected_block_id: BLOCK_STONE };
+        let args = MineBlockArgs {
+            world_x: -1,
+            world_y: 8,
+            world_z: -17,
+            expected_block_id: BLOCK_STONE,
+        };
         assert_eq!(args.chunk_coords(&config).unwrap(), (-1, -2, 15, 15));
     }
 
@@ -990,20 +1528,39 @@ mod tests {
         assert_eq!(ChunkBrokenState::len_for_capacity(64), 208);
         assert_eq!(ChunkBrokenState::len_for_capacity(128), 400);
         let mut data = vec![0_u8; ChunkBrokenState::len_for_capacity(64)];
-        ChunkBrokenState::pack_empty(&mut data, &ChunkBrokenInitArgs { bump: 252, min_y: -32, capacity: 64 }).unwrap();
+        ChunkBrokenState::pack_empty(
+            &mut data,
+            &ChunkBrokenInitArgs {
+                bump: 252,
+                min_y: -32,
+                capacity: 64,
+            },
+        )
+        .unwrap();
         assert_eq!(&data[0..4], &CHUNK_BROKEN_MAGIC);
         assert_eq!(data[4], CHUNK_BROKEN_VERSION);
         assert_eq!(data[5], 252);
         assert_eq!(u16::from_le_bytes(data[6..8].try_into().unwrap()), 0);
         assert_eq!(u16::from_le_bytes(data[8..10].try_into().unwrap()), 64);
         assert_eq!(i16::from_le_bytes(data[10..12].try_into().unwrap()), -32);
-        assert_eq!(ChunkBrokenState::validate_header(&data, -32).unwrap(), (0, 64));
+        assert_eq!(
+            ChunkBrokenState::validate_header(&data, -32).unwrap(),
+            (0, 64)
+        );
     }
 
     #[test]
     fn packed_broken_coord_is_three_bytes_and_detects_duplicates() {
         let mut data = vec![0_u8; ChunkBrokenState::len_for_capacity(2)];
-        ChunkBrokenState::pack_empty(&mut data, &ChunkBrokenInitArgs { bump: 252, min_y: -32, capacity: 2 }).unwrap();
+        ChunkBrokenState::pack_empty(
+            &mut data,
+            &ChunkBrokenInitArgs {
+                bump: 252,
+                min_y: -32,
+                capacity: 2,
+            },
+        )
+        .unwrap();
         let packed = pack_broken_coord(15, -31, 7, -32).unwrap();
         assert_eq!(packed, [0x7f, 0x01, 0x00]);
         assert!(!ChunkBrokenState::contains_packed(&data, packed).unwrap());

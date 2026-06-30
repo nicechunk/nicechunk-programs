@@ -75,6 +75,7 @@ export function createWorldGeometryByType({ THREE, cubeGeometry, waterGeometry, 
     reedTip: cubeGeometry,
     mushroomStem: cubeGeometry,
     mushroomCap: cubeGeometry,
+    pendingMine: cubeGeometry,
     ...(cloudGeometry ? { cloud: cloudGeometry } : {}),
   };
 }
@@ -149,6 +150,7 @@ export function createWorldMaterials({ THREE, includeCloud = false } = {}) {
     reedTip: plantBlockMaterial(THREE, "reedTip"),
     mushroomStem: voxelBlockMaterial(THREE, "mushroomStem"),
     mushroomCap: voxelBlockMaterial(THREE, "mushroomCap"),
+    pendingMine: pendingMineMaterial(THREE),
   };
 
   if (includeCloud) materials.cloud = cloudMaterial(THREE);
@@ -206,6 +208,18 @@ function lavaBlockMaterial(THREE) {
   });
   material.fog = true;
   material.name = "block:lava";
+  return material;
+}
+
+function pendingMineMaterial(THREE) {
+  const material = new THREE.MeshLambertMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.42,
+    depthWrite: false,
+  });
+  material.fog = true;
+  material.name = "block:pendingMine";
   return material;
 }
 

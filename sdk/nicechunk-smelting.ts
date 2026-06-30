@@ -109,6 +109,7 @@ export function createExecuteSmeltingInstruction({
   recipeId,
   inputIndexes,
   fuelIndexes,
+  batchMultiplier = 1,
   smeltingProgramId = NICECHUNK_SMELTING_PROGRAM_ID,
   backpackProgramId = NICECHUNK_BACKPACK_PROGRAM_ID,
 }: {
@@ -118,19 +119,22 @@ export function createExecuteSmeltingInstruction({
   recipeId: bigint | number;
   inputIndexes: number[];
   fuelIndexes: number[];
+  batchMultiplier?: number;
   smeltingProgramId?: PublicKey;
   backpackProgramId?: PublicKey;
 }): TransactionInstruction {
   const [smeltingAuthority] = deriveSmeltingAuthorityPda(smeltingProgramId);
   const indexes = inputIndexes.map((index) => Number(index));
   const fuels = fuelIndexes.map((index) => Number(index));
-  const data = Buffer.alloc(11 + indexes.length + fuels.length);
+  const multiplier = Math.max(1, Math.min(0xffff, Math.floor(Number(batchMultiplier) || 1)));
+  const data = Buffer.alloc(13 + indexes.length + fuels.length);
   data.writeUInt8(2, 0);
   data.writeBigUInt64LE(BigInt(recipeId), 1);
   data.writeUInt8(indexes.length, 9);
   data.writeUInt8(fuels.length, 10);
-  indexes.forEach((index, offset) => data.writeUInt8(index, 11 + offset));
-  fuels.forEach((index, offset) => data.writeUInt8(index, 11 + indexes.length + offset));
+  data.writeUInt16LE(multiplier, 11);
+  indexes.forEach((index, offset) => data.writeUInt8(index, 13 + offset));
+  fuels.forEach((index, offset) => data.writeUInt8(index, 13 + indexes.length + offset));
   return new TransactionInstruction({
     programId: smeltingProgramId,
     keys: [
