@@ -27,6 +27,7 @@ pub enum NicechunkBackpackError {
     InvalidMarketAuthority = 6421,
     InvalidSmeltingAuthority = 6422,
     InvalidInventoryItem = 6423,
+    InvalidForgingMaterial = 6424,
 }
 
 impl From<NicechunkBackpackError> for ProgramError {

@@ -26,6 +26,8 @@ pub enum NicechunkSmeltingError {
     BackpackCapacityExceeded = 6820,
     InvalidSmeltingAuthority = 6821,
     FuelHeatTooLow = 6822,
+    InvalidPlayerProgress = 6823,
+    InvalidPlayerProgressData = 6824,
 }
 
 impl From<NicechunkSmeltingError> for ProgramError {

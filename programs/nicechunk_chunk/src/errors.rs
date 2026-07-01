@@ -31,6 +31,8 @@ pub enum NicechunkChunkError {
     InvalidResourceDropTableData = 6334,
     InvalidBackpackProgram = 6335,
     InvalidBackpackOwner = 6336,
+    InvalidPlayerProgress = 6337,
+    InvalidPlayerProgressData = 6338,
 }
 
 impl From<NicechunkChunkError> for ProgramError {

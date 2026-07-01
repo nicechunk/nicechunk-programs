@@ -11,11 +11,11 @@ pub const CHUNK_BROKEN_INITIAL_CAPACITY: u16 = 64;
 pub const CHUNK_BROKEN_GROW_BY: u16 = 64;
 pub const CHUNK_BROKEN_MAX_CAPACITY: u16 = 2048;
 pub const CHUNK_BROKEN_MAX_Y_OFFSET: i32 = 511;
-pub const RESOURCE_DROP_TABLE_MAGIC: [u8; 8] = *b"NCKDRP01";
-pub const RESOURCE_DROP_TABLE_VERSION: u8 = 1;
-pub const RESOURCE_DROP_TABLE_SEED: &[u8] = b"resource-drops";
+pub const RESOURCE_DROP_TABLE_MAGIC: [u8; 8] = *b"NCKDRP02";
+pub const RESOURCE_DROP_TABLE_VERSION: u8 = 2;
+pub const RESOURCE_DROP_TABLE_SEED: &[u8] = b"resource-drops-v2";
 pub const RESOURCE_DROP_TABLE_HEADER_LEN: usize = 16;
-pub const RESOURCE_DROP_RULE_LEN: usize = 15;
+pub const RESOURCE_DROP_RULE_LEN: usize = 23;
 pub const RESOURCE_DROP_RULE_MAX_COUNT: usize = 64;
 pub const RESOURCE_DROP_CHANCE_DENOMINATOR: u32 = 10_000;
 pub const BACKPACK_PACKED_Y_BITS: i32 = 9;
@@ -77,6 +77,27 @@ pub const PLAYER_SESSION_PROFILE_OFFSET: usize = 76;
 pub const PLAYER_SESSION_GLOBAL_CONFIG_OFFSET: usize = 108;
 pub const PLAYER_SESSION_ALLOWED_ACTIONS_OFFSET: usize = 142;
 pub const PLAYER_SESSION_EXPIRES_AT_OFFSET: usize = 144;
+pub const PLAYER_PROGRESS_MAGIC: [u8; 8] = *b"NCKPRG01";
+pub const PLAYER_PROGRESS_VERSION: u16 = 1;
+pub const PLAYER_PROGRESS_SEED: &[u8] = b"player-progress";
+pub const PLAYER_PROGRESS_LEN: usize = 128;
+pub const PLAYER_PROGRESS_OWNER_OFFSET: usize = 12;
+pub const PLAYER_PROGRESS_GLOBAL_CONFIG_OFFSET: usize = 44;
+pub const PLAYER_PROGRESS_PRECISION_XP_OFFSET: usize = 76;
+pub const PLAYER_PROGRESS_CREATED_SLOT_OFFSET: usize = 84;
+pub const PLAYER_PROGRESS_UPDATED_SLOT_OFFSET: usize = 92;
+pub const PLAYER_PROGRESS_CREATED_AT_OFFSET: usize = 100;
+pub const PLAYER_PROGRESS_SMELTING_XP_OFFSET: usize = 108;
+pub const PLAYER_PROGRESS_EXPLORATION_XP_OFFSET: usize = 116;
+pub const PRECISION_GATHERING_XP_PER_BLOCK: u64 = 1;
+pub const EXPLORATION_XP_PER_EXTRA_DROP: u64 = 1;
+pub const RESOURCE_BLOCK_VOLUME_MM3: u32 = 1_000_000;
+pub const PRECISION_GATHERING_TOTAL_XP_BY_LEVEL: [u64; 11] = [
+    0, 900, 3_481, 8_261, 15_663, 26_054, 39_764, 57_094, 78_323, 103_715, 133_517,
+];
+pub const EXPLORATION_TOTAL_XP_BY_LEVEL: [u64; 11] = [
+    0, 1_250, 4_961, 11_975, 22_994, 38_636, 59_462, 85_991, 118_707, 158_068, 204_510,
+];
 
 pub struct GlobalConfigView {
     pub world_seed: [u8; 32],
@@ -1042,6 +1063,143 @@ impl PlayerSessionView {
     }
 }
 
+pub struct PlayerProgressInitArgs<'a> {
+    pub bump: u8,
+    pub owner: &'a Pubkey,
+    pub global_config: &'a Pubkey,
+    pub created_slot: u64,
+    pub created_at: i64,
+}
+
+pub struct PlayerProgressState {
+    pub precision_gathering_xp: u64,
+    pub smelting_xp: u64,
+    pub exploration_xp: u64,
+}
+
+impl PlayerProgressState {
+    pub fn pack_empty(dst: &mut [u8], args: &PlayerProgressInitArgs) -> ProgramResult {
+        if dst.len() != PLAYER_PROGRESS_LEN {
+            return Err(NicechunkChunkError::InvalidPlayerProgressData.into());
+        }
+        dst.fill(0);
+        dst[0..8].copy_from_slice(&PLAYER_PROGRESS_MAGIC);
+        dst[8..10].copy_from_slice(&PLAYER_PROGRESS_VERSION.to_le_bytes());
+        dst[10] = args.bump;
+        dst[11] = 1;
+        dst[PLAYER_PROGRESS_OWNER_OFFSET..PLAYER_PROGRESS_OWNER_OFFSET + 32]
+            .copy_from_slice(args.owner.as_ref());
+        dst[PLAYER_PROGRESS_GLOBAL_CONFIG_OFFSET..PLAYER_PROGRESS_GLOBAL_CONFIG_OFFSET + 32]
+            .copy_from_slice(args.global_config.as_ref());
+        dst[PLAYER_PROGRESS_PRECISION_XP_OFFSET..PLAYER_PROGRESS_PRECISION_XP_OFFSET + 8]
+            .copy_from_slice(&0_u64.to_le_bytes());
+        dst[PLAYER_PROGRESS_SMELTING_XP_OFFSET..PLAYER_PROGRESS_SMELTING_XP_OFFSET + 8]
+            .copy_from_slice(&0_u64.to_le_bytes());
+        dst[PLAYER_PROGRESS_EXPLORATION_XP_OFFSET..PLAYER_PROGRESS_EXPLORATION_XP_OFFSET + 8]
+            .copy_from_slice(&0_u64.to_le_bytes());
+        dst[PLAYER_PROGRESS_CREATED_SLOT_OFFSET..PLAYER_PROGRESS_CREATED_SLOT_OFFSET + 8]
+            .copy_from_slice(&args.created_slot.to_le_bytes());
+        dst[PLAYER_PROGRESS_UPDATED_SLOT_OFFSET..PLAYER_PROGRESS_UPDATED_SLOT_OFFSET + 8]
+            .copy_from_slice(&args.created_slot.to_le_bytes());
+        dst[PLAYER_PROGRESS_CREATED_AT_OFFSET..PLAYER_PROGRESS_CREATED_AT_OFFSET + 8]
+            .copy_from_slice(&args.created_at.to_le_bytes());
+        Ok(())
+    }
+
+    pub fn validate(
+        data: &[u8],
+        owner: &Pubkey,
+        global_config: &Pubkey,
+    ) -> Result<Self, NicechunkChunkError> {
+        if data.len() != PLAYER_PROGRESS_LEN
+            || data[0..8] != PLAYER_PROGRESS_MAGIC
+            || read_u16(data, 8) != PLAYER_PROGRESS_VERSION
+            || data[11] != 1
+        {
+            return Err(NicechunkChunkError::InvalidPlayerProgressData);
+        }
+        if &data[PLAYER_PROGRESS_OWNER_OFFSET..PLAYER_PROGRESS_OWNER_OFFSET + 32] != owner.as_ref()
+        {
+            return Err(NicechunkChunkError::InvalidPlayerProgress);
+        }
+        if &data[PLAYER_PROGRESS_GLOBAL_CONFIG_OFFSET..PLAYER_PROGRESS_GLOBAL_CONFIG_OFFSET + 32]
+            != global_config.as_ref()
+        {
+            return Err(NicechunkChunkError::InvalidPlayerProgress);
+        }
+        Ok(Self {
+            precision_gathering_xp: read_u64(data, PLAYER_PROGRESS_PRECISION_XP_OFFSET),
+            smelting_xp: read_u64(data, PLAYER_PROGRESS_SMELTING_XP_OFFSET),
+            exploration_xp: read_u64(data, PLAYER_PROGRESS_EXPLORATION_XP_OFFSET),
+        })
+    }
+
+    pub fn precision_gathering_level_from_xp(xp: u64) -> u8 {
+        let mut level = 0_u8;
+        for (index, required_total) in PRECISION_GATHERING_TOTAL_XP_BY_LEVEL.iter().enumerate() {
+            if xp >= *required_total {
+                level = index as u8;
+            }
+        }
+        level.min(10)
+    }
+
+    pub fn precision_gathering_volume_mm3_from_xp(xp: u64) -> u32 {
+        let level = Self::precision_gathering_level_from_xp(xp) as u32;
+        RESOURCE_BLOCK_VOLUME_MM3.saturating_mul(10 + level.saturating_mul(10)) / 100
+    }
+
+    pub fn exploration_level_from_xp(xp: u64) -> u8 {
+        let mut level = 0_u8;
+        for (index, required_total) in EXPLORATION_TOTAL_XP_BY_LEVEL.iter().enumerate() {
+            if xp >= *required_total {
+                level = index as u8;
+            }
+        }
+        level.min(10)
+    }
+
+    pub fn exploration_chance_bps(chance_bps: u16, exploration_xp: u64) -> u16 {
+        let level = Self::exploration_level_from_xp(exploration_xp) as u32;
+        let weighted = (chance_bps as u32)
+            .saturating_mul(100_u32.saturating_add(level.saturating_mul(10)))
+            / 100;
+        weighted.min(RESOURCE_DROP_CHANCE_DENOMINATOR) as u16
+    }
+
+    pub fn add_precision_gathering_xp(
+        data: &mut [u8],
+        owner: &Pubkey,
+        global_config: &Pubkey,
+        gained_xp: u64,
+        updated_slot: u64,
+    ) -> ProgramResult {
+        let state = Self::validate(data, owner, global_config)?;
+        let next_xp = state.precision_gathering_xp.saturating_add(gained_xp);
+        data[PLAYER_PROGRESS_PRECISION_XP_OFFSET..PLAYER_PROGRESS_PRECISION_XP_OFFSET + 8]
+            .copy_from_slice(&next_xp.to_le_bytes());
+        data[PLAYER_PROGRESS_UPDATED_SLOT_OFFSET..PLAYER_PROGRESS_UPDATED_SLOT_OFFSET + 8]
+            .copy_from_slice(&updated_slot.to_le_bytes());
+        Ok(())
+    }
+
+    pub fn add_exploration_xp(
+        data: &mut [u8],
+        owner: &Pubkey,
+        global_config: &Pubkey,
+        gained_xp: u64,
+        updated_slot: u64,
+    ) -> ProgramResult {
+        let state = Self::validate(data, owner, global_config)?;
+        let next_xp = state.exploration_xp.saturating_add(gained_xp);
+        data[PLAYER_PROGRESS_EXPLORATION_XP_OFFSET..PLAYER_PROGRESS_EXPLORATION_XP_OFFSET + 8]
+            .copy_from_slice(&next_xp.to_le_bytes());
+        data[PLAYER_PROGRESS_UPDATED_SLOT_OFFSET..PLAYER_PROGRESS_UPDATED_SLOT_OFFSET + 8]
+            .copy_from_slice(&updated_slot.to_le_bytes());
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct MineBlockArgs {
     pub world_x: i32,
@@ -1180,6 +1338,14 @@ pub struct ResourceDropRule {
     pub min_depth: i16,
     pub max_depth: i16,
     pub salt: u8,
+    pub min_volume_mm3: u32,
+    pub max_volume_mm3: u32,
+}
+
+#[derive(Clone, Copy)]
+pub struct ResourceExtraDrop {
+    pub block_id: u16,
+    pub volume_mm3: u32,
 }
 
 impl ResourceDropRule {
@@ -1196,6 +1362,8 @@ impl ResourceDropRule {
             min_depth: read_i16(data, 10),
             max_depth: read_i16(data, 12),
             salt: data[14],
+            min_volume_mm3: read_u32(data, 15),
+            max_volume_mm3: read_u32(data, 19),
         };
         rule.validate()?;
         Ok(rule)
@@ -1214,6 +1382,8 @@ impl ResourceDropRule {
         dst[10..12].copy_from_slice(&self.min_depth.to_le_bytes());
         dst[12..14].copy_from_slice(&self.max_depth.to_le_bytes());
         dst[14] = self.salt;
+        dst[15..19].copy_from_slice(&self.min_volume_mm3.to_le_bytes());
+        dst[19..23].copy_from_slice(&self.max_volume_mm3.to_le_bytes());
         Ok(())
     }
 
@@ -1227,6 +1397,8 @@ impl ResourceDropRule {
             || self.chance_bps > RESOURCE_DROP_CHANCE_DENOMINATOR as u16
             || self.min_altitude > self.max_altitude
             || self.min_depth > self.max_depth
+            || self.min_volume_mm3 == 0
+            || self.min_volume_mm3 > self.max_volume_mm3
         {
             return Err(NicechunkChunkError::InvalidResourceDropTableData);
         }
@@ -1292,14 +1464,15 @@ pub fn unpack_resource_drop_rules(
     Ok(rules)
 }
 
-pub fn extra_drop_block_id_at(
+pub fn extra_drop_at(
     global_config: &GlobalConfigView,
     rules: &[ResourceDropRule],
     world_x: i32,
     world_y: i16,
     world_z: i32,
     source_block_id: u16,
-) -> Option<u16> {
+    exploration_xp: u64,
+) -> Option<ResourceExtraDrop> {
     let surface = generated_surface_height(global_config, world_x, world_z);
     let altitude = world_y.saturating_sub(global_config.sea_level);
     let depth = surface.saturating_sub(world_y);
@@ -1319,8 +1492,26 @@ pub fn extra_drop_block_id_at(
             world_z,
             700_u32.saturating_add(rule.salt as u32),
         ) % RESOURCE_DROP_CHANCE_DENOMINATOR;
-        if roll < rule.chance_bps as u32 {
-            return Some(rule.drop_block_id);
+        let chance_bps =
+            PlayerProgressState::exploration_chance_bps(rule.chance_bps, exploration_xp);
+        if roll < chance_bps as u32 {
+            let span = rule.max_volume_mm3.saturating_sub(rule.min_volume_mm3);
+            let volume_mm3 = if span == 0 {
+                rule.min_volume_mm3
+            } else {
+                let volume_roll = hash_coord3(
+                    &global_config.world_seed,
+                    world_x,
+                    world_y as i32,
+                    world_z,
+                    900_u32.saturating_add(rule.salt as u32),
+                ) % span.saturating_add(1);
+                rule.min_volume_mm3.saturating_add(volume_roll)
+            };
+            return Some(ResourceExtraDrop {
+                block_id: rule.drop_block_id,
+                volume_mm3,
+            });
         }
     }
     None
@@ -1373,6 +1564,28 @@ fn read_i32(data: &[u8], offset: usize) -> i32 {
         data[offset + 1],
         data[offset + 2],
         data[offset + 3],
+    ])
+}
+
+fn read_u32(data: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
+}
+
+fn read_u64(data: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+        data[offset + 4],
+        data[offset + 5],
+        data[offset + 6],
+        data[offset + 7],
     ])
 }
 

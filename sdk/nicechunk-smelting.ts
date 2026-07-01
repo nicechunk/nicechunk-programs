@@ -9,6 +9,8 @@ import {
   NICECHUNK_BACKPACK_PROGRAM_ID,
 } from "./nicechunk-backpack.ts";
 import type { BackpackSlotRecord } from "./nicechunk-backpack.ts";
+import { deriveGlobalConfigPda, NICECHUNK_CORE_PROGRAM_ID } from "./nicechunk-core.ts";
+import { derivePlayerProgressPda } from "./nicechunk-chunk.ts";
 
 const env = typeof process !== "undefined" ? process.env : {};
 
@@ -26,11 +28,12 @@ export const RECIPE_TABLE_HEADER_LEN = 96;
 export const RECIPE_TABLE_MAX_RECIPES = 12;
 export const RECIPE_MAX_INPUTS = 8;
 export const RECIPE_MAX_OUTPUTS = 4;
+export const RECIPE_YIELD_BPS_DENOMINATOR = 10_000;
 export const RECIPE_RECORD_LEN =
-  8 + 1 + 1 + 1 + 1 + RECIPE_MAX_INPUTS * BACKPACK_SLOT_RECORD_LEN + RECIPE_MAX_OUTPUTS * BACKPACK_SLOT_RECORD_LEN + 8;
+  8 + 1 + 1 + 1 + 1 + 2 + 2 + RECIPE_MAX_INPUTS * BACKPACK_SLOT_RECORD_LEN + RECIPE_MAX_OUTPUTS * BACKPACK_SLOT_RECORD_LEN + 8;
 export const RECIPE_TABLE_LEN = RECIPE_TABLE_HEADER_LEN + RECIPE_TABLE_MAX_RECIPES * RECIPE_RECORD_LEN;
 export const UPSERT_RECIPE_ARGS_LEN =
-  8 + 1 + 1 + 1 + 1 + RECIPE_MAX_INPUTS * BACKPACK_SLOT_RECORD_LEN + RECIPE_MAX_OUTPUTS * BACKPACK_SLOT_RECORD_LEN;
+  8 + 1 + 1 + 1 + 1 + 2 + 2 + RECIPE_MAX_INPUTS * BACKPACK_SLOT_RECORD_LEN + RECIPE_MAX_OUTPUTS * BACKPACK_SLOT_RECORD_LEN;
 
 function smeltingInstructionData(programId: PublicKey, data: Buffer): Buffer {
   return programId.equals(NICECHUNK_GAME_PROGRAM_ID)
@@ -42,6 +45,7 @@ export interface SmeltingRecipeInput {
   recipeId: bigint | number;
   enabled?: boolean;
   minHeatTier?: number;
+  yieldBps?: number;
   inputs: BackpackSlotRecord[];
   outputs: BackpackSlotRecord[];
 }
@@ -122,6 +126,7 @@ export function createExecuteSmeltingInstruction({
   batchMultiplier = 1,
   smeltingProgramId = NICECHUNK_SMELTING_PROGRAM_ID,
   backpackProgramId = NICECHUNK_BACKPACK_PROGRAM_ID,
+  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
 }: {
   owner: PublicKey;
   recipeTable: PublicKey;
@@ -132,8 +137,15 @@ export function createExecuteSmeltingInstruction({
   batchMultiplier?: number;
   smeltingProgramId?: PublicKey;
   backpackProgramId?: PublicKey;
+  coreProgramId?: PublicKey;
 }): TransactionInstruction {
   const [smeltingAuthority] = deriveSmeltingAuthorityPda(smeltingProgramId);
+  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
+  const [playerProgress] = derivePlayerProgressPda({
+    globalConfig,
+    owner,
+    programId: smeltingProgramId,
+  });
   const indexes = inputIndexes.map((index) => Number(index));
   const fuels = fuelIndexes.map((index) => Number(index));
   const multiplier = Math.max(1, Math.min(0xffff, Math.floor(Number(batchMultiplier) || 1)));
@@ -151,8 +163,11 @@ export function createExecuteSmeltingInstruction({
       { pubkey: owner, isSigner: true, isWritable: true },
       { pubkey: recipeTable, isSigner: false, isWritable: false },
       { pubkey: backpack, isSigner: false, isWritable: true },
+      { pubkey: playerProgress, isSigner: false, isWritable: true },
+      { pubkey: globalConfig, isSigner: false, isWritable: false },
       { pubkey: smeltingAuthority, isSigner: false, isWritable: false },
       { pubkey: backpackProgramId, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     data: smeltingInstructionData(smeltingProgramId, data),
   });
@@ -193,7 +208,10 @@ export function encodeSmeltingRecipeArgs(recipe: SmeltingRecipeInput): Buffer {
   data.writeUInt8(recipe.minHeatTier ?? 1, 9);
   data.writeUInt8(recipe.inputs.length, 10);
   data.writeUInt8(recipe.outputs.length, 11);
-  let offset = 12;
+  const yieldBps = Math.max(1, Math.min(RECIPE_YIELD_BPS_DENOMINATOR, Math.floor(Number(recipe.yieldBps) || RECIPE_YIELD_BPS_DENOMINATOR)));
+  data.writeUInt16LE(yieldBps, 12);
+  data.writeUInt16LE(0, 14);
+  let offset = 16;
   for (let index = 0; index < RECIPE_MAX_INPUTS; index += 1) {
     const slot = recipe.inputs[index] ?? recipe.inputs[0];
     encodeBackpackSlotRecord(slot).copy(data, offset);

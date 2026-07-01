@@ -21,20 +21,25 @@ const UNIFIED_GAME_BACKPACK_NAMESPACE = 1;
 export const BACKPACK_SEED = "backpack";
 export const BACKPACK_MAGIC = "NCKBPK01";
 export const BACKPACK_LEGACY_VERSION = 1;
-export const BACKPACK_VERSION = 2;
+export const BACKPACK_V2_VERSION = 2;
+export const BACKPACK_VERSION = 3;
 export const BACKPACK_DEFAULT_CAPACITY = 50;
 export const BACKPACK_MAX_CAPACITY = 99;
 export const BACKPACK_HEADER_LEN = 128;
 export const BACKPACK_LEGACY_RECORD_LEN = 10;
 export const BACKPACK_RESOURCE_RECORD_LEN = 10;
-export const BACKPACK_SLOT_RECORD_LEN = 64;
+export const BACKPACK_V2_SLOT_RECORD_LEN = 64;
+export const BACKPACK_RECIPE_SLOT_RECORD_LEN = BACKPACK_V2_SLOT_RECORD_LEN;
+export const BACKPACK_SLOT_RECORD_LEN = 80;
 export const BACKPACK_RECORD_LEN = BACKPACK_SLOT_RECORD_LEN;
 export const BACKPACK_LEGACY_LEN = BACKPACK_HEADER_LEN + BACKPACK_MAX_CAPACITY * BACKPACK_LEGACY_RECORD_LEN;
+export const BACKPACK_V2_LEN = BACKPACK_HEADER_LEN + BACKPACK_MAX_CAPACITY * BACKPACK_V2_SLOT_RECORD_LEN;
 export const BACKPACK_LEN = BACKPACK_HEADER_LEN + BACKPACK_MAX_CAPACITY * BACKPACK_RECORD_LEN;
 export const BACKPACK_SLOT_KIND_BLOCK = 1;
 export const BACKPACK_SLOT_KIND_ITEM = 2;
 export const BACKPACK_ITEM_CATEGORY_MATERIAL = 1;
 export const BACKPACK_ITEM_CATEGORY_FORGED = 2;
+export const BACKPACK_FORGED_ITEM_CODE = 8;
 
 function backpackInstructionData(programId: PublicKey, data: Buffer): Buffer {
   return programId.equals(NICECHUNK_GAME_PROGRAM_ID)
@@ -58,6 +63,12 @@ export interface BackpackSlotRecord {
   itemId: bigint;
   itemPda: PublicKey;
   volumeMm3?: number;
+  durabilityCurrent?: number;
+  durabilityMax?: number;
+  grade?: number;
+  itemLevel?: number;
+  qualityBps?: number;
+  metadata?: number;
 }
 
 export interface DecodedBackpack {
@@ -132,6 +143,7 @@ export function createAppendMinedResourceInstruction({
   sessionAuthority,
   backpack,
   record,
+  volumeMm3,
   backpackProgramId = NICECHUNK_BACKPACK_PROGRAM_ID,
   playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
 }: {
@@ -139,16 +151,19 @@ export function createAppendMinedResourceInstruction({
   sessionAuthority: PublicKey;
   backpack: PublicKey;
   record: BackpackResourceRecord;
+  volumeMm3?: number;
   backpackProgramId?: PublicKey;
   playerProgramId?: PublicKey;
 }): TransactionInstruction {
   const [playerProfile] = derivePlayerProfilePda(owner, playerProgramId);
   const [playerSession] = derivePlayerSessionPda({ owner, sessionAuthority, programId: playerProgramId });
-  const data = Buffer.alloc(11);
+  const encodedVolume = Math.max(0, Math.min(0xffffffff, Math.floor(Number(volumeMm3) || 0)));
+  const data = Buffer.alloc(encodedVolume > 0 ? 15 : 11);
   data.writeUInt8(1, 0);
   data.writeInt32LE(record.worldX, 1);
   data.writeInt16LE(record.worldY, 5);
   data.writeInt32LE(record.worldZ, 7);
+  if (encodedVolume > 0) data.writeUInt32LE(encodedVolume, 11);
   return new TransactionInstruction({
     programId: backpackProgramId,
     keys: [
@@ -185,14 +200,61 @@ export function createAppendSmeltingItemInstruction({
   });
 }
 
+export function createForgeEquipmentInstruction({
+  owner,
+  backpack,
+  itemId,
+  itemLevel,
+  inputIndexes,
+  backpackProgramId = NICECHUNK_BACKPACK_PROGRAM_ID,
+  playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
+}: {
+  owner: PublicKey;
+  backpack: PublicKey;
+  itemId: bigint | number;
+  itemLevel: number;
+  inputIndexes: number[];
+  backpackProgramId?: PublicKey;
+  playerProgramId?: PublicKey;
+}): TransactionInstruction {
+  const indexes = Array.from(new Set((inputIndexes ?? [])
+    .map((index) => Number(index))
+    .filter((index) => Number.isInteger(index) && index >= 0 && index <= BACKPACK_MAX_CAPACITY - 1)));
+  if (!indexes.length || indexes.length > 24) {
+    throw new Error("Forge equipment requires 1-24 material indexes.");
+  }
+  const [playerProfile] = derivePlayerProfilePda(owner, playerProgramId);
+  const data = Buffer.alloc(11 + indexes.length);
+  data.writeUInt8(7, 0);
+  data.writeBigUInt64LE(BigInt(itemId), 1);
+  data.writeUInt8(Math.max(1, Math.min(100, Math.floor(Number(itemLevel) || 1))), 9);
+  data.writeUInt8(indexes.length, 10);
+  indexes.forEach((index, offset) => data.writeUInt8(index, 11 + offset));
+  return new TransactionInstruction({
+    programId: backpackProgramId,
+    keys: [
+      { pubkey: owner, isSigner: true, isWritable: true },
+      { pubkey: playerProfile, isSigner: false, isWritable: true },
+      { pubkey: backpack, isSigner: false, isWritable: true },
+      { pubkey: playerProgramId, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data: backpackInstructionData(backpackProgramId, data),
+  });
+}
+
 export function decodeBackpack(data: Buffer): DecodedBackpack {
-  if (data.length !== BACKPACK_LEN && data.length !== BACKPACK_LEGACY_LEN) {
-    throw new Error(`Invalid Backpack length: expected ${BACKPACK_LEN} or ${BACKPACK_LEGACY_LEN}, got ${data.length}`);
+  if (data.length !== BACKPACK_LEN && data.length !== BACKPACK_V2_LEN && data.length !== BACKPACK_LEGACY_LEN) {
+    throw new Error(`Invalid Backpack length: expected ${BACKPACK_LEN}, ${BACKPACK_V2_LEN}, or ${BACKPACK_LEGACY_LEN}, got ${data.length}`);
   }
   const magic = data.subarray(0, 8).toString("utf8");
   if (magic !== BACKPACK_MAGIC) throw new Error(`Invalid Backpack magic: ${magic}`);
   const version = data.readUInt16LE(8);
-  const recordLen = version === BACKPACK_LEGACY_VERSION ? BACKPACK_LEGACY_RECORD_LEN : BACKPACK_SLOT_RECORD_LEN;
+  const recordLen = version === BACKPACK_LEGACY_VERSION
+    ? BACKPACK_LEGACY_RECORD_LEN
+    : version === BACKPACK_V2_VERSION
+      ? BACKPACK_V2_SLOT_RECORD_LEN
+      : BACKPACK_SLOT_RECORD_LEN;
   const capacity = data.readUInt8(52);
   const itemCount = data.readUInt8(53);
   const records: BackpackResourceRecord[] = [];
@@ -241,6 +303,12 @@ export function backpackSlotFromResource(resource: BackpackResourceRecord): Back
     itemId: 0n,
     itemPda: PublicKey.default,
     volumeMm3: 0,
+    durabilityCurrent: 0,
+    durabilityMax: 0,
+    grade: 0,
+    itemLevel: 0,
+    qualityBps: 0,
+    metadata: 0,
   };
 }
 
@@ -256,8 +324,8 @@ export function decodeBackpackResourceRecord(data: Buffer): BackpackResourceReco
 }
 
 export function decodeBackpackSlotRecord(data: Buffer): BackpackSlotRecord {
-  if (data.length !== BACKPACK_SLOT_RECORD_LEN) {
-    throw new Error(`Invalid Backpack slot length: expected ${BACKPACK_SLOT_RECORD_LEN}, got ${data.length}`);
+  if (data.length !== BACKPACK_SLOT_RECORD_LEN && data.length !== BACKPACK_V2_SLOT_RECORD_LEN) {
+    throw new Error(`Invalid Backpack slot length: expected ${BACKPACK_SLOT_RECORD_LEN} or ${BACKPACK_V2_SLOT_RECORD_LEN}, got ${data.length}`);
   }
   return {
     kind: data.readUInt8(0),
@@ -269,11 +337,20 @@ export function decodeBackpackSlotRecord(data: Buffer): BackpackSlotRecord {
     itemId: data.readBigUInt64LE(20),
     itemPda: new PublicKey(data.subarray(28, 60)),
     volumeMm3: data.readUInt32LE(60),
+    durabilityCurrent: data.length >= 68 ? data.readUInt32LE(64) : 0,
+    durabilityMax: data.length >= 72 ? data.readUInt32LE(68) : 0,
+    grade: data.length >= 73 ? data.readUInt8(72) : 0,
+    itemLevel: data.length >= 74 ? data.readUInt8(73) : 0,
+    qualityBps: data.length >= 76 ? data.readUInt16LE(74) : 0,
+    metadata: data.length >= 80 ? data.readUInt32LE(76) : 0,
   };
 }
 
-export function encodeBackpackSlotRecord(slot: BackpackSlotRecord): Buffer {
-  const data = Buffer.alloc(BACKPACK_SLOT_RECORD_LEN);
+export function encodeBackpackSlotRecord(slot: BackpackSlotRecord, recordLen = BACKPACK_SLOT_RECORD_LEN): Buffer {
+  if (recordLen !== BACKPACK_SLOT_RECORD_LEN && recordLen !== BACKPACK_V2_SLOT_RECORD_LEN) {
+    throw new Error(`Unsupported Backpack slot record length: ${recordLen}`);
+  }
+  const data = Buffer.alloc(recordLen);
   data.writeUInt8(slot.kind, 0);
   data.writeUInt8(slot.category, 1);
   data.writeUInt16LE(slot.flags ?? 0, 2);
@@ -285,5 +362,13 @@ export function encodeBackpackSlotRecord(slot: BackpackSlotRecord): Buffer {
   data.writeBigUInt64LE(BigInt(slot.itemId ?? 0), 20);
   (slot.itemPda ?? PublicKey.default).toBuffer().copy(data, 28);
   data.writeUInt32LE(Math.max(0, Math.min(0xffffffff, Math.floor(Number(slot.volumeMm3) || 0))), 60);
+  if (recordLen === BACKPACK_SLOT_RECORD_LEN) {
+    data.writeUInt32LE(Math.max(0, Math.min(0xffffffff, Math.floor(Number(slot.durabilityCurrent) || 0))), 64);
+    data.writeUInt32LE(Math.max(0, Math.min(0xffffffff, Math.floor(Number(slot.durabilityMax) || 0))), 68);
+    data.writeUInt8(Math.max(0, Math.min(255, Math.floor(Number(slot.grade) || 0))), 72);
+    data.writeUInt8(Math.max(0, Math.min(255, Math.floor(Number(slot.itemLevel) || 0))), 73);
+    data.writeUInt16LE(Math.max(0, Math.min(0xffff, Math.floor(Number(slot.qualityBps) || 0))), 74);
+    data.writeUInt32LE(Math.max(0, Math.min(0xffffffff, Math.floor(Number(slot.metadata) || 0))), 76);
+  }
   return data;
 }

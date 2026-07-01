@@ -24,9 +24,9 @@ use cluster_config::{
 };
 use errors::{require_key_eq, NicechunkPlayerError};
 use state::{
-    BackpackAccountView, GlobalConfigView, PlayerProfile, PlayerSession, PlayerSessionInitArgs,
-    PLAYER_PROFILE_SEED, PLAYER_SESSION_SEED, SESSION_ACTION_BREAK_BLOCK,
-    SESSION_ACTION_PLACE_BLOCK,
+    BackpackAccountView, GlobalConfigView, PlayerLoadout, PlayerProfile, PlayerSession,
+    PlayerSessionInitArgs, PLAYER_LOADOUT_SEED, PLAYER_PROFILE_SEED, PLAYER_SESSION_SEED,
+    SESSION_ACTION_BREAK_BLOCK, SESSION_ACTION_PLACE_BLOCK,
 };
 
 declare_id!("oeaRMVnPoV4iENnGCCtaEeRxU5be515s4YYe6aXQuKe");
@@ -50,6 +50,8 @@ pub fn process_instruction(
         3 => set_backpack_style(program_id, accounts, payload),
         4 => create_or_refresh_player_session(program_id, accounts, payload),
         5 => set_equipped_backpack(program_id, accounts),
+        6 => set_loadout_slot_code(program_id, accounts, payload),
+        7 => add_forging_xp(program_id, accounts, payload),
         _ => Err(NicechunkPlayerError::InvalidInstruction.into()),
     }
 }
@@ -375,11 +377,168 @@ fn set_equipped_backpack(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progr
         BackpackAccountView::validate_owner(&backpack_data, authority.key)?;
     }
 
-    extend_player_profile_if_needed(authority, player_profile, system_program_account)?;
-
     let clock = Clock::get()?;
     let mut data = player_profile.try_borrow_mut_data()?;
     PlayerProfile::write_equipped_backpack(&mut data, backpack.key, clock.slot)
+}
+
+fn set_loadout_slot_code(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    payload: &[u8],
+) -> ProgramResult {
+    if accounts.len() != 4 || payload.len() < 3 {
+        return Err(NicechunkPlayerError::InvalidInstruction.into());
+    }
+
+    let slot = payload[0];
+    let code_len = read_u16(payload, 1) as usize;
+    if payload.len() != 3 + code_len {
+        return Err(NicechunkPlayerError::InvalidInstruction.into());
+    }
+    let code = &payload[3..];
+
+    let account_info_iter = &mut accounts.iter();
+    let authority = next_account_info(account_info_iter)?;
+    let player_loadout = next_account_info(account_info_iter)?;
+    let global_config = next_account_info(account_info_iter)?;
+    let system_program_account = next_account_info(account_info_iter)?;
+
+    if !authority.is_signer || !authority.is_writable {
+        return Err(NicechunkPlayerError::InvalidPlayerAuthority.into());
+    }
+    if !player_loadout.is_writable {
+        return Err(NicechunkPlayerError::InvalidWritableAccount.into());
+    }
+    require_key_eq(
+        system_program_account.key,
+        &system_program::ID,
+        NicechunkPlayerError::InvalidSystemProgram,
+    )?;
+    require_key_eq(
+        global_config.owner,
+        &NICECHUNK_CORE_PROGRAM_ID,
+        NicechunkPlayerError::InvalidGlobalConfigOwner,
+    )?;
+
+    let (expected_player_loadout, bump) =
+        Pubkey::find_program_address(&[PLAYER_LOADOUT_SEED, authority.key.as_ref()], program_id);
+    require_key_eq(
+        player_loadout.key,
+        &expected_player_loadout,
+        NicechunkPlayerError::InvalidPlayerLoadoutPda,
+    )?;
+
+    let global_config_data = global_config.try_borrow_data()?;
+    let global_config_view = GlobalConfigView::unpack(&global_config_data)?;
+    drop(global_config_data);
+
+    let clock = Clock::get()?;
+    if player_loadout.owner == program_id {
+        {
+            let data = player_loadout.try_borrow_data()?;
+            PlayerLoadout::validate_owner_and_config(&data, authority.key, global_config.key)?;
+        }
+        let mut data = player_loadout.try_borrow_mut_data()?;
+        return PlayerLoadout::write_slot_code(
+            &mut data,
+            slot,
+            code,
+            clock.slot,
+            clock.unix_timestamp,
+        );
+    }
+
+    if player_loadout.owner != &system_program::ID || player_loadout.data_len() != 0 {
+        return Err(NicechunkPlayerError::InvalidSystemAccount.into());
+    }
+
+    create_or_allocate_player_loadout_pda(
+        authority,
+        player_loadout,
+        system_program_account,
+        program_id,
+        authority.key,
+        bump,
+    )?;
+
+    let mut data = player_loadout.try_borrow_mut_data()?;
+    PlayerLoadout::pack_default(
+        &mut data,
+        bump,
+        authority.key,
+        global_config.key,
+        global_config_view.world_id,
+        clock.slot,
+        clock.unix_timestamp,
+    )?;
+    PlayerLoadout::write_slot_code(&mut data, slot, code, clock.slot, clock.unix_timestamp)
+}
+
+fn add_forging_xp(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    payload: &[u8],
+) -> ProgramResult {
+    if accounts.len() != 4 || payload.len() != 10 {
+        return Err(NicechunkPlayerError::InvalidInstruction.into());
+    }
+    let grade = payload[0].max(1).min(10);
+    let item_level = payload[1].max(1).min(100);
+    let gained_xp = read_u64(payload, 2);
+    if gained_xp == 0 {
+        return Err(NicechunkPlayerError::InvalidInstruction.into());
+    }
+
+    let account_info_iter = &mut accounts.iter();
+    let owner = next_account_info(account_info_iter)?;
+    let forging_authority = next_account_info(account_info_iter)?;
+    let player_profile = next_account_info(account_info_iter)?;
+    let system_program_account = next_account_info(account_info_iter)?;
+
+    if !owner.is_signer || !owner.is_writable {
+        return Err(NicechunkPlayerError::InvalidPlayerAuthority.into());
+    }
+    if !forging_authority.is_signer
+        || (forging_authority.owner != &NICECHUNK_BACKPACK_PROGRAM_ID
+            && forging_authority.owner != &NICECHUNK_GAME_PROGRAM_ID)
+    {
+        return Err(NicechunkPlayerError::InvalidForgingAuthority.into());
+    }
+    if !player_profile.is_writable {
+        return Err(NicechunkPlayerError::InvalidWritableAccount.into());
+    }
+    require_key_eq(
+        system_program_account.key,
+        &system_program::ID,
+        NicechunkPlayerError::InvalidSystemProgram,
+    )?;
+    require_key_eq(
+        player_profile.owner,
+        program_id,
+        NicechunkPlayerError::InvalidPlayerProfileOwner,
+    )?;
+    let (expected_player_profile, _) =
+        Pubkey::find_program_address(&[PLAYER_PROFILE_SEED, owner.key.as_ref()], program_id);
+    require_key_eq(
+        player_profile.key,
+        &expected_player_profile,
+        NicechunkPlayerError::InvalidPlayerProfilePda,
+    )?;
+    {
+        let data = player_profile.try_borrow_data()?;
+        PlayerProfile::validate_owner(&data, owner.key)?;
+    }
+    let clock = Clock::get()?;
+    let mut data = player_profile.try_borrow_mut_data()?;
+    PlayerProfile::add_forging_result(
+        &mut data,
+        owner.key,
+        gained_xp,
+        grade,
+        item_level,
+        clock.slot,
+    )
 }
 
 fn validate_player_write_accounts(
@@ -554,56 +713,64 @@ fn create_or_allocate_player_session_pda<'a>(
     Ok(())
 }
 
-fn extend_player_profile_if_needed<'a>(
+fn create_or_allocate_player_loadout_pda<'a>(
     payer: &AccountInfo<'a>,
-    player_profile: &AccountInfo<'a>,
+    player_loadout: &AccountInfo<'a>,
     system_program_account: &AccountInfo<'a>,
+    program_id: &Pubkey,
+    owner: &Pubkey,
+    bump: u8,
 ) -> ProgramResult {
-    if player_profile.data_len() == PlayerProfile::LEN {
+    let rent = Rent::get()?;
+    let lamports = rent.minimum_balance(PlayerLoadout::LEN);
+
+    if player_loadout.lamports() == 0 {
+        let create = system_instruction::create_account(
+            payer.key,
+            player_loadout.key,
+            lamports,
+            PlayerLoadout::LEN as u64,
+            program_id,
+        );
+        invoke_signed(
+            &create,
+            &[
+                payer.clone(),
+                player_loadout.clone(),
+                system_program_account.clone(),
+            ],
+            &[&[PLAYER_LOADOUT_SEED, owner.as_ref(), &[bump]]],
+        )?;
         return Ok(());
     }
-    if !PlayerProfile::is_supported_len(player_profile.data_len()) {
-        return Err(NicechunkPlayerError::InvalidPlayerProfileData.into());
-    }
 
-    let rent = Rent::get()?;
-    let lamports = rent.minimum_balance(PlayerProfile::LEN);
-    if player_profile.lamports() < lamports {
-        let delta = lamports - player_profile.lamports();
-        let transfer = system_instruction::transfer(payer.key, player_profile.key, delta);
+    if player_loadout.lamports() < lamports {
+        let delta = lamports - player_loadout.lamports();
+        let transfer = system_instruction::transfer(payer.key, player_loadout.key, delta);
         invoke(
             &transfer,
             &[
                 payer.clone(),
-                player_profile.clone(),
+                player_loadout.clone(),
                 system_program_account.clone(),
             ],
         )?;
     }
-    player_profile.realloc(PlayerProfile::LEN, true)?;
 
-    let mut data = player_profile.try_borrow_mut_data()?;
-    let created_slot: [u8; 8] = data
-        [PlayerProfile::LEGACY_CREATED_SLOT_OFFSET..PlayerProfile::LEGACY_CREATED_SLOT_OFFSET + 8]
-        .try_into()
-        .map_err(|_| NicechunkPlayerError::InvalidPlayerProfileData)?;
-    let updated_slot: [u8; 8] = data
-        [PlayerProfile::LEGACY_UPDATED_SLOT_OFFSET..PlayerProfile::LEGACY_UPDATED_SLOT_OFFSET + 8]
-        .try_into()
-        .map_err(|_| NicechunkPlayerError::InvalidPlayerProfileData)?;
-    let created_at: [u8; 8] = data
-        [PlayerProfile::LEGACY_CREATED_AT_OFFSET..PlayerProfile::LEGACY_CREATED_AT_OFFSET + 8]
-        .try_into()
-        .map_err(|_| NicechunkPlayerError::InvalidPlayerProfileData)?;
+    let allocate = system_instruction::allocate(player_loadout.key, PlayerLoadout::LEN as u64);
+    invoke_signed(
+        &allocate,
+        &[player_loadout.clone(), system_program_account.clone()],
+        &[&[PLAYER_LOADOUT_SEED, owner.as_ref(), &[bump]]],
+    )?;
 
-    data[PlayerProfile::EQUIPPED_BACKPACK_OFFSET..PlayerProfile::EQUIPPED_BACKPACK_OFFSET + 32]
-        .fill(0);
-    data[PlayerProfile::CREATED_SLOT_OFFSET..PlayerProfile::CREATED_SLOT_OFFSET + 8]
-        .copy_from_slice(&created_slot);
-    data[PlayerProfile::UPDATED_SLOT_OFFSET..PlayerProfile::UPDATED_SLOT_OFFSET + 8]
-        .copy_from_slice(&updated_slot);
-    data[PlayerProfile::CREATED_AT_OFFSET..PlayerProfile::CREATED_AT_OFFSET + 8]
-        .copy_from_slice(&created_at);
+    let assign = system_instruction::assign(player_loadout.key, program_id);
+    invoke_signed(
+        &assign,
+        &[player_loadout.clone(), system_program_account.clone()],
+        &[&[PLAYER_LOADOUT_SEED, owner.as_ref(), &[bump]]],
+    )?;
+
     Ok(())
 }
 
@@ -639,5 +806,18 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
         bytes[offset + 1],
         bytes[offset + 2],
         bytes[offset + 3],
+    ])
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+        bytes[offset + 4],
+        bytes[offset + 5],
+        bytes[offset + 6],
+        bytes[offset + 7],
     ])
 }

@@ -24,13 +24,14 @@ export const NICECHUNK_GAME_PROGRAM_ID = new PublicKey(
 );
 const UNIFIED_GAME_CHUNK_NAMESPACE = 2;
 export const CHUNK_BROKEN_SEED = "chunk-broken";
-export const RESOURCE_DROP_TABLE_SEED = "resource-drops";
+export const RESOURCE_DROP_TABLE_SEED = "resource-drops-v2";
+export const PLAYER_PROGRESS_SEED = "player-progress";
 export const CHUNK_BROKEN_MAGIC = "NCBK";
 export const CHUNK_BROKEN_HEADER_LEN = 16;
 export const CHUNK_BROKEN_RECORD_LEN = 3;
 export const CHUNK_BROKEN_INITIAL_CAPACITY = 64;
 export const CHUNK_BROKEN_MAX_CAPACITY = 2048;
-export const RESOURCE_DROP_RULE_LEN = 15;
+export const RESOURCE_DROP_RULE_LEN = 23;
 export const VERIFY_GENERATED_BLOCK_INSPECT_ONLY = 0xffff;
 export const BLOCK_AIR = 0;
 export const BLOCK_GRASS = 1;
@@ -92,6 +93,8 @@ export interface ResourceDropRuleInput {
   minDepth: number;
   maxDepth: number;
   salt: number;
+  minVolumeMm3: number;
+  maxVolumeMm3: number;
 }
 
 export interface MinimalGlobalConfigForBlockVerification {
@@ -155,6 +158,21 @@ export function deriveResourceDropTablePda({
 }): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [Buffer.from(RESOURCE_DROP_TABLE_SEED), globalConfig.toBuffer()],
+    programId,
+  );
+}
+
+export function derivePlayerProgressPda({
+  globalConfig,
+  owner,
+  programId = NICECHUNK_CHUNK_PROGRAM_ID,
+}: {
+  globalConfig: PublicKey;
+  owner: PublicKey;
+  programId?: PublicKey;
+}): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from(PLAYER_PROGRESS_SEED), globalConfig.toBuffer(), owner.toBuffer()],
     programId,
   );
 }
@@ -257,6 +275,7 @@ export function createMineBlockWithRewardsInstruction({
     programId: chunkProgramId,
   });
   const [resourceDropTable] = deriveResourceDropTablePda({ globalConfig, programId: chunkProgramId });
+  const [playerProgress] = derivePlayerProgressPda({ globalConfig, owner, programId: chunkProgramId });
   const data = Buffer.alloc(13);
   data.writeUInt8(8, 0);
   data.writeInt32LE(block.worldX, 1);
@@ -270,6 +289,7 @@ export function createMineBlockWithRewardsInstruction({
       { pubkey: payer, isSigner: true, isWritable: true },
       { pubkey: playerProfile, isSigner: false, isWritable: false },
       { pubkey: playerSession, isSigner: false, isWritable: false },
+      { pubkey: playerProgress, isSigner: false, isWritable: true },
       { pubkey: chunkBroken, isSigner: false, isWritable: true },
       { pubkey: globalConfig, isSigner: false, isWritable: false },
       { pubkey: resourceDropTable, isSigner: false, isWritable: false },
@@ -310,6 +330,8 @@ export function createInitializeResourceDropTableInstruction({
     data.writeInt16LE(rule.minDepth, offset + 10);
     data.writeInt16LE(rule.maxDepth, offset + 12);
     data.writeUInt8(rule.salt, offset + 14);
+    data.writeUInt32LE(rule.minVolumeMm3, offset + 15);
+    data.writeUInt32LE(rule.maxVolumeMm3, offset + 19);
   });
   return new TransactionInstruction({
     programId: chunkProgramId,

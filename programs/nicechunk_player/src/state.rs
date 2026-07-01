@@ -3,15 +3,25 @@ use solana_program::{entrypoint::ProgramResult, pubkey::Pubkey};
 use crate::errors::NicechunkPlayerError;
 
 pub const PLAYER_PROFILE_MAGIC: [u8; 8] = *b"NCKPLY01";
-pub const PLAYER_PROFILE_VERSION: u16 = 1;
+pub const PLAYER_PROFILE_VERSION: u16 = 2;
 pub const PLAYER_PROFILE_SEED: &[u8] = b"player";
+pub const PLAYER_LOADOUT_MAGIC: [u8; 8] = *b"NCKLOD01";
+pub const PLAYER_LOADOUT_VERSION: u16 = 1;
+pub const PLAYER_LOADOUT_SEED: &[u8] = b"loadout";
+pub const PLAYER_LOADOUT_SLOT_COUNT: usize = 8;
+pub const PLAYER_LOADOUT_SLOT_CODE_MAX_LEN: usize = 1248;
+pub const PLAYER_LOADOUT_HEADER_LEN: usize = 128;
+pub const PLAYER_LOADOUT_SLOT_HEADER_LEN: usize = 8;
+pub const PLAYER_LOADOUT_SLOT_RECORD_LEN: usize =
+    PLAYER_LOADOUT_SLOT_HEADER_LEN + PLAYER_LOADOUT_SLOT_CODE_MAX_LEN;
+pub const PLAYER_LOADOUT_LEN: usize =
+    PLAYER_LOADOUT_HEADER_LEN + PLAYER_LOADOUT_SLOT_COUNT * PLAYER_LOADOUT_SLOT_RECORD_LEN;
 pub const PLAYER_SESSION_MAGIC: [u8; 8] = *b"NCKSES01";
 pub const PLAYER_SESSION_VERSION: u16 = 1;
 pub const PLAYER_SESSION_SEED: &[u8] = b"session";
 pub const SESSION_ACTION_BREAK_BLOCK: u16 = 1 << 1;
 pub const SESSION_ACTION_PLACE_BLOCK: u16 = 1 << 2;
 pub const EQUIPMENT_SLOT_COUNT: usize = 9;
-pub const LEGACY_PLAYER_PROFILE_LEN: usize = 417;
 pub const DEFAULT_HEALTH: u16 = 100;
 pub const DEFAULT_ENERGY: u16 = 100;
 pub const DEFAULT_STAMINA: u16 = 100;
@@ -26,9 +36,9 @@ pub const GLOBAL_CONFIG_WORLD_ID_OFFSET: usize = 85;
 pub const GLOBAL_CONFIG_MIN_BUILD_Y_OFFSET: usize = 263;
 pub const GLOBAL_CONFIG_MAX_BUILD_Y_OFFSET: usize = 265;
 
-pub const BACKPACK_LEN: usize = 6464;
+pub const BACKPACK_LEN: usize = 8048;
 pub const BACKPACK_MAGIC: [u8; 8] = *b"NCKBPK01";
-pub const BACKPACK_VERSION: u16 = 2;
+pub const BACKPACK_VERSION: u16 = 3;
 pub const BACKPACK_OWNER_OFFSET: usize = 20;
 
 pub struct GlobalConfigView {
@@ -62,7 +72,7 @@ impl GlobalConfigView {
 pub struct PlayerProfile;
 
 impl PlayerProfile {
-    pub const LEN: usize = 449;
+    pub const LEN: usize = 473;
     pub const OWNER_OFFSET: usize = 12;
     pub const GLOBAL_CONFIG_OFFSET: usize = 44;
     pub const WORLD_ID_OFFSET: usize = 76;
@@ -74,9 +84,11 @@ impl PlayerProfile {
     pub const CREATED_SLOT_OFFSET: usize = 425;
     pub const UPDATED_SLOT_OFFSET: usize = 433;
     pub const CREATED_AT_OFFSET: usize = 441;
-    pub const LEGACY_CREATED_SLOT_OFFSET: usize = 393;
-    pub const LEGACY_UPDATED_SLOT_OFFSET: usize = 401;
-    pub const LEGACY_CREATED_AT_OFFSET: usize = 409;
+    pub const FORGING_XP_OFFSET: usize = 449;
+    pub const FORGED_ITEM_COUNT_OFFSET: usize = 457;
+    pub const BEST_FORGED_GRADE_OFFSET: usize = 461;
+    pub const BEST_FORGED_ITEM_LEVEL_OFFSET: usize = 462;
+    pub const RESERVED_OFFSET: usize = 463;
 
     pub fn pack_default(
         dst: &mut [u8],
@@ -118,6 +130,11 @@ impl PlayerProfile {
         writer.u64(created_slot)?;
         writer.u64(created_slot)?;
         writer.i64(created_at)?;
+        writer.u64(0)?;
+        writer.u32(0)?;
+        writer.u8(0)?;
+        writer.u8(0)?;
+        writer.bytes(&[0_u8; 10])?;
 
         if writer.offset != Self::LEN {
             return Err(NicechunkPlayerError::PackSizeMismatch.into());
@@ -140,7 +157,7 @@ impl PlayerProfile {
     }
 
     pub fn validate_owner(data: &[u8], owner: &Pubkey) -> ProgramResult {
-        if !Self::is_supported_len(data.len()) || data[0..8] != PLAYER_PROFILE_MAGIC {
+        if data.len() != Self::LEN || data[0..8] != PLAYER_PROFILE_MAGIC {
             return Err(NicechunkPlayerError::InvalidPlayerProfileData.into());
         }
         if &data[Self::OWNER_OFFSET..Self::OWNER_OFFSET + 32] != owner.as_ref() {
@@ -149,16 +166,9 @@ impl PlayerProfile {
         Ok(())
     }
 
-    pub fn is_supported_len(len: usize) -> bool {
-        len == Self::LEN || len == LEGACY_PLAYER_PROFILE_LEN
-    }
-
     pub fn has_equipped_backpack(data: &[u8]) -> Result<bool, NicechunkPlayerError> {
-        if !Self::is_supported_len(data.len()) || data[0..8] != PLAYER_PROFILE_MAGIC {
+        if data.len() != Self::LEN || data[0..8] != PLAYER_PROFILE_MAGIC {
             return Err(NicechunkPlayerError::InvalidPlayerProfileData);
-        }
-        if data.len() == LEGACY_PLAYER_PROFILE_LEN {
-            return Ok(false);
         }
         Ok(
             data[Self::EQUIPPED_BACKPACK_OFFSET..Self::EQUIPPED_BACKPACK_OFFSET + 32]
@@ -174,15 +184,14 @@ impl PlayerProfile {
         z: i32,
         updated_slot: u64,
     ) -> ProgramResult {
-        if !Self::is_supported_len(dst.len()) {
+        if dst.len() != Self::LEN {
             return Err(NicechunkPlayerError::InvalidPlayerProfileData.into());
         }
         dst[Self::POSITION_OFFSET..Self::POSITION_OFFSET + 4].copy_from_slice(&x.to_le_bytes());
         dst[Self::POSITION_OFFSET + 4..Self::POSITION_OFFSET + 8].copy_from_slice(&y.to_le_bytes());
         dst[Self::POSITION_OFFSET + 8..Self::POSITION_OFFSET + 12]
             .copy_from_slice(&z.to_le_bytes());
-        let updated_slot_offset = Self::updated_slot_offset(dst.len())?;
-        dst[updated_slot_offset..updated_slot_offset + 8]
+        dst[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
             .copy_from_slice(&updated_slot.to_le_bytes());
         Ok(())
     }
@@ -196,13 +205,12 @@ impl PlayerProfile {
         if slot as usize >= EQUIPMENT_SLOT_COUNT {
             return Err(NicechunkPlayerError::InvalidEquipmentSlot.into());
         }
-        if !Self::is_supported_len(dst.len()) {
+        if dst.len() != Self::LEN {
             return Err(NicechunkPlayerError::InvalidPlayerProfileData.into());
         }
         let offset = Self::EQUIPMENT_OFFSET + slot as usize * 32;
         dst[offset..offset + 32].copy_from_slice(item.as_ref());
-        let updated_slot_offset = Self::updated_slot_offset(dst.len())?;
-        dst[updated_slot_offset..updated_slot_offset + 8]
+        dst[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
             .copy_from_slice(&updated_slot.to_le_bytes());
         Ok(())
     }
@@ -212,12 +220,11 @@ impl PlayerProfile {
         backpack_style: u8,
         updated_slot: u64,
     ) -> ProgramResult {
-        if !Self::is_supported_len(dst.len()) {
+        if dst.len() != Self::LEN {
             return Err(NicechunkPlayerError::InvalidPlayerProfileData.into());
         }
         dst[Self::BACKPACK_STYLE_OFFSET] = backpack_style;
-        let updated_slot_offset = Self::updated_slot_offset(dst.len())?;
-        dst[updated_slot_offset..updated_slot_offset + 8]
+        dst[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
             .copy_from_slice(&updated_slot.to_le_bytes());
         Ok(())
     }
@@ -237,14 +244,139 @@ impl PlayerProfile {
         Ok(())
     }
 
-    fn updated_slot_offset(len: usize) -> Result<usize, NicechunkPlayerError> {
-        if len == Self::LEN {
-            Ok(Self::UPDATED_SLOT_OFFSET)
-        } else if len == LEGACY_PLAYER_PROFILE_LEN {
-            Ok(Self::LEGACY_UPDATED_SLOT_OFFSET)
-        } else {
-            Err(NicechunkPlayerError::InvalidPlayerProfileData)
+    pub fn add_forging_result(
+        dst: &mut [u8],
+        owner: &Pubkey,
+        gained_xp: u64,
+        grade: u8,
+        item_level: u8,
+        updated_slot: u64,
+    ) -> ProgramResult {
+        if dst.len() != Self::LEN {
+            return Err(NicechunkPlayerError::InvalidPlayerProfileData.into());
         }
+        Self::validate_owner(dst, owner)?;
+        let next_xp = read_u64(dst, Self::FORGING_XP_OFFSET).saturating_add(gained_xp);
+        let next_count = read_u32(dst, Self::FORGED_ITEM_COUNT_OFFSET).saturating_add(1);
+        dst[8..10].copy_from_slice(&PLAYER_PROFILE_VERSION.to_le_bytes());
+        dst[Self::FORGING_XP_OFFSET..Self::FORGING_XP_OFFSET + 8]
+            .copy_from_slice(&next_xp.to_le_bytes());
+        dst[Self::FORGED_ITEM_COUNT_OFFSET..Self::FORGED_ITEM_COUNT_OFFSET + 4]
+            .copy_from_slice(&next_count.to_le_bytes());
+        dst[Self::BEST_FORGED_GRADE_OFFSET] = dst[Self::BEST_FORGED_GRADE_OFFSET].max(grade);
+        dst[Self::BEST_FORGED_ITEM_LEVEL_OFFSET] =
+            dst[Self::BEST_FORGED_ITEM_LEVEL_OFFSET].max(item_level);
+        dst[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
+            .copy_from_slice(&updated_slot.to_le_bytes());
+        Ok(())
+    }
+}
+
+/// Public appearance and equipment payload.
+///
+/// This account is optimized for nearby-player rendering. It stores the compact
+/// chain text for visible equipment directly, so clients can render current
+/// loadouts with one account read instead of resolving the owner's backpack.
+pub struct PlayerLoadout;
+
+impl PlayerLoadout {
+    pub const LEN: usize = PLAYER_LOADOUT_LEN;
+    pub const OWNER_OFFSET: usize = 12;
+    pub const GLOBAL_CONFIG_OFFSET: usize = 44;
+    pub const WORLD_ID_OFFSET: usize = 76;
+    pub const SLOT_COUNT_OFFSET: usize = 78;
+    pub const SLOT_CODE_MAX_LEN_OFFSET: usize = 80;
+    pub const REVISION_OFFSET: usize = 82;
+    pub const UPDATED_SLOT_OFFSET: usize = 90;
+    pub const UPDATED_AT_OFFSET: usize = 98;
+    pub const SLOTS_OFFSET: usize = PLAYER_LOADOUT_HEADER_LEN;
+
+    pub fn pack_default(
+        dst: &mut [u8],
+        bump: u8,
+        owner: &Pubkey,
+        global_config: &Pubkey,
+        world_id: u16,
+        created_slot: u64,
+        created_at: i64,
+    ) -> ProgramResult {
+        if dst.len() != Self::LEN {
+            return Err(NicechunkPlayerError::InvalidPlayerLoadoutData.into());
+        }
+        dst.fill(0);
+
+        let mut writer = ByteWriter { dst, offset: 0 };
+        writer.bytes(&PLAYER_LOADOUT_MAGIC)?;
+        writer.u16(PLAYER_LOADOUT_VERSION)?;
+        writer.u8(bump)?;
+        writer.u8(1)?;
+        writer.pubkey(owner)?;
+        writer.pubkey(global_config)?;
+        writer.u16(world_id)?;
+        writer.u8(PLAYER_LOADOUT_SLOT_COUNT as u8)?;
+        writer.u8(0)?;
+        writer.u16(PLAYER_LOADOUT_SLOT_CODE_MAX_LEN as u16)?;
+        writer.u64(0)?;
+        writer.u64(created_slot)?;
+        writer.i64(created_at)?;
+        if writer.offset > PLAYER_LOADOUT_HEADER_LEN {
+            return Err(NicechunkPlayerError::PackSizeMismatch.into());
+        }
+        Ok(())
+    }
+
+    pub fn validate_owner_and_config(
+        data: &[u8],
+        owner: &Pubkey,
+        global_config: &Pubkey,
+    ) -> ProgramResult {
+        if data.len() != Self::LEN || data[0..8] != PLAYER_LOADOUT_MAGIC {
+            return Err(NicechunkPlayerError::InvalidPlayerLoadoutData.into());
+        }
+        if &data[Self::OWNER_OFFSET..Self::OWNER_OFFSET + 32] != owner.as_ref() {
+            return Err(NicechunkPlayerError::InvalidPlayerAuthority.into());
+        }
+        if &data[Self::GLOBAL_CONFIG_OFFSET..Self::GLOBAL_CONFIG_OFFSET + 32]
+            != global_config.as_ref()
+        {
+            return Err(NicechunkPlayerError::InvalidGlobalConfig.into());
+        }
+        Ok(())
+    }
+
+    pub fn write_slot_code(
+        dst: &mut [u8],
+        slot: u8,
+        code: &[u8],
+        updated_slot: u64,
+        updated_at: i64,
+    ) -> ProgramResult {
+        if dst.len() != Self::LEN || dst[0..8] != PLAYER_LOADOUT_MAGIC {
+            return Err(NicechunkPlayerError::InvalidPlayerLoadoutData.into());
+        }
+        if slot as usize >= PLAYER_LOADOUT_SLOT_COUNT {
+            return Err(NicechunkPlayerError::InvalidLoadoutSlot.into());
+        }
+        if code.len() > PLAYER_LOADOUT_SLOT_CODE_MAX_LEN {
+            return Err(NicechunkPlayerError::LoadoutCodeTooLarge.into());
+        }
+
+        let offset = Self::SLOTS_OFFSET + slot as usize * PLAYER_LOADOUT_SLOT_RECORD_LEN;
+        dst[offset..offset + PLAYER_LOADOUT_SLOT_RECORD_LEN].fill(0);
+        dst[offset] = if code.is_empty() { 0 } else { 1 };
+        dst[offset + 1] = slot;
+        dst[offset + 4..offset + 6].copy_from_slice(&(code.len() as u16).to_le_bytes());
+        let code_offset = offset + PLAYER_LOADOUT_SLOT_HEADER_LEN;
+        dst[code_offset..code_offset + code.len()].copy_from_slice(code);
+
+        let revision = read_u64(dst, Self::REVISION_OFFSET).saturating_add(1);
+        dst[Self::REVISION_OFFSET..Self::REVISION_OFFSET + 8]
+            .copy_from_slice(&revision.to_le_bytes());
+        dst[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
+            .copy_from_slice(&updated_slot.to_le_bytes());
+        dst[Self::UPDATED_AT_OFFSET..Self::UPDATED_AT_OFFSET + 8]
+            .copy_from_slice(&updated_at.to_le_bytes());
+        Ok(())
     }
 }
 
@@ -446,6 +578,28 @@ fn read_i16(data: &[u8], offset: usize) -> i16 {
     i16::from_le_bytes([data[offset], data[offset + 1]])
 }
 
+fn read_u32(data: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
+}
+
+fn read_u64(data: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+        data[offset + 4],
+        data[offset + 5],
+        data[offset + 6],
+        data[offset + 7],
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,6 +655,49 @@ mod tests {
         assert!(
             PlayerProfile::pack_default(&mut data, 252, &owner, &global_config, 1, 123, 456)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn player_loadout_len_matches_pack_and_slot_write() {
+        let owner = Pubkey::new_unique();
+        let global_config = Pubkey::new_unique();
+        let mut data = vec![0_u8; PlayerLoadout::LEN];
+        PlayerLoadout::pack_default(&mut data, 250, &owner, &global_config, 1, 123, 456).unwrap();
+
+        assert_eq!(&data[0..8], &PLAYER_LOADOUT_MAGIC);
+        assert_eq!(data[10], 250);
+        assert_eq!(
+            &data[PlayerLoadout::OWNER_OFFSET..PlayerLoadout::OWNER_OFFSET + 32],
+            owner.as_ref()
+        );
+        assert_eq!(
+            data[PlayerLoadout::SLOT_COUNT_OFFSET],
+            PLAYER_LOADOUT_SLOT_COUNT as u8
+        );
+        assert_eq!(
+            u16::from_le_bytes(
+                data[PlayerLoadout::SLOT_CODE_MAX_LEN_OFFSET
+                    ..PlayerLoadout::SLOT_CODE_MAX_LEN_OFFSET + 2]
+                    .try_into()
+                    .unwrap()
+            ),
+            PLAYER_LOADOUT_SLOT_CODE_MAX_LEN as u16
+        );
+
+        let code = b"NCF1.test";
+        PlayerLoadout::write_slot_code(&mut data, 7, code, 124, 457).unwrap();
+        let slot_offset = PlayerLoadout::SLOTS_OFFSET + 7 * PLAYER_LOADOUT_SLOT_RECORD_LEN;
+        assert_eq!(data[slot_offset], 1);
+        assert_eq!(data[slot_offset + 1], 7);
+        assert_eq!(
+            u16::from_le_bytes(data[slot_offset + 4..slot_offset + 6].try_into().unwrap()),
+            code.len() as u16
+        );
+        assert_eq!(
+            &data[slot_offset + PLAYER_LOADOUT_SLOT_HEADER_LEN
+                ..slot_offset + PLAYER_LOADOUT_SLOT_HEADER_LEN + code.len()],
+            code
         );
     }
 

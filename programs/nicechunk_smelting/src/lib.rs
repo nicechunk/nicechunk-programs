@@ -23,9 +23,9 @@ pub mod state;
 use cluster_config::NICECHUNK_BACKPACK_PROGRAM_ID;
 use errors::{require_key_eq, NicechunkSmeltingError};
 use state::{
-    BackpackAccountView, RecipeRecord, RecipeTable, RecipeTableInitArgs,
-    DEFAULT_OUTPUT_VOLUME_DIVISOR, DEFAULT_RESOURCE_VOLUME_MM3, RECIPE_TABLE_SEED,
-    SMELTING_AUTHORITY_SEED,
+    BackpackAccountView, PlayerProgressInitArgs, PlayerProgressState, RecipeRecord, RecipeTable,
+    RecipeTableInitArgs, PLAYER_PROGRESS_LEN, PLAYER_PROGRESS_SEED, RECIPE_TABLE_SEED,
+    RECIPE_YIELD_BPS_DENOMINATOR, SMELTING_AUTHORITY_SEED, SMELTING_XP_PER_INPUT,
 };
 
 declare_id!("7imEiNtpiN487HRwrftdLrMFs8TcAnjLE94vKsDgU6L7");
@@ -160,15 +160,23 @@ fn set_recipe_table_authority(program_id: &Pubkey, accounts: &[AccountInfo]) -> 
     RecipeTable::set_authority(&mut data, new_authority.key, clock.slot)
 }
 
-fn execute_smelting(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8]) -> ProgramResult {
-    if accounts.len() != 5 || payload.len() < 10 {
+fn execute_smelting(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    payload: &[u8],
+) -> ProgramResult {
+    if accounts.len() != 8 || payload.len() < 10 {
         return Err(NicechunkSmeltingError::InvalidInstruction.into());
     }
     let recipe_id = read_u64(payload, 0);
     let input_count = payload[8] as usize;
     let fuel_count = payload[9] as usize;
     let has_multiplier = payload.len() == 12 + input_count + fuel_count;
-    let multiplier = if has_multiplier { read_u16(payload, 10) } else { 1 };
+    let multiplier = if has_multiplier {
+        read_u16(payload, 10)
+    } else {
+        1
+    };
     let index_offset = if has_multiplier { 12 } else { 10 };
     if input_count == 0
         || fuel_count == 0
@@ -185,15 +193,23 @@ fn execute_smelting(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8
     let owner = next_account_info(account_info_iter)?;
     let recipe_table = next_account_info(account_info_iter)?;
     let backpack = next_account_info(account_info_iter)?;
+    let player_progress = next_account_info(account_info_iter)?;
+    let global_config = next_account_info(account_info_iter)?;
     let smelting_authority = next_account_info(account_info_iter)?;
     let backpack_program = next_account_info(account_info_iter)?;
+    let system_program_account = next_account_info(account_info_iter)?;
 
     if !owner.is_signer || !owner.is_writable {
         return Err(NicechunkSmeltingError::InvalidPayer.into());
     }
-    if !backpack.is_writable {
+    if !backpack.is_writable || !player_progress.is_writable {
         return Err(NicechunkSmeltingError::InvalidWritableAccount.into());
     }
+    require_key_eq(
+        system_program_account.key,
+        &system_program::ID,
+        NicechunkSmeltingError::InvalidSystemProgram,
+    )?;
     require_key_eq(
         recipe_table.owner,
         program_id,
@@ -210,17 +226,51 @@ fn execute_smelting(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8
         NicechunkSmeltingError::InvalidBackpackProgram,
     )?;
     validate_smelting_authority(program_id, smelting_authority.key)?;
+    let clock = Clock::get()?;
+    let progress_bump = validate_player_progress_pda(
+        program_id,
+        player_progress.key,
+        global_config.key,
+        owner.key,
+    )?;
+    create_player_progress_if_needed(
+        owner,
+        player_progress,
+        global_config,
+        system_program_account,
+        program_id,
+        owner.key,
+        progress_bump,
+        &clock,
+    )?;
 
     let recipe_table_data = recipe_table.try_borrow_data()?;
     let recipe = RecipeTable::find_recipe(&recipe_table_data, recipe_id)?;
     drop(recipe_table_data);
 
-    {
+    let skill_output_bps = {
+        let progress_data = player_progress.try_borrow_data()?;
+        let progress = PlayerProgressState::validate(&progress_data, owner.key, global_config.key)?;
+        PlayerProgressState::smelting_output_bps_from_xp(progress.smelting_xp)
+    };
+
+    let input_volume_mm3 = {
         let backpack_data = backpack.try_borrow_data()?;
-        BackpackAccountView::validate_recipe_inputs(&backpack_data, owner.key, indexes, fuel_indexes, &recipe, multiplier)?;
-    }
+        BackpackAccountView::validate_recipe_inputs(
+            &backpack_data,
+            owner.key,
+            indexes,
+            fuel_indexes,
+            &recipe,
+            multiplier,
+        )?
+    };
 
     remove_backpack_resources(owner, backpack, backpack_program, indexes, fuel_indexes)?;
+    let output_total_volume_mm3 =
+        smelting_output_volume_mm3(input_volume_mm3, recipe.yield_bps, skill_output_bps);
+    let output_count = (recipe.output_count as u64).max(1);
+    let output_volume_mm3 = output_total_volume_mm3.saturating_div(output_count).max(1);
     for output_index in 0..recipe.output_count as usize {
         append_smelting_output_to_backpack(
             program_id,
@@ -229,8 +279,17 @@ fn execute_smelting(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8
             backpack,
             backpack_program,
             &recipe.outputs[output_index],
-            recipe.input_count,
-            multiplier,
+            output_volume_mm3,
+        )?;
+    }
+    {
+        let mut progress_data = player_progress.try_borrow_mut_data()?;
+        PlayerProgressState::add_smelting_xp(
+            &mut progress_data,
+            owner.key,
+            global_config.key,
+            (indexes.len() as u64).saturating_mul(SMELTING_XP_PER_INPUT),
+            clock.slot,
         )?;
     }
     Ok(())
@@ -267,22 +326,13 @@ fn append_smelting_output_to_backpack<'a>(
     backpack: &AccountInfo<'a>,
     _backpack_program: &AccountInfo<'a>,
     record: &state::BackpackSlotRecord,
-    recipe_input_count: u8,
-    multiplier: u16,
+    output_volume_mm3: u64,
 ) -> ProgramResult {
     let (_, bump) = Pubkey::find_program_address(&[SMELTING_AUTHORITY_SEED], program_id);
     let mut data = vec![0_u8; 1 + state::BACKPACK_SLOT_RECORD_LEN];
     data[0] = 5;
     let mut output = *record;
-    let base_volume = if output.volume_mm3 > 0 {
-        output.volume_mm3
-    } else {
-        DEFAULT_RESOURCE_VOLUME_MM3
-            .saturating_mul(recipe_input_count as u32)
-            .saturating_div(DEFAULT_OUTPUT_VOLUME_DIVISOR)
-            .max(1)
-    };
-    output.volume_mm3 = base_volume.saturating_mul(multiplier as u32).max(1);
+    output.volume_mm3 = output_volume_mm3.min(u32::MAX as u64).max(1) as u32;
     output.pack(&mut data[1..])?;
     let data = backpack_cpi_data(&data);
     let ix = Instruction {
@@ -299,6 +349,21 @@ fn append_smelting_output_to_backpack<'a>(
         &[smelting_authority.clone(), owner.clone(), backpack.clone()],
         &[&[SMELTING_AUTHORITY_SEED, &[bump]]],
     )
+}
+
+fn smelting_output_volume_mm3(
+    input_volume_mm3: u64,
+    recipe_yield_bps: u16,
+    skill_output_bps: u16,
+) -> u64 {
+    let recipe_volume = (input_volume_mm3 as u128)
+        .saturating_mul(recipe_yield_bps as u128)
+        .saturating_div(RECIPE_YIELD_BPS_DENOMINATOR as u128);
+    recipe_volume
+        .saturating_mul(skill_output_bps as u128)
+        .saturating_div(RECIPE_YIELD_BPS_DENOMINATOR as u128)
+        .min(u32::MAX as u128)
+        .max(1) as u64
 }
 
 #[cfg(feature = "unified-game")]
@@ -334,11 +399,118 @@ fn validate_smelting_authority(
     program_id: &Pubkey,
     authority: &Pubkey,
 ) -> Result<(), solana_program::program_error::ProgramError> {
-    let (expected_authority, _) = Pubkey::find_program_address(&[SMELTING_AUTHORITY_SEED], program_id);
+    let (expected_authority, _) =
+        Pubkey::find_program_address(&[SMELTING_AUTHORITY_SEED], program_id);
     require_key_eq(
         authority,
         &expected_authority,
         NicechunkSmeltingError::InvalidSmeltingAuthority,
+    )
+}
+
+fn validate_player_progress_pda(
+    program_id: &Pubkey,
+    player_progress: &Pubkey,
+    global_config: &Pubkey,
+    owner: &Pubkey,
+) -> Result<u8, solana_program::program_error::ProgramError> {
+    let (expected_progress, bump) = Pubkey::find_program_address(
+        &[PLAYER_PROGRESS_SEED, global_config.as_ref(), owner.as_ref()],
+        program_id,
+    );
+    require_key_eq(
+        player_progress,
+        &expected_progress,
+        NicechunkSmeltingError::InvalidPlayerProgress,
+    )?;
+    Ok(bump)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_player_progress_if_needed<'a>(
+    payer: &AccountInfo<'a>,
+    player_progress: &AccountInfo<'a>,
+    global_config: &AccountInfo<'a>,
+    system_program_account: &AccountInfo<'a>,
+    program_id: &Pubkey,
+    owner: &Pubkey,
+    bump: u8,
+    clock: &Clock,
+) -> ProgramResult {
+    let seeds = &[
+        PLAYER_PROGRESS_SEED,
+        global_config.key.as_ref(),
+        owner.as_ref(),
+        &[bump],
+    ];
+
+    if player_progress.owner == program_id {
+        let data = player_progress.try_borrow_data()?;
+        PlayerProgressState::validate(&data, owner, global_config.key)?;
+        return Ok(());
+    }
+
+    if player_progress.owner != &system_program::ID || player_progress.data_len() != 0 {
+        return Err(NicechunkSmeltingError::InvalidSystemAccount.into());
+    }
+
+    let rent = Rent::get()?;
+    let lamports = rent.minimum_balance(PLAYER_PROGRESS_LEN);
+    if player_progress.lamports() == 0 {
+        let create = system_instruction::create_account(
+            payer.key,
+            player_progress.key,
+            lamports,
+            PLAYER_PROGRESS_LEN as u64,
+            program_id,
+        );
+        invoke_signed(
+            &create,
+            &[
+                payer.clone(),
+                player_progress.clone(),
+                system_program_account.clone(),
+            ],
+            &[seeds],
+        )?;
+    } else {
+        if player_progress.lamports() < lamports {
+            let delta = lamports - player_progress.lamports();
+            let transfer = system_instruction::transfer(payer.key, player_progress.key, delta);
+            invoke(
+                &transfer,
+                &[
+                    payer.clone(),
+                    player_progress.clone(),
+                    system_program_account.clone(),
+                ],
+            )?;
+        }
+        let allocate =
+            system_instruction::allocate(player_progress.key, PLAYER_PROGRESS_LEN as u64);
+        invoke_signed(
+            &allocate,
+            &[player_progress.clone(), system_program_account.clone()],
+            &[seeds],
+        )?;
+        let assign = system_instruction::assign(player_progress.key, program_id);
+        invoke_signed(
+            &assign,
+            &[player_progress.clone(), system_program_account.clone()],
+            &[seeds],
+        )?;
+    }
+
+    let mut data = player_progress.try_borrow_mut_data()?;
+    PlayerProgressState::pack_empty(
+        &mut data,
+        &PlayerProgressInitArgs {
+            bump,
+            owner,
+            global_config: global_config.key,
+            created_slot: clock.slot,
+            created_at: clock.unix_timestamp,
+        },
     )
 }
 

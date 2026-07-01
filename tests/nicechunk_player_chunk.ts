@@ -41,8 +41,10 @@ import {
   CHUNK_BROKEN_MAGIC,
   CHUNK_BROKEN_RECORD_LEN,
   createMineBlockInstruction,
+  createMineBlockWithRewardsInstruction,
   decodeChunkBrokenState,
   deriveChunkBrokenPda,
+  derivePlayerProgressPda,
   generatedBlockIdAt,
   NICECHUNK_CHUNK_PROGRAM_ID,
 } from "../sdk/nicechunk-chunk.ts";
@@ -64,9 +66,15 @@ describe("nicechunk player and mining SDK", () => {
       chunkZ: 0,
       programId: NICECHUNK_CHUNK_PROGRAM_ID,
     });
+    const [playerProgress] = derivePlayerProgressPda({
+      globalConfig,
+      owner,
+      programId: NICECHUNK_CHUNK_PROGRAM_ID,
+    });
 
     assert.equal(playerProfile.toBase58(), "3erZxS9JsMM8evKF84E3qPxZA6gWVTmGkAGTtRxzqHic");
-    assert.equal(chunkBroken.toBase58(), "Fi5YQNm6JqC1dWPKzqQCJLYTq1B7ucz8K7f6pDhwfcBy");
+    assert.equal(chunkBroken.toBase58(), "9TnxvJ93WiHDmGxfgpufMh6XUJopp1JHKenK38VcLzJb");
+    assert.equal(playerProgress.toBase58(), "3Mjwx7Jn18jqbMiNqajE6yP7vGaKKfd9MobyHqjAqGSh");
   });
 
   it("builds initialize player account order", () => {
@@ -91,8 +99,9 @@ describe("nicechunk player and mining SDK", () => {
     const ix = createInitializeBackpackInstruction({ payer: owner, backpackId });
 
     assert.equal(ix.programId.toBase58(), NICECHUNK_BACKPACK_PROGRAM_ID.toBase58());
-    assert.equal(ix.data.readUInt8(0), 0);
-    assert.equal(ix.data.readBigUInt64LE(1), backpackId);
+    assert.equal(ix.data.readUInt8(0), 1);
+    assert.equal(ix.data.readUInt8(1), 0);
+    assert.equal(ix.data.readBigUInt64LE(2), backpackId);
     assert.equal(ix.keys[0].pubkey.toBase58(), owner.toBase58());
     assert.equal(ix.keys[0].isSigner, true);
     assert.equal(ix.keys[1].pubkey.toBase58(), playerProfile.toBase58());
@@ -222,21 +231,43 @@ describe("nicechunk player and mining SDK", () => {
       block: { worldX: 1, worldY: 0, worldZ: 2, expectedBlockId: BLOCK_STONE },
     });
     assert.equal(mineIx.programId.toBase58(), NICECHUNK_CHUNK_PROGRAM_ID.toBase58());
-    assert.equal(mineIx.data.readUInt8(0), 5);
-    assert.equal(mineIx.data.readInt32LE(1), 1);
-    assert.equal(mineIx.data.readInt16LE(5), 0);
-    assert.equal(mineIx.data.readInt32LE(7), 2);
-    assert.equal(mineIx.data.readUInt16LE(11), BLOCK_STONE);
+    assert.equal(mineIx.data.readUInt8(0), 2);
+    assert.equal(mineIx.data.readUInt8(1), 5);
+    assert.equal(mineIx.data.readInt32LE(2), 1);
+    assert.equal(mineIx.data.readInt16LE(6), 0);
+    assert.equal(mineIx.data.readInt32LE(8), 2);
+    assert.equal(mineIx.data.readUInt16LE(12), BLOCK_STONE);
     assert.equal(mineIx.keys[0].pubkey.toBase58(), sessionAuthority.toBase58());
     assert.equal(mineIx.keys[1].pubkey.toBase58(), playerProfile.toBase58());
     assert.equal(mineIx.keys[2].pubkey.toBase58(), playerSession.toBase58());
     assert.equal(mineIx.keys[3].pubkey.toBase58(), chunkBroken.toBase58());
     assert.equal(mineIx.keys[4].pubkey.toBase58(), globalConfig.toBase58());
     assert.equal(mineIx.keys[5].pubkey.toBase58(), SystemProgram.programId.toBase58());
+
+    const backpack = new PublicKey("6pCaR8qLHvGeU3BAzwzAHMPjDk1ewNtrbAcqAGeMSH2Q");
+    const [playerProgress] = derivePlayerProgressPda({ globalConfig, owner, programId: NICECHUNK_CHUNK_PROGRAM_ID });
+    const rewardMineIx = createMineBlockWithRewardsInstruction({
+      payer: sessionAuthority,
+      owner,
+      sessionAuthority,
+      backpack,
+      block: { worldX: 1, worldY: 0, worldZ: 2, expectedBlockId: BLOCK_STONE },
+    });
+    assert.equal(rewardMineIx.data.readUInt8(0), 2);
+    assert.equal(rewardMineIx.data.readUInt8(1), 8);
+    assert.equal(rewardMineIx.keys.length, 10);
+    assert.equal(rewardMineIx.keys[0].pubkey.toBase58(), sessionAuthority.toBase58());
+    assert.equal(rewardMineIx.keys[1].pubkey.toBase58(), playerProfile.toBase58());
+    assert.equal(rewardMineIx.keys[2].pubkey.toBase58(), playerSession.toBase58());
+    assert.equal(rewardMineIx.keys[3].pubkey.toBase58(), playerProgress.toBase58());
+    assert.equal(rewardMineIx.keys[3].isWritable, true);
+    assert.equal(rewardMineIx.keys[4].pubkey.toBase58(), chunkBroken.toBase58());
+    assert.equal(rewardMineIx.keys[8].pubkey.toBase58(), backpack.toBase58());
+    assert.equal(rewardMineIx.keys[9].pubkey.toBase58(), SystemProgram.programId.toBase58());
   });
 
   it("builds smelting recipe table and execution instructions", () => {
-    const tableId = 1n;
+    const tableId = 2n;
     const recipeId = 1001n;
     const [recipeTable] = deriveRecipeTablePda({ tableId });
     const [smeltingAuthority] = deriveSmeltingAuthorityPda();
@@ -264,21 +295,29 @@ describe("nicechunk player and mining SDK", () => {
 
     const init = createInitializeRecipeTableInstruction({ payer: owner, tableId });
     assert.equal(init.programId.toBase58(), NICECHUNK_SMELTING_PROGRAM_ID.toBase58());
-    assert.equal(init.data.readUInt8(0), 0);
-    assert.equal(init.data.readBigUInt64LE(1), tableId);
+    assert.equal(init.data.readUInt8(0), 3);
+    assert.equal(init.data.readUInt8(1), 0);
+    assert.equal(init.data.readBigUInt64LE(2), tableId);
     assert.equal(init.keys[1].pubkey.toBase58(), recipeTable.toBase58());
 
     const upsert = createUpsertSmeltingRecipeInstruction({
       authority: owner,
       recipeTable,
-      recipe: { recipeId, inputs: [inputSlot], outputs: [outputSlot], minHeatTier: 2 },
+      recipe: { recipeId, inputs: [inputSlot], outputs: [outputSlot], minHeatTier: 2, yieldBps: 6200 },
     });
-    assert.equal(upsert.data.readUInt8(0), 1);
-    assert.equal(upsert.data.length, 1 + UPSERT_RECIPE_ARGS_LEN);
-    assert.equal(upsert.data.readBigUInt64LE(1), recipeId);
-    assert.equal(upsert.data.readUInt8(10), 2);
+    assert.equal(upsert.data.readUInt8(0), 3);
+    assert.equal(upsert.data.readUInt8(1), 1);
+    assert.equal(upsert.data.length, 2 + UPSERT_RECIPE_ARGS_LEN);
+    assert.equal(upsert.data.readBigUInt64LE(2), recipeId);
+    assert.equal(upsert.data.readUInt8(11), 2);
+    assert.equal(upsert.data.readUInt16LE(14), 6200);
 
     const backpack = new PublicKey("6pCaR8qLHvGeU3BAzwzAHMPjDk1ewNtrbAcqAGeMSH2Q");
+    const [playerProgress] = derivePlayerProgressPda({
+      globalConfig,
+      owner,
+      programId: NICECHUNK_SMELTING_PROGRAM_ID,
+    });
     const execute = createExecuteSmeltingInstruction({
       owner,
       recipeTable,
@@ -287,13 +326,17 @@ describe("nicechunk player and mining SDK", () => {
       inputIndexes: [0],
       fuelIndexes: [1],
     });
-    assert.equal(execute.data.readUInt8(0), 2);
-    assert.equal(execute.data.readUInt8(10), 1);
+    assert.equal(execute.data.readUInt8(0), 3);
+    assert.equal(execute.data.readUInt8(1), 2);
+    assert.equal(execute.data.readUInt8(11), 1);
     assert.equal(execute.keys[0].pubkey.toBase58(), owner.toBase58());
     assert.equal(execute.keys[1].pubkey.toBase58(), recipeTable.toBase58());
     assert.equal(execute.keys[2].pubkey.toBase58(), backpack.toBase58());
-    assert.equal(execute.keys[3].pubkey.toBase58(), smeltingAuthority.toBase58());
-    assert.equal(execute.keys[4].pubkey.toBase58(), NICECHUNK_BACKPACK_PROGRAM_ID.toBase58());
+    assert.equal(execute.keys[3].pubkey.toBase58(), playerProgress.toBase58());
+    assert.equal(execute.keys[4].pubkey.toBase58(), globalConfig.toBase58());
+    assert.equal(execute.keys[5].pubkey.toBase58(), smeltingAuthority.toBase58());
+    assert.equal(execute.keys[6].pubkey.toBase58(), NICECHUNK_BACKPACK_PROGRAM_ID.toBase58());
+    assert.equal(execute.keys[7].pubkey.toBase58(), SystemProgram.programId.toBase58());
   });
 
   it("decodes compact chunk-broken state", () => {

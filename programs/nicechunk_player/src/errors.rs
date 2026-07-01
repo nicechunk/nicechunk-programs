@@ -26,6 +26,11 @@ pub enum NicechunkPlayerError {
     InvalidBackpackData = 6221,
     InvalidBackpackOwner = 6222,
     PlayerBackpackAlreadyBound = 6223,
+    InvalidPlayerLoadoutPda = 6224,
+    InvalidPlayerLoadoutData = 6225,
+    InvalidLoadoutSlot = 6226,
+    LoadoutCodeTooLarge = 6227,
+    InvalidForgingAuthority = 6228,
 }
 
 impl From<NicechunkPlayerError> for ProgramError {

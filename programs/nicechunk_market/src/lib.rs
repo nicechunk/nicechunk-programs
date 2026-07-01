@@ -33,9 +33,11 @@ const TOKEN_ACCOUNT_MINT_OFFSET: usize = 0;
 const TOKEN_ACCOUNT_OWNER_OFFSET: usize = 32;
 const BACKPACK_HEADER_LEN: usize = 128;
 const BACKPACK_LEGACY_VERSION: u16 = 1;
-const BACKPACK_VERSION: u16 = 2;
+const BACKPACK_V2_VERSION: u16 = 2;
+const BACKPACK_VERSION: u16 = 3;
 const BACKPACK_LEGACY_RECORD_LEN: usize = 10;
 const BACKPACK_SLOT_RECORD_LEN: usize = 64;
+const BACKPACK_V3_SLOT_RECORD_LEN: usize = 80;
 const BACKPACK_OWNER_OFFSET: usize = 20;
 const BACKPACK_ITEM_COUNT_OFFSET: usize = 53;
 const BACKPACK_SLOT_KIND_BLOCK: u8 = 1;
@@ -604,8 +606,11 @@ fn backpack_record_len(data: &[u8]) -> Result<usize, solana_program::program_err
         if version == BACKPACK_LEGACY_VERSION {
             return Ok(BACKPACK_LEGACY_RECORD_LEN);
         }
-        if version == BACKPACK_VERSION {
+        if version == BACKPACK_V2_VERSION {
             return Ok(BACKPACK_SLOT_RECORD_LEN);
+        }
+        if version == BACKPACK_VERSION {
+            return Ok(BACKPACK_V3_SLOT_RECORD_LEN);
         }
     }
     Err(NicechunkMarketError::InvalidBackpackData.into())
@@ -618,7 +623,9 @@ fn backpack_resource_record_at(
     if record_len == BACKPACK_LEGACY_RECORD_LEN {
         return BackpackResourceRecord::unpack(data).map_err(|error| error.into());
     }
-    if data.len() != BACKPACK_SLOT_RECORD_LEN || data[0] != BACKPACK_SLOT_KIND_BLOCK {
+    if (data.len() != BACKPACK_SLOT_RECORD_LEN && data.len() != BACKPACK_V3_SLOT_RECORD_LEN)
+        || data[0] != BACKPACK_SLOT_KIND_BLOCK
+    {
         return Err(NicechunkMarketError::InvalidEscrowInventory.into());
     }
     BackpackResourceRecord::unpack(&data[8..18]).map_err(|error| error.into())

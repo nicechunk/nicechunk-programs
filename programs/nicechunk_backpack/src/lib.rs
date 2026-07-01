@@ -5,7 +5,8 @@ use solana_program::{
     clock::Clock,
     declare_id,
     entrypoint::ProgramResult,
-    program::invoke_signed,
+    instruction::{AccountMeta, Instruction},
+    program::{invoke, invoke_signed},
     pubkey::Pubkey,
     rent::Rent,
     system_instruction, system_program,
@@ -51,6 +52,7 @@ pub fn process_instruction(
         4 => remove_resources(program_id, accounts, payload),
         5 => append_smelting_item(program_id, accounts, payload),
         6 => append_mined_resources_batch(program_id, accounts, payload),
+        7 => forge_equipment(program_id, accounts, payload),
         _ => Err(NicechunkBackpackError::InvalidInstruction.into()),
     }
 }
@@ -131,11 +133,23 @@ fn append_mined_resource(
     accounts: &[AccountInfo],
     payload: &[u8],
 ) -> ProgramResult {
-    if accounts.len() != 4 || payload.len() != BackpackResourceRecord::LEN {
+    if accounts.len() != 4
+        || (payload.len() != BackpackResourceRecord::LEN
+            && payload.len() != BackpackResourceRecord::LEN + 4)
+    {
         return Err(NicechunkBackpackError::InvalidInstruction.into());
     }
 
-    let record = BackpackResourceRecord::unpack(payload)?;
+    let record = BackpackResourceRecord::unpack(&payload[..BackpackResourceRecord::LEN])?;
+    let volume_mm3 = if payload.len() == BackpackResourceRecord::LEN + 4 {
+        u32::from_le_bytes(
+            payload[BackpackResourceRecord::LEN..BackpackResourceRecord::LEN + 4]
+                .try_into()
+                .map_err(|_| NicechunkBackpackError::InvalidInstruction)?,
+        )
+    } else {
+        0
+    };
     let account_info_iter = &mut accounts.iter();
     let session_authority = next_account_info(account_info_iter)?;
     let player_profile = next_account_info(account_info_iter)?;
@@ -180,7 +194,13 @@ fn append_mined_resource(
     drop(player_profile_data);
 
     let mut backpack_data = backpack.try_borrow_mut_data()?;
-    BackpackAccount::append_resource(&mut backpack_data, &session.owner, &record, clock.slot)
+    BackpackAccount::append_resource_with_volume(
+        &mut backpack_data,
+        &session.owner,
+        &record,
+        volume_mm3,
+        clock.slot,
+    )
 }
 
 fn append_mined_resources_batch(
@@ -192,19 +212,37 @@ fn append_mined_resources_batch(
         return Err(NicechunkBackpackError::InvalidInstruction.into());
     }
     let count = payload[0] as usize;
-    if count == 0
-        || count > state::BACKPACK_MAX_CAPACITY as usize
-        || payload.len() != 1 + count * BackpackResourceRecord::LEN
-    {
+    let legacy_record_size = BackpackResourceRecord::LEN;
+    let volume_record_size = BackpackResourceRecord::LEN + 4;
+    let record_size = if payload.len() == 1 + count * legacy_record_size {
+        legacy_record_size
+    } else if payload.len() == 1 + count * volume_record_size {
+        volume_record_size
+    } else {
+        return Err(NicechunkBackpackError::InvalidInstruction.into());
+    };
+    if count == 0 || count > state::BACKPACK_MAX_CAPACITY as usize {
         return Err(NicechunkBackpackError::InvalidInstruction.into());
     }
 
     let mut records = Vec::with_capacity(count);
+    let mut volumes_mm3 = Vec::with_capacity(if record_size == volume_record_size {
+        count
+    } else {
+        0
+    });
     for index in 0..count {
-        let offset = 1 + index * BackpackResourceRecord::LEN;
+        let offset = 1 + index * record_size;
         records.push(BackpackResourceRecord::unpack(
             &payload[offset..offset + BackpackResourceRecord::LEN],
         )?);
+        if record_size == volume_record_size {
+            volumes_mm3.push(u32::from_le_bytes(
+                payload[offset + BackpackResourceRecord::LEN..offset + volume_record_size]
+                    .try_into()
+                    .map_err(|_| NicechunkBackpackError::InvalidInstruction)?,
+            ));
+        }
     }
 
     let account_info_iter = &mut accounts.iter();
@@ -251,10 +289,11 @@ fn append_mined_resources_batch(
     drop(player_profile_data);
 
     let mut backpack_data = backpack.try_borrow_mut_data()?;
-    BackpackAccount::append_resources_lossy(
+    BackpackAccount::append_resources_lossy_with_volumes(
         &mut backpack_data,
         &session.owner,
         &records,
+        &volumes_mm3,
         clock.slot,
     )
 }
@@ -504,6 +543,88 @@ fn remove_resources(
     BackpackAccount::remove_resources_at(&mut backpack_data, &session.owner, indexes, clock.slot)
 }
 
+fn forge_equipment(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    payload: &[u8],
+) -> ProgramResult {
+    if accounts.len() != 5 || payload.len() < 10 {
+        return Err(NicechunkBackpackError::InvalidInstruction.into());
+    }
+    let item_id = read_u64(payload, 0);
+    let requested_item_level = payload[8];
+    let input_count = payload[9] as usize;
+    if input_count == 0 || input_count > state::MAX_FORGING_INPUTS || payload.len() != 10 + input_count {
+        return Err(NicechunkBackpackError::InvalidInstruction.into());
+    }
+    let indexes = &payload[10..];
+
+    let account_info_iter = &mut accounts.iter();
+    let owner = next_account_info(account_info_iter)?;
+    let player_profile = next_account_info(account_info_iter)?;
+    let backpack = next_account_info(account_info_iter)?;
+    let player_program = next_account_info(account_info_iter)?;
+    let system_program_account = next_account_info(account_info_iter)?;
+
+    if !owner.is_signer || !owner.is_writable {
+        return Err(NicechunkBackpackError::InvalidPayer.into());
+    }
+    if !player_profile.is_writable || !backpack.is_writable {
+        return Err(NicechunkBackpackError::InvalidWritableAccount.into());
+    }
+    require_key_eq(
+        player_program.key,
+        &NICECHUNK_PLAYER_PROGRAM_ID,
+        NicechunkBackpackError::InvalidPlayerProgram,
+    )?;
+    require_key_eq(
+        system_program_account.key,
+        &system_program::ID,
+        NicechunkBackpackError::InvalidSystemProgram,
+    )?;
+    require_key_eq(
+        player_profile.owner,
+        player_program.key,
+        NicechunkBackpackError::InvalidPlayerProgram,
+    )?;
+    require_key_eq(
+        backpack.owner,
+        program_id,
+        NicechunkBackpackError::InvalidBackpackOwner,
+    )?;
+
+    let forging_level = {
+        let player_profile_data = player_profile.try_borrow_data()?;
+        PlayerProfileView::validate_owner(&player_profile_data, owner.key)?;
+        PlayerProfileView::forging_level(&player_profile_data)?
+    };
+
+    let clock = Clock::get()?;
+    let outcome = {
+        let mut backpack_data = backpack.try_borrow_mut_data()?;
+        BackpackAccount::forge_equipment_from_materials(
+            &mut backpack_data,
+            owner.key,
+            indexes,
+            item_id,
+            requested_item_level,
+            player_profile.key,
+            forging_level,
+            clock.slot,
+        )?
+    };
+
+    add_forging_xp_to_player(
+        program_id,
+        owner,
+        backpack,
+        player_profile,
+        player_program,
+        system_program_account,
+        &outcome,
+    )
+}
+
 fn validate_backpack_pda(
     program_id: &Pubkey,
     backpack: &Pubkey,
@@ -552,6 +673,58 @@ fn create_backpack_pda<'a>(
         &[
             payer.clone(),
             backpack.clone(),
+            system_program_account.clone(),
+        ],
+        &[seeds],
+    )
+}
+
+fn add_forging_xp_to_player<'a>(
+    program_id: &Pubkey,
+    owner: &AccountInfo<'a>,
+    backpack: &AccountInfo<'a>,
+    player_profile: &AccountInfo<'a>,
+    player_program: &AccountInfo<'a>,
+    system_program_account: &AccountInfo<'a>,
+    outcome: &state::ForgeOutcome,
+) -> ProgramResult {
+    let (backpack_id, bump) = {
+        let data = backpack.try_borrow_data()?;
+        BackpackAccount::validate_owner(&data, owner.key)?;
+        (
+            read_u64(&data, BackpackAccount::BACKPACK_ID_OFFSET),
+            data[10],
+        )
+    };
+    validate_backpack_pda(program_id, backpack.key, owner.key, backpack_id)?;
+    let backpack_id_bytes = backpack_id.to_le_bytes();
+    let seeds = &[
+        BACKPACK_SEED,
+        owner.key.as_ref(),
+        &backpack_id_bytes,
+        &[bump],
+    ];
+    let mut data = Vec::with_capacity(11);
+    data.push(7);
+    data.push(outcome.grade);
+    data.push(outcome.item_level);
+    data.extend_from_slice(&outcome.gained_xp.to_le_bytes());
+    let ix = Instruction {
+        program_id: *player_program.key,
+        accounts: vec![
+            AccountMeta::new(*owner.key, true),
+            AccountMeta::new_readonly(*backpack.key, true),
+            AccountMeta::new(*player_profile.key, false),
+            AccountMeta::new_readonly(*system_program_account.key, false),
+        ],
+        data,
+    };
+    invoke_signed(
+        &ix,
+        &[
+            owner.clone(),
+            backpack.clone(),
+            player_profile.clone(),
             system_program_account.clone(),
         ],
         &[seeds],
