@@ -394,7 +394,6 @@ fn execute_smelting(
             backpack,
             backpack_program,
             material_physics,
-            global_config,
             output,
             output_volume_mm3,
         )?;
@@ -461,7 +460,6 @@ fn append_smelting_output_to_backpack<'a>(
     backpack: &AccountInfo<'a>,
     _backpack_program: &AccountInfo<'a>,
     material_physics: &AccountInfo<'a>,
-    global_config: &AccountInfo<'a>,
     record: &state::BackpackSlotRecord,
     output_volume_mm3: u64,
 ) -> ProgramResult {
@@ -480,7 +478,6 @@ fn append_smelting_output_to_backpack<'a>(
             AccountMeta::new_readonly(*owner.key, false),
             AccountMeta::new(*backpack.key, false),
             AccountMeta::new_readonly(*material_physics.key, false),
-            AccountMeta::new_readonly(*global_config.key, false),
         ],
         data,
     };
@@ -491,7 +488,6 @@ fn append_smelting_output_to_backpack<'a>(
             owner.clone(),
             backpack.clone(),
             material_physics.clone(),
-            global_config.clone(),
         ],
         &[&[SMELTING_AUTHORITY_SEED, &[bump]]],
     )
@@ -808,7 +804,10 @@ mod tests {
             PlayerProgressState::smelting_output_bps_from_xp(SMELTING_TOTAL_XP_BY_LEVEL[1]),
             1_500,
         );
-        assert_eq!(PlayerProgressState::smelting_output_bps_from_xp(u64::MAX), 6_000);
+        assert_eq!(
+            PlayerProgressState::smelting_output_bps_from_xp(u64::MAX),
+            6_000
+        );
     }
 
     #[test]

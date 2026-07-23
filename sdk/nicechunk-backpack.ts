@@ -5,6 +5,10 @@ import {
 } from "@solana/web3.js";
 import { Buffer } from "buffer";
 import {
+  deriveGlobalConfigPda,
+  NICECHUNK_CORE_PROGRAM_ID,
+} from "./nicechunk-core.ts";
+import {
   derivePlayerProfilePda,
   NICECHUNK_PLAYER_PROGRAM_ID,
 } from "./nicechunk-player.ts";
@@ -21,12 +25,12 @@ export const NICECHUNK_BLUEPRINT_ISSUER = new PublicKey(
   env.NICECHUNK_BLUEPRINT_ISSUER ?? "9XuoVVwqP2jipt3jpJVXCSS2N2jr9vDuV3d6K73FKVud",
 );
 export const NICECHUNK_BOOTSTRAP_AUTHORITY = new PublicKey(
-  env.NICECHUNK_BOOTSTRAP_AUTHORITY ?? "9XuoVVwqP2jipt3jpJVXCSS2N2jr9vDuV3d6K73FKVud",
+  env.NICECHUNK_BOOTSTRAP_AUTHORITY ?? NICECHUNK_BLUEPRINT_ISSUER.toBase58(),
 );
 const UNIFIED_GAME_BACKPACK_NAMESPACE = 1;
 export const BACKPACK_SEED = "backpack";
 export const BACKPACK_MAGIC = "NCKBPK01";
-export const BACKPACK_VERSION = 3;
+export const BACKPACK_VERSION = 4;
 export const BACKPACK_DEFAULT_CAPACITY = 50;
 export const BACKPACK_MAX_CAPACITY = 99;
 export const BACKPACK_HEADER_LEN = 128;
@@ -43,25 +47,27 @@ export const BACKPACK_FORGED_ITEM_CODE = 8;
 export const BACKPACK_BLUEPRINT_ITEM_CODE = 9;
 export const BACKPACK_ITEM_FLAG_UNIQUE = 1;
 export const BACKPACK_ITEM_FLAG_MASS_VALID = 1 << 15;
-export const BACKPACK_FLAG_TOTAL_MASS_INITIALIZED = 1;
+export const BACKPACK_FLAG_MASS_STATE_VALID = 1;
+export const BACKPACK_FLAG_TOTAL_MASS_INITIALIZED = BACKPACK_FLAG_MASS_STATE_VALID;
 export const BACKPACK_TOTAL_MASS_GRAMS_OFFSET = 90;
 export const BACKPACK_LAST_MINE_PRE_MASS_GRAMS_OFFSET = 98;
 export const BACKPACK_LAST_MINE_ACTION_ID_OFFSET = 106;
 export const BACKPACK_MINE_SEQUENCE_OFFSET = 114;
+export const MATERIAL_PHYSICS_SEED = "material-physics-v2";
+export const MATERIAL_PHYSICS_MAGIC = "NCKPHY02";
+export const MATERIAL_PHYSICS_VERSION = 2;
+export const MATERIAL_PHYSICS_HEADER_LEN = 16;
+export const MATERIAL_PHYSICS_RULE_LEN = 8;
+export const MATERIAL_PHYSICS_MAX_RULES = 128;
+export const MATERIAL_PHYSICS_LEN = MATERIAL_PHYSICS_HEADER_LEN
+  + MATERIAL_PHYSICS_MAX_RULES * MATERIAL_PHYSICS_RULE_LEN;
+export const MATERIAL_PHYSICS_ITEM_KEY_MASK = 1 << 15;
 export const BLUEPRINT_ITEM_SEED = "blueprint-item";
 export const BLUEPRINT_ITEM_MAGIC = "NCKBPT01";
 export const BLUEPRINT_ITEM_VERSION = 1;
 export const BLUEPRINT_ITEM_LEN = 96;
 export const BACKPACK_DECORATION_METADATA_MASK = 0xffff;
 export const VERIFIED_FORGE_CODE_MAX_BYTES = 640;
-export const MATERIAL_PHYSICS_SEED = "material-physics-v1";
-export const MATERIAL_PHYSICS_MAGIC = "NCKPHY01";
-export const MATERIAL_PHYSICS_VERSION = 1;
-export const MATERIAL_PHYSICS_HEADER_LEN = 128;
-export const MATERIAL_PHYSICS_RECORD_LEN = 4;
-export const MATERIAL_PHYSICS_MAX_RECORDS = 240;
-export const MATERIAL_PHYSICS_LEN = MATERIAL_PHYSICS_HEADER_LEN
-  + MATERIAL_PHYSICS_MAX_RECORDS * MATERIAL_PHYSICS_RECORD_LEN;
 
 function backpackInstructionData(programId: PublicKey, data: Buffer): Buffer {
   return programId.equals(NICECHUNK_GAME_PROGRAM_ID)
@@ -109,7 +115,6 @@ export interface DecodedBackpack {
   createdSlot: bigint;
   updatedSlot: bigint;
   createdAt: bigint;
-  massInitialized: boolean;
   totalMassGrams: bigint;
   lastMinePreMassGrams: bigint;
   lastMineActionId: bigint;
@@ -118,24 +123,21 @@ export interface DecodedBackpack {
   slots: BackpackSlotRecord[];
 }
 
-export interface MaterialPhysicsRecord {
-  materialId: number;
+export interface MaterialPhysicsRule {
+  kind: "block" | "item";
+  id: number;
+  name?: string;
   densityKgM3: number;
+  standardVolumeMm3: number;
 }
 
-export interface DecodedMaterialPhysics {
+export interface DecodedMaterialPhysicsTable {
   magic: string;
   version: number;
   bump: number;
-  initialized: boolean;
-  authority: PublicKey;
-  globalConfig: PublicKey;
   revision: number;
-  recordCount: number;
-  createdSlot: bigint;
-  updatedSlot: bigint;
-  createdAt: bigint;
-  records: MaterialPhysicsRecord[];
+  ruleCount: number;
+  rules: MaterialPhysicsRule[];
 }
 
 export interface BackpackDecorationMetadata {
@@ -205,118 +207,63 @@ export function deriveBlueprintItemPda({
 
 export function deriveMaterialPhysicsPda({
   globalConfig,
-  programId = NICECHUNK_BACKPACK_PROGRAM_ID,
+  backpackProgramId = NICECHUNK_BACKPACK_PROGRAM_ID,
+  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
 }: {
-  globalConfig: PublicKey;
-  programId?: PublicKey;
-}): [PublicKey, number] {
+  globalConfig?: PublicKey;
+  backpackProgramId?: PublicKey;
+  coreProgramId?: PublicKey;
+} = {}): [PublicKey, number] {
+  const config = globalConfig ?? deriveGlobalConfigPda(coreProgramId)[0];
   return PublicKey.findProgramAddressSync(
-    [Buffer.from(MATERIAL_PHYSICS_SEED), globalConfig.toBuffer()],
-    programId,
+    [Buffer.from(MATERIAL_PHYSICS_SEED), config.toBuffer()],
+    backpackProgramId,
   );
 }
 
-export function createInitializeMaterialPhysicsInstruction({
+export function createConfigureMaterialPhysicsInstruction({
   authority,
+  revision,
+  rules,
   globalConfig,
   backpackProgramId = NICECHUNK_BACKPACK_PROGRAM_ID,
+  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
 }: {
   authority: PublicKey;
-  globalConfig: PublicKey;
+  revision: number;
+  rules: MaterialPhysicsRule[];
+  globalConfig?: PublicKey;
   backpackProgramId?: PublicKey;
+  coreProgramId?: PublicKey;
 }): TransactionInstruction {
+  const normalizedRevision = checkedUnsignedInteger(revision, 0xffffffff, "MaterialPhysics revision");
+  if (normalizedRevision === 0) throw new Error("MaterialPhysics revision must be non-zero.");
+  const normalizedRules = normalizeMaterialPhysicsRules(rules);
+  const config = globalConfig ?? deriveGlobalConfigPda(coreProgramId)[0];
   const [materialPhysics] = deriveMaterialPhysicsPda({
-    globalConfig,
-    programId: backpackProgramId,
+    globalConfig: config,
+    backpackProgramId,
+    coreProgramId,
+  });
+  const data = Buffer.alloc(6 + normalizedRules.length * MATERIAL_PHYSICS_RULE_LEN);
+  data.writeUInt8(12, 0);
+  data.writeUInt32LE(normalizedRevision, 1);
+  data.writeUInt8(normalizedRules.length, 5);
+  normalizedRules.forEach((rule, index) => {
+    const offset = 6 + index * MATERIAL_PHYSICS_RULE_LEN;
+    data.writeUInt16LE(materialPhysicsRuleKey(rule), offset);
+    data.writeUInt16LE(rule.densityKgM3, offset + 2);
+    data.writeUInt32LE(rule.standardVolumeMm3, offset + 4);
   });
   return new TransactionInstruction({
     programId: backpackProgramId,
     keys: [
       { pubkey: authority, isSigner: true, isWritable: true },
+      { pubkey: config, isSigner: false, isWritable: false },
       { pubkey: materialPhysics, isSigner: false, isWritable: true },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
-    data: backpackInstructionData(backpackProgramId, Buffer.from([12])),
-  });
-}
-
-export function createReplaceMaterialPhysicsInstruction({
-  authority,
-  globalConfig,
-  records,
-  backpackProgramId = NICECHUNK_BACKPACK_PROGRAM_ID,
-}: {
-  authority: PublicKey;
-  globalConfig: PublicKey;
-  records: MaterialPhysicsRecord[];
-  backpackProgramId?: PublicKey;
-}): TransactionInstruction {
-  const normalized = [...(records ?? [])]
-    .map((record) => ({
-      materialId: Math.trunc(Number(record.materialId)),
-      densityKgM3: Math.trunc(Number(record.densityKgM3)),
-    }))
-    .sort((left, right) => left.materialId - right.materialId);
-  if (!normalized.length || normalized.length > MATERIAL_PHYSICS_MAX_RECORDS) {
-    throw new Error(`Material physics requires 1-${MATERIAL_PHYSICS_MAX_RECORDS} records.`);
-  }
-  normalized.forEach((record, index) => {
-    if (record.materialId <= 0
-      || record.materialId > 0xffff
-      || record.densityKgM3 <= 0
-      || record.densityKgM3 > 0xffff
-      || (index > 0 && record.materialId === normalized[index - 1].materialId)) {
-      throw new Error("Material physics records require unique uint16 IDs and densities.");
-    }
-  });
-  const [materialPhysics] = deriveMaterialPhysicsPda({
-    globalConfig,
-    programId: backpackProgramId,
-  });
-  const data = Buffer.alloc(2 + normalized.length * MATERIAL_PHYSICS_RECORD_LEN);
-  data.writeUInt8(13, 0);
-  data.writeUInt8(normalized.length, 1);
-  normalized.forEach((record, index) => {
-    const offset = 2 + index * MATERIAL_PHYSICS_RECORD_LEN;
-    data.writeUInt16LE(record.materialId, offset);
-    data.writeUInt16LE(record.densityKgM3, offset + 2);
-  });
-  return new TransactionInstruction({
-    programId: backpackProgramId,
-    keys: [
-      { pubkey: authority, isSigner: true, isWritable: false },
-      { pubkey: materialPhysics, isSigner: false, isWritable: true },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
-    ],
     data: backpackInstructionData(backpackProgramId, data),
-  });
-}
-
-export function createMigrateBackpackMassInstruction({
-  owner,
-  backpack,
-  globalConfig,
-  backpackProgramId = NICECHUNK_BACKPACK_PROGRAM_ID,
-}: {
-  owner: PublicKey;
-  backpack: PublicKey;
-  globalConfig: PublicKey;
-  backpackProgramId?: PublicKey;
-}): TransactionInstruction {
-  const [materialPhysics] = deriveMaterialPhysicsPda({
-    globalConfig,
-    programId: backpackProgramId,
-  });
-  return new TransactionInstruction({
-    programId: backpackProgramId,
-    keys: [
-      { pubkey: owner, isSigner: true, isWritable: false },
-      { pubkey: backpack, isSigner: false, isWritable: true },
-      { pubkey: materialPhysics, isSigner: false, isWritable: false },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
-    ],
-    data: backpackInstructionData(backpackProgramId, Buffer.from([14])),
   });
 }
 
@@ -356,20 +303,17 @@ export function createAppendSmeltingItemInstruction({
   owner,
   backpack,
   slot,
-  globalConfig,
   backpackProgramId = NICECHUNK_BACKPACK_PROGRAM_ID,
+  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
 }: {
   smeltingAuthority: PublicKey;
   owner: PublicKey;
   backpack: PublicKey;
   slot: BackpackSlotRecord;
-  globalConfig: PublicKey;
   backpackProgramId?: PublicKey;
+  coreProgramId?: PublicKey;
 }): TransactionInstruction {
-  const [materialPhysics] = deriveMaterialPhysicsPda({
-    globalConfig,
-    programId: backpackProgramId,
-  });
+  const [materialPhysics] = deriveMaterialPhysicsPda({ backpackProgramId, coreProgramId });
   return new TransactionInstruction({
     programId: backpackProgramId,
     keys: [
@@ -377,7 +321,6 @@ export function createAppendSmeltingItemInstruction({
       { pubkey: owner, isSigner: false, isWritable: false },
       { pubkey: backpack, isSigner: false, isWritable: true },
       { pubkey: materialPhysics, isSigner: false, isWritable: false },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
     ],
     data: backpackInstructionData(backpackProgramId, Buffer.concat([Buffer.from([5]), encodeBackpackSlotRecord(slot)])),
   });
@@ -475,16 +418,20 @@ export function decodeBackpack(data: Buffer): DecodedBackpack {
   if (version !== BACKPACK_VERSION) throw new Error(`Invalid Backpack version: expected ${BACKPACK_VERSION}, got ${version}`);
   const capacity = data.readUInt8(52);
   const itemCount = data.readUInt8(53);
+  const flags = data.readUInt8(55);
+  if ((flags & BACKPACK_FLAG_MASS_STATE_VALID) === 0) {
+    throw new Error("Invalid Backpack mass state.");
+  }
   const records: BackpackResourceRecord[] = [];
   const slots: BackpackSlotRecord[] = [];
   const readableCount = Math.min(itemCount, capacity, BACKPACK_MAX_CAPACITY);
   for (let index = 0; index < readableCount; index += 1) {
     const offset = BACKPACK_HEADER_LEN + index * BACKPACK_SLOT_RECORD_LEN;
     const slot = decodeBackpackSlotRecord(data.subarray(offset, offset + BACKPACK_SLOT_RECORD_LEN));
+    if (slot.massGrams === undefined) throw new Error(`Backpack slot ${index} has no authoritative mass.`);
     slots.push(slot);
     if (slot.kind === BACKPACK_SLOT_KIND_BLOCK) records.push(slot.resource);
   }
-  const flags = data.readUInt8(55);
   return {
     magic,
     version,
@@ -504,7 +451,6 @@ export function decodeBackpack(data: Buffer): DecodedBackpack {
     createdSlot: data.readBigUInt64LE(66),
     updatedSlot: data.readBigUInt64LE(74),
     createdAt: data.readBigInt64LE(82),
-    massInitialized: (flags & BACKPACK_FLAG_TOTAL_MASS_INITIALIZED) !== 0,
     totalMassGrams: data.readBigUInt64LE(BACKPACK_TOTAL_MASS_GRAMS_OFFSET),
     lastMinePreMassGrams: data.readBigUInt64LE(BACKPACK_LAST_MINE_PRE_MASS_GRAMS_OFFSET),
     lastMineActionId: data.readBigUInt64LE(BACKPACK_LAST_MINE_ACTION_ID_OFFSET),
@@ -514,50 +460,57 @@ export function decodeBackpack(data: Buffer): DecodedBackpack {
   };
 }
 
-export function decodeMaterialPhysics(data: Buffer): DecodedMaterialPhysics {
-  if (data.length !== MATERIAL_PHYSICS_LEN) {
-    throw new Error(`Invalid MaterialPhysics length: expected ${MATERIAL_PHYSICS_LEN}, got ${data.length}`);
+export function decodeMaterialPhysicsTable(data: Buffer | Uint8Array): DecodedMaterialPhysicsTable {
+  const bytes = Buffer.from(data);
+  if (bytes.length !== MATERIAL_PHYSICS_LEN) {
+    throw new Error(`Invalid MaterialPhysics length: expected ${MATERIAL_PHYSICS_LEN}, got ${bytes.length}`);
   }
-  const magic = data.subarray(0, 8).toString("utf8");
-  if (magic !== MATERIAL_PHYSICS_MAGIC) {
-    throw new Error(`Invalid MaterialPhysics magic: ${magic}`);
-  }
-  const version = data.readUInt16LE(8);
+  const magic = bytes.subarray(0, 8).toString("utf8");
+  if (magic !== MATERIAL_PHYSICS_MAGIC) throw new Error(`Invalid MaterialPhysics magic: ${magic}`);
+  const version = bytes.readUInt8(8);
   if (version !== MATERIAL_PHYSICS_VERSION) {
     throw new Error(`Invalid MaterialPhysics version: expected ${MATERIAL_PHYSICS_VERSION}, got ${version}`);
   }
-  const recordCount = data.readUInt8(80);
-  if (recordCount > MATERIAL_PHYSICS_MAX_RECORDS) {
-    throw new Error(`Invalid MaterialPhysics record count: ${recordCount}`);
+  const ruleCount = bytes.readUInt8(10);
+  if (ruleCount < 1 || ruleCount > MATERIAL_PHYSICS_MAX_RULES) {
+    throw new Error(`Invalid MaterialPhysics rule count: ${ruleCount}`);
   }
-  const records: MaterialPhysicsRecord[] = [];
-  for (let index = 0; index < recordCount; index += 1) {
-    const offset = MATERIAL_PHYSICS_HEADER_LEN + index * MATERIAL_PHYSICS_RECORD_LEN;
-    const record = {
-      materialId: data.readUInt16LE(offset),
-      densityKgM3: data.readUInt16LE(offset + 2),
-    };
-    if (!record.materialId
-      || !record.densityKgM3
-      || (index > 0 && record.materialId <= records[index - 1].materialId)) {
-      throw new Error(`Invalid MaterialPhysics record at index ${index}.`);
+  const rules: MaterialPhysicsRule[] = [];
+  let previousKey = -1;
+  for (let index = 0; index < ruleCount; index += 1) {
+    const offset = MATERIAL_PHYSICS_HEADER_LEN + index * MATERIAL_PHYSICS_RULE_LEN;
+    const key = bytes.readUInt16LE(offset);
+    if (key <= previousKey) throw new Error("MaterialPhysics rules must use unique ascending keys.");
+    previousKey = key;
+    const kind = (key & MATERIAL_PHYSICS_ITEM_KEY_MASK) !== 0 ? "item" : "block";
+    const id = key & ~MATERIAL_PHYSICS_ITEM_KEY_MASK;
+    const densityKgM3 = bytes.readUInt16LE(offset + 2);
+    const standardVolumeMm3 = bytes.readUInt32LE(offset + 4);
+    if (id === 0 || densityKgM3 === 0 || standardVolumeMm3 === 0) {
+      throw new Error(`Invalid MaterialPhysics rule at index ${index}.`);
     }
-    records.push(record);
+    rules.push({ kind, id, densityKgM3, standardVolumeMm3 });
   }
   return {
     magic,
     version,
-    bump: data.readUInt8(10),
-    initialized: data.readUInt8(11) === 1,
-    authority: new PublicKey(data.subarray(12, 44)),
-    globalConfig: new PublicKey(data.subarray(44, 76)),
-    revision: data.readUInt32LE(76),
-    recordCount,
-    createdSlot: data.readBigUInt64LE(84),
-    updatedSlot: data.readBigUInt64LE(92),
-    createdAt: data.readBigInt64LE(100),
-    records,
+    bump: bytes.readUInt8(9),
+    revision: bytes.readUInt32LE(12),
+    ruleCount,
+    rules,
   };
+}
+
+export function materialPhysicsMassGrams(
+  rule: Pick<MaterialPhysicsRule, "densityKgM3">,
+  volumeMm3: number,
+): number {
+  const density = checkedUnsignedInteger(rule.densityKgM3, 0xffff, "MaterialPhysics density");
+  const volume = checkedUnsignedInteger(volumeMm3, 0xffffffff, "MaterialPhysics volume");
+  if (density === 0 || volume === 0) throw new Error("MaterialPhysics density and volume must be non-zero.");
+  const mass = (BigInt(volume) * BigInt(density) + 500_000n) / 1_000_000n;
+  if (mass > 0xffffffffn) throw new Error("MaterialPhysics mass exceeds u32.");
+  return Number(mass);
 }
 
 export function decodeBlueprintItem(data: Buffer): DecodedBlueprintItem {
@@ -645,31 +598,69 @@ export function decodeBackpackSlotRecord(data: Buffer): BackpackSlotRecord {
 
 export function encodeBackpackSlotRecord(slot: BackpackSlotRecord): Buffer {
   const data = Buffer.alloc(BACKPACK_SLOT_RECORD_LEN);
-  const hasExplicitMass = Number.isFinite(Number(slot.massGrams));
-  const flags = (slot.flags ?? 0) | (hasExplicitMass ? BACKPACK_ITEM_FLAG_MASS_VALID : 0);
-  const massGrams = Math.max(0, Math.min(0xffffffff, Math.floor(Number(slot.massGrams) || 0)));
+  const massGramsValue = slot.massGrams;
+  const hasMass = massGramsValue !== undefined;
+  const flags = (slot.flags ?? 0) | (hasMass ? BACKPACK_ITEM_FLAG_MASS_VALID : 0);
   data.writeUInt8(slot.kind, 0);
   data.writeUInt8(slot.category, 1);
   data.writeUInt16LE(flags, 2);
   data.writeUInt32LE(slot.quantity ?? 1, 4);
-  if (hasExplicitMass && slot.kind !== BACKPACK_SLOT_KIND_BLOCK) {
-    data.writeUInt32LE(massGrams, 8);
-  } else {
-    data.writeInt32LE(slot.resource?.worldX ?? 0, 8);
-  }
+  data.writeInt32LE(slot.resource?.worldX ?? 0, 8);
   data.writeInt16LE(slot.resource?.worldY ?? 0, 12);
   data.writeInt32LE(slot.resource?.worldZ ?? 0, 14);
   data.writeUInt16LE(slot.itemCode ?? 0, 18);
   data.writeBigUInt64LE(BigInt(slot.itemId ?? 0), 20);
   (slot.itemPda ?? PublicKey.default).toBuffer().copy(data, 28);
   data.writeUInt32LE(Math.max(0, Math.min(0xffffffff, Math.floor(Number(slot.volumeMm3) || 0))), 60);
-  data.writeUInt32LE(hasExplicitMass && slot.kind === BACKPACK_SLOT_KIND_BLOCK
-    ? massGrams
-    : Math.max(0, Math.min(0xffffffff, Math.floor(Number(slot.durabilityCurrent) || 0))), 64);
+  data.writeUInt32LE(Math.max(0, Math.min(0xffffffff, Math.floor(Number(slot.durabilityCurrent) || 0))), 64);
   data.writeUInt32LE(Math.max(0, Math.min(0xffffffff, Math.floor(Number(slot.durabilityMax) || 0))), 68);
   data.writeUInt8(Math.max(0, Math.min(255, Math.floor(Number(slot.grade) || 0))), 72);
   data.writeUInt8(Math.max(0, Math.min(255, Math.floor(Number(slot.itemLevel) || 0))), 73);
   data.writeUInt16LE(Math.max(0, Math.min(0xffff, Math.floor(Number(slot.qualityBps) || 0))), 74);
   data.writeUInt32LE(Math.max(0, Math.min(0xffffffff, Math.floor(Number(slot.metadata) || 0))), 76);
+  if (hasMass) {
+    const massGrams = checkedUnsignedInteger(massGramsValue, 0xffffffff, "Backpack slot mass");
+    data.writeUInt32LE(massGrams, slot.kind === BACKPACK_SLOT_KIND_BLOCK ? 64 : 8);
+  }
   return data;
+}
+
+function normalizeMaterialPhysicsRules(rules: MaterialPhysicsRule[]): MaterialPhysicsRule[] {
+  if (!Array.isArray(rules) || rules.length < 1 || rules.length > MATERIAL_PHYSICS_MAX_RULES) {
+    throw new Error(`MaterialPhysics requires 1-${MATERIAL_PHYSICS_MAX_RULES} rules.`);
+  }
+  const normalized = rules.map((rule) => ({
+    ...rule,
+    kind: rule.kind,
+    id: checkedUnsignedInteger(rule.id, MATERIAL_PHYSICS_ITEM_KEY_MASK - 1, "MaterialPhysics rule ID"),
+    densityKgM3: checkedUnsignedInteger(rule.densityKgM3, 0xffff, "MaterialPhysics density"),
+    standardVolumeMm3: checkedUnsignedInteger(rule.standardVolumeMm3, 0xffffffff, "MaterialPhysics standard volume"),
+  }));
+  for (const rule of normalized) {
+    if ((rule.kind !== "block" && rule.kind !== "item")
+      || rule.id === 0
+      || rule.densityKgM3 === 0
+      || rule.standardVolumeMm3 === 0) {
+      throw new Error("Invalid MaterialPhysics rule.");
+    }
+  }
+  normalized.sort((left, right) => materialPhysicsRuleKey(left) - materialPhysicsRuleKey(right));
+  for (let index = 1; index < normalized.length; index += 1) {
+    if (materialPhysicsRuleKey(normalized[index - 1]) === materialPhysicsRuleKey(normalized[index])) {
+      throw new Error(`Duplicate MaterialPhysics rule key: ${materialPhysicsRuleKey(normalized[index])}`);
+    }
+  }
+  return normalized;
+}
+
+function materialPhysicsRuleKey(rule: Pick<MaterialPhysicsRule, "kind" | "id">): number {
+  return rule.kind === "item" ? rule.id | MATERIAL_PHYSICS_ITEM_KEY_MASK : rule.id;
+}
+
+function checkedUnsignedInteger(value: number, maximum: number, label: string): number {
+  const normalized = Number(value);
+  if (!Number.isInteger(normalized) || normalized < 0 || normalized > maximum) {
+    throw new Error(`${label} must be an integer from 0 to ${maximum}.`);
+  }
+  return normalized;
 }

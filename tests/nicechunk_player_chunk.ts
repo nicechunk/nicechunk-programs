@@ -234,7 +234,7 @@ describe("nicechunk player and mining SDK", () => {
     assert.equal(ix.keys[3].pubkey.toBase58(), SystemProgram.programId.toBase58());
   });
 
-  it("decodes v3 backpack item reference slots", () => {
+  it("decodes v4 backpack item reference slots", () => {
     const [backpack, bump] = deriveBackpackPda({ creator: owner, backpackId: 9n });
     assert.ok(backpack);
     const itemPda = new PublicKey("CEzcpJe9UTq5FmVzpTfgPffMbqdG97YJeFMJYwUSFhNF");
@@ -256,7 +256,7 @@ describe("nicechunk player and mining SDK", () => {
     };
     const data = Buffer.alloc(BACKPACK_LEN);
     data.write("NCKBPK01", 0, "utf8");
-    data.writeUInt16LE(3, 8);
+    data.writeUInt16LE(4, 8);
     data.writeUInt8(bump, 10);
     data.writeUInt8(1, 11);
     data.writeBigUInt64LE(9n, 12);
@@ -270,7 +270,7 @@ describe("nicechunk player and mining SDK", () => {
     encodeBackpackSlotRecord(slot).copy(data, 128);
 
     const decoded = decodeBackpack(data);
-    assert.equal(decoded.version, 3);
+    assert.equal(decoded.version, 4);
     assert.equal(decoded.records.length, 0);
     assert.equal(decoded.slots.length, 1);
     assert.equal(decoded.slots[0].kind, BACKPACK_SLOT_KIND_ITEM);

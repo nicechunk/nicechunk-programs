@@ -34,8 +34,9 @@ const TOKEN_ACCOUNT_MINT_OFFSET: usize = 0;
 const TOKEN_ACCOUNT_OWNER_OFFSET: usize = 32;
 const BACKPACK_HEADER_LEN: usize = 128;
 const BACKPACK_LEN: usize = 8048;
-const BACKPACK_VERSION: u16 = 3;
+const BACKPACK_VERSION: u16 = 4;
 const BACKPACK_SEED: &[u8] = b"backpack";
+const MATERIAL_PHYSICS_SEED: &[u8] = b"material-physics-v2";
 const BACKPACK_ID_OFFSET: usize = 12;
 const BACKPACK_SLOT_RECORD_LEN: usize = 80;
 const BACKPACK_OWNER_OFFSET: usize = 20;
@@ -236,6 +237,7 @@ fn cancel_listing(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResul
     let market_authority = next_account_info(account_info_iter)?;
     let material_physics = next_account_info(account_info_iter)?;
     let global_config = next_account_info(account_info_iter)?;
+    validate_material_physics_accounts(backpack_program, material_physics, global_config)?;
     append_market_slot_to_backpack(
         program_id,
         market_authority,
@@ -243,7 +245,6 @@ fn cancel_listing(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResul
         backpack,
         backpack_program,
         material_physics,
-        global_config,
         &source_slot,
     )?;
 
@@ -409,6 +410,7 @@ fn buy_listing(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let market_authority = next_account_info(account_info_iter)?;
     let material_physics = next_account_info(account_info_iter)?;
     let global_config = next_account_info(account_info_iter)?;
+    validate_material_physics_accounts(backpack_program, material_physics, global_config)?;
     append_market_slot_to_backpack(
         program_id,
         market_authority,
@@ -416,7 +418,6 @@ fn buy_listing(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         buyer_backpack,
         backpack_program,
         material_physics,
-        global_config,
         &source_slot,
     )?;
 
@@ -741,7 +742,6 @@ fn append_market_slot_to_backpack<'a>(
     backpack: &AccountInfo<'a>,
     backpack_program: &AccountInfo<'a>,
     material_physics: &AccountInfo<'a>,
-    global_config: &AccountInfo<'a>,
     source_slot: &[u8; BACKPACK_SLOT_RECORD_LEN],
 ) -> ProgramResult {
     require_key_eq(
@@ -767,7 +767,6 @@ fn append_market_slot_to_backpack<'a>(
             solana_program::instruction::AccountMeta::new_readonly(*owner.key, false),
             solana_program::instruction::AccountMeta::new(*backpack.key, false),
             solana_program::instruction::AccountMeta::new_readonly(*material_physics.key, false),
-            solana_program::instruction::AccountMeta::new_readonly(*global_config.key, false),
         ],
         data,
     };
@@ -778,10 +777,30 @@ fn append_market_slot_to_backpack<'a>(
             owner.clone(),
             backpack.clone(),
             material_physics.clone(),
-            global_config.clone(),
             backpack_program.clone(),
         ],
         &[&[MARKET_AUTHORITY_SEED, &[bump]]],
+    )
+}
+
+fn validate_material_physics_accounts(
+    backpack_program: &AccountInfo,
+    material_physics: &AccountInfo,
+    global_config: &AccountInfo,
+) -> ProgramResult {
+    require_key_eq(
+        backpack_program.key,
+        &NICECHUNK_BACKPACK_PROGRAM_ID,
+        NicechunkMarketError::InvalidBackpackProgram,
+    )?;
+    let (expected, _) = Pubkey::find_program_address(
+        &[MATERIAL_PHYSICS_SEED, global_config.key.as_ref()],
+        backpack_program.key,
+    );
+    require_key_eq(
+        material_physics.key,
+        &expected,
+        NicechunkMarketError::InvalidMaterialPhysics,
     )
 }
 

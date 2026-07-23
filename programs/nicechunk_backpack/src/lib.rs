@@ -28,12 +28,12 @@ use cluster_config::{
 use errors::{require_key_eq, NicechunkBackpackError};
 use state::{
     verified_forge_design, BackpackAccount, BackpackInitArgs, BackpackResourceRecord,
-    BackpackSlotRecord, BlueprintItemAccount, ForgeMaterialRequirements, MaterialPhysicsRecord,
-    MaterialPhysicsState, PlayerEquipmentView, PlayerProfileView, PlayerSessionView,
+    BackpackSlotRecord, BlueprintItemAccount, ForgeMaterialRequirements, MaterialPhysicsTableState,
+    MaterialPhysicsTableView, PlayerEquipmentView, PlayerProfileView, PlayerSessionView,
     BACKPACK_BLUEPRINT_ITEM_CODE, BACKPACK_DEFAULT_CAPACITY, BACKPACK_ITEM_CATEGORY_BLUEPRINT,
-    BACKPACK_ITEM_FLAG_UNIQUE, BACKPACK_PACKED_Y_BITS, BACKPACK_SEED, BACKPACK_SLOT_KIND_ITEM,
-    BLUEPRINT_ITEM_SEED, EQUIPMENT_TRANSFER_AUTHORITY_SEED, MATERIAL_PHYSICS_MAX_RECORDS,
-    MATERIAL_PHYSICS_SEED, MAX_VERIFIED_FORGE_CODE_BYTES, SESSION_ACTION_BREAK_BLOCK,
+    BACKPACK_ITEM_FLAG_UNIQUE, BACKPACK_SEED, BACKPACK_SLOT_KIND_ITEM, BLUEPRINT_ITEM_SEED,
+    EQUIPMENT_TRANSFER_AUTHORITY_SEED, MATERIAL_PHYSICS_SEED, MAX_VERIFIED_FORGE_CODE_BYTES,
+    SESSION_ACTION_BREAK_BLOCK,
 };
 
 declare_id!("FwTrMDGyRg653L9svvt5aoGii9ZjX1WekSFWcwByjxqt");
@@ -42,7 +42,8 @@ const CHUNK_BROKEN_MAGIC: [u8; 4] = *b"NCBK";
 const CHUNK_BROKEN_VERSION: u8 = 1;
 const CHUNK_BROKEN_SEED: &[u8] = b"chunk-broken";
 const GLOBAL_CONFIG_MAGIC: [u8; 8] = *b"NCKCFG01";
-const GLOBAL_CONFIG_TREASURY_OFFSET: usize = 53;
+const GLOBAL_CONFIG_SEED: &[u8] = b"global-config";
+const GLOBAL_CONFIG_DEVELOPMENT_WALLET_OFFSET: usize = 53;
 const GLOBAL_CONFIG_CHUNK_SIZE_OFFSET: usize = 259;
 const GLOBAL_CONFIG_LEN: usize = 293;
 
@@ -71,25 +72,25 @@ pub fn process_instruction(
         9 => issue_blueprint(program_id, accounts, payload),
         10 => transfer_backpack_item_to_equipment(program_id, accounts, payload),
         11 => transfer_equipment_item_to_backpack(program_id, accounts, payload),
-        12 => initialize_material_physics(program_id, accounts, payload),
-        13 => replace_material_physics(program_id, accounts, payload),
-        14 => migrate_backpack_mass(program_id, accounts, payload),
+        12 => configure_material_physics(program_id, accounts, payload),
         _ => Err(NicechunkBackpackError::InvalidInstruction.into()),
     }
 }
 
-fn initialize_material_physics(
+fn configure_material_physics(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     payload: &[u8],
 ) -> ProgramResult {
-    if accounts.len() != 4 || !payload.is_empty() {
-        return Err(NicechunkBackpackError::InvalidInstruction.into());
+    if accounts.len() != 4 {
+        return Err(NicechunkBackpackError::InvalidAccountCount.into());
     }
+    MaterialPhysicsTableState::validate_payload(payload)?;
+
     let account_info_iter = &mut accounts.iter();
     let authority = next_account_info(account_info_iter)?;
-    let material_physics = next_account_info(account_info_iter)?;
     let global_config = next_account_info(account_info_iter)?;
+    let material_physics = next_account_info(account_info_iter)?;
     let system_program_account = next_account_info(account_info_iter)?;
 
     if !authority.is_signer || !authority.is_writable {
@@ -103,125 +104,60 @@ fn initialize_material_physics(
         &system_program::ID,
         NicechunkBackpackError::InvalidSystemProgram,
     )?;
-    let expected_treasury = validate_global_config_treasury(global_config)?;
-    validate_material_physics_authority(authority.key, &expected_treasury, true)?;
-    let (expected_physics, bump) = Pubkey::find_program_address(
+    validate_global_config(global_config)?;
+    let global_config_data = global_config.try_borrow_data()?;
+    let treasury = Pubkey::new_from_array(
+        global_config_data
+            [GLOBAL_CONFIG_DEVELOPMENT_WALLET_OFFSET..GLOBAL_CONFIG_DEVELOPMENT_WALLET_OFFSET + 32]
+            .try_into()
+            .map_err(|_| NicechunkBackpackError::InvalidGlobalConfig)?,
+    );
+    drop(global_config_data);
+
+    let (expected, bump) = Pubkey::find_program_address(
         &[MATERIAL_PHYSICS_SEED, global_config.key.as_ref()],
         program_id,
     );
     require_key_eq(
         material_physics.key,
-        &expected_physics,
-        NicechunkBackpackError::InvalidMaterialPhysicsData,
+        &expected,
+        NicechunkBackpackError::InvalidMaterialPhysicsPda,
     )?;
-    if material_physics.owner == program_id {
-        return Err(NicechunkBackpackError::InvalidMaterialPhysicsData.into());
-    }
-    create_material_physics_pda(
-        authority,
-        material_physics,
-        global_config,
-        system_program_account,
-        program_id,
-        bump,
-    )?;
-    let clock = Clock::get()?;
-    let mut data = material_physics.try_borrow_mut_data()?;
-    MaterialPhysicsState::pack_empty(
-        &mut data,
-        bump,
-        &expected_treasury,
-        global_config.key,
-        clock.slot,
-        clock.unix_timestamp,
-    )
-}
 
-fn replace_material_physics(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    payload: &[u8],
-) -> ProgramResult {
-    if accounts.len() != 3 || payload.is_empty() {
-        return Err(NicechunkBackpackError::InvalidInstruction.into());
-    }
-    let record_count = payload[0] as usize;
-    if record_count == 0
-        || record_count > MATERIAL_PHYSICS_MAX_RECORDS
-        || payload.len() != 1 + record_count * 4
+    let is_initializing = material_physics.owner != program_id;
+    if is_initializing
+        && (material_physics.owner != &system_program::ID || material_physics.data_len() != 0)
     {
-        return Err(NicechunkBackpackError::InvalidInstruction.into());
+        return Err(NicechunkBackpackError::InvalidSystemAccount.into());
     }
-    let account_info_iter = &mut accounts.iter();
-    let authority = next_account_info(account_info_iter)?;
-    let material_physics = next_account_info(account_info_iter)?;
-    let global_config = next_account_info(account_info_iter)?;
-    if !authority.is_signer {
+    if authority.key != &treasury
+        && (!is_initializing || authority.key != &NICECHUNK_BOOTSTRAP_AUTHORITY)
+    {
         return Err(NicechunkBackpackError::InvalidMaterialPhysicsAuthority.into());
     }
-    if !material_physics.is_writable {
-        return Err(NicechunkBackpackError::InvalidWritableAccount.into());
-    }
-    let expected_treasury = validate_global_config_treasury(global_config)?;
-    validate_material_physics_pda(program_id, material_physics, global_config)?;
-    let bootstrap_allowed = {
+
+    let next_revision = read_u32(payload, 0);
+    if !is_initializing {
         let data = material_physics.try_borrow_data()?;
-        let state = MaterialPhysicsState::validate(&data, global_config.key)?;
-        state.revision == 0 && state.record_count == 0
-    };
-    validate_material_physics_authority(authority.key, &expected_treasury, bootstrap_allowed)?;
-
-    let mut records = Vec::with_capacity(record_count);
-    for index in 0..record_count {
-        let offset = 1 + index * 4;
-        records.push(MaterialPhysicsRecord {
-            material_id: read_u16(payload, offset),
-            density_kg_m3: read_u16(payload, offset + 2),
-        });
+        if data.get(9).copied() != Some(bump)
+            || next_revision <= MaterialPhysicsTableState::revision(&data)?
+        {
+            return Err(NicechunkBackpackError::InvalidMaterialPhysicsData.into());
+        }
+        drop(data);
+    } else {
+        create_material_physics_pda(
+            authority,
+            material_physics,
+            system_program_account,
+            program_id,
+            global_config.key,
+            bump,
+        )?;
     }
-    let clock = Clock::get()?;
+
     let mut data = material_physics.try_borrow_mut_data()?;
-    MaterialPhysicsState::replace_records(
-        &mut data,
-        global_config.key,
-        &expected_treasury,
-        &records,
-        clock.slot,
-    )
-}
-
-fn migrate_backpack_mass(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    payload: &[u8],
-) -> ProgramResult {
-    if accounts.len() != 4 || !payload.is_empty() {
-        return Err(NicechunkBackpackError::InvalidInstruction.into());
-    }
-    let account_info_iter = &mut accounts.iter();
-    let owner = next_account_info(account_info_iter)?;
-    let backpack = next_account_info(account_info_iter)?;
-    let material_physics = next_account_info(account_info_iter)?;
-    let global_config = next_account_info(account_info_iter)?;
-    if !owner.is_signer {
-        return Err(NicechunkBackpackError::InvalidPayer.into());
-    }
-    if !backpack.is_writable {
-        return Err(NicechunkBackpackError::InvalidWritableAccount.into());
-    }
-    validate_global_config_treasury(global_config)?;
-    validate_material_physics_pda(program_id, material_physics, global_config)?;
-    validate_existing_backpack_pda(program_id, backpack, owner.key)?;
-    let physics_data = material_physics.try_borrow_data()?;
-    let clock = Clock::get()?;
-    let mut backpack_data = backpack.try_borrow_mut_data()?;
-    BackpackAccount::migrate_mass(
-        &mut backpack_data,
-        owner.key,
-        &physics_data,
-        global_config.key,
-        clock.slot,
-    )
+    MaterialPhysicsTableState::pack_payload(&mut data, bump, payload)
 }
 
 fn transfer_backpack_item_to_equipment(
@@ -229,7 +165,7 @@ fn transfer_backpack_item_to_equipment(
     accounts: &[AccountInfo],
     payload: &[u8],
 ) -> ProgramResult {
-    if accounts.len() != 6 || payload.len() != 2 {
+    if accounts.len() != 5 || payload.len() != 2 {
         return Err(NicechunkBackpackError::InvalidInstruction.into());
     }
     let equipment_slot = payload[0];
@@ -240,7 +176,6 @@ fn transfer_backpack_item_to_equipment(
     let backpack = next_account_info(account_info_iter)?;
     let player_equipment = next_account_info(account_info_iter)?;
     let material_physics = next_account_info(account_info_iter)?;
-    let global_config = next_account_info(account_info_iter)?;
 
     validate_equipment_transfer_accounts(
         program_id,
@@ -248,17 +183,18 @@ fn transfer_backpack_item_to_equipment(
         owner,
         backpack,
         player_equipment,
+        material_physics,
     )?;
-    let mut previous_equipment = {
+    let previous_equipment = {
         let equipment_data = player_equipment.try_borrow_data()?;
         PlayerEquipmentView::custodied_slot(&equipment_data, equipment_slot)?
     };
-    if let Some(record) = previous_equipment.as_mut() {
-        ensure_record_mass(program_id, material_physics, global_config, record, true)?;
-    }
     let clock = Clock::get()?;
     let mut backpack_data = backpack.try_borrow_mut_data()?;
     if let Some(previous) = previous_equipment {
+        let physics_data = material_physics.try_borrow_data()?;
+        MaterialPhysicsTableView::new(&physics_data)?.validate_mass(&previous)?;
+        drop(physics_data);
         BackpackAccount::replace_slot_at(
             &mut backpack_data,
             owner.key,
@@ -281,7 +217,7 @@ fn transfer_equipment_item_to_backpack(
     accounts: &[AccountInfo],
     payload: &[u8],
 ) -> ProgramResult {
-    if accounts.len() != 6 || payload.len() != 1 {
+    if accounts.len() != 5 || payload.len() != 1 {
         return Err(NicechunkBackpackError::InvalidInstruction.into());
     }
     let equipment_slot = payload[0];
@@ -291,7 +227,6 @@ fn transfer_equipment_item_to_backpack(
     let backpack = next_account_info(account_info_iter)?;
     let player_equipment = next_account_info(account_info_iter)?;
     let material_physics = next_account_info(account_info_iter)?;
-    let global_config = next_account_info(account_info_iter)?;
 
     validate_equipment_transfer_accounts(
         program_id,
@@ -299,19 +234,16 @@ fn transfer_equipment_item_to_backpack(
         owner,
         backpack,
         player_equipment,
+        material_physics,
     )?;
-    let mut equipment_record = {
+    let equipment_record = {
         let equipment_data = player_equipment.try_borrow_data()?;
         PlayerEquipmentView::custodied_slot(&equipment_data, equipment_slot)?
             .ok_or(NicechunkBackpackError::EquipmentSlotEmpty)?
     };
-    ensure_record_mass(
-        program_id,
-        material_physics,
-        global_config,
-        &mut equipment_record,
-        true,
-    )?;
+    let physics_data = material_physics.try_borrow_data()?;
+    MaterialPhysicsTableView::new(&physics_data)?.validate_mass(&equipment_record)?;
+    drop(physics_data);
     let clock = Clock::get()?;
     let mut backpack_data = backpack.try_borrow_mut_data()?;
     BackpackAccount::append_item(&mut backpack_data, owner.key, &equipment_record, clock.slot)
@@ -323,6 +255,7 @@ fn validate_equipment_transfer_accounts(
     owner: &AccountInfo,
     backpack: &AccountInfo,
     player_equipment: &AccountInfo,
+    material_physics: &AccountInfo,
 ) -> ProgramResult {
     let (expected_authority, _) = Pubkey::find_program_address(
         &[EQUIPMENT_TRANSFER_AUTHORITY_SEED],
@@ -348,6 +281,7 @@ fn validate_equipment_transfer_accounts(
         NicechunkBackpackError::InvalidPlayerProgram,
     )?;
     validate_existing_backpack_pda(program_id, backpack, owner.key)?;
+    validate_material_physics_pda(program_id, material_physics)?;
     let equipment_data = player_equipment.try_borrow_data()?;
     PlayerEquipmentView::validate(&equipment_data, player_equipment.key, owner.key)
         .map_err(Into::into)
@@ -439,7 +373,7 @@ fn issue_blueprint(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8]
         quality_bps: 10_000,
         metadata: 0,
     };
-    record.set_mass_grams(0);
+    record.set_mass_grams(0)?;
     let mut backpack_data = backpack.try_borrow_mut_data()?;
     BackpackAccount::append_issued_item(&mut backpack_data, recipient.key, &record, clock.slot)
 }
@@ -558,19 +492,21 @@ fn append_mined_resource(
         backpack,
         &record,
     )?;
-    validate_material_physics_pda(program_id, material_physics, global_config)?;
+    validate_material_physics_pda(program_id, material_physics)?;
     let physics_data = material_physics.try_borrow_data()?;
-    let mass_grams = mined_resource_mass(&physics_data, global_config.key, &record, volume_mm3)?;
+    let physics = MaterialPhysicsTableView::new(&physics_data)?;
+    let slot = BackpackSlotRecord::from_block_resource_with_volume(record, volume_mm3);
+    let mass_grams = physics.block_mass_grams(slot.block_id()?, volume_mm3)?;
+    drop(physics_data);
 
     let clock = Clock::get()?;
     let mut backpack_data = backpack.try_borrow_mut_data()?;
     BackpackAccount::record_mining_action(&mut backpack_data, &owner, action_id, clock.slot)?;
-    BackpackAccount::append_resource_with_volume_metadata_and_mass(
+    BackpackAccount::append_resource_with_volume(
         &mut backpack_data,
         &owner,
         &record,
         volume_mm3,
-        0,
         mass_grams,
         clock.slot,
     )
@@ -641,20 +577,23 @@ fn append_mined_resources_batch(
     for record in records.iter().skip(1) {
         validate_chunk_broken_pda_for_record(chunk_broken, global_config, record)?;
     }
-    validate_material_physics_pda(program_id, material_physics, global_config)?;
+    validate_material_physics_pda(program_id, material_physics)?;
     let physics_data = material_physics.try_borrow_data()?;
+    let physics = MaterialPhysicsTableView::new(&physics_data)?;
     let masses_grams = records
         .iter()
         .zip(volumes_mm3.iter())
-        .map(|(record, volume)| {
-            mined_resource_mass(&physics_data, global_config.key, record, *volume)
+        .map(|(record, volume_mm3)| {
+            let slot = BackpackSlotRecord::from_block_resource_with_volume(*record, *volume_mm3);
+            physics.block_mass_grams(slot.block_id()?, *volume_mm3)
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, NicechunkBackpackError>>()?;
+    drop(physics_data);
 
     let clock = Clock::get()?;
     let mut backpack_data = backpack.try_borrow_mut_data()?;
     BackpackAccount::record_mining_action(&mut backpack_data, &owner, action_id, clock.slot)?;
-    BackpackAccount::append_resources_lossy_with_physics(
+    BackpackAccount::append_resources_lossy_with_volumes_and_metadata(
         &mut backpack_data,
         &owner,
         &records,
@@ -752,17 +691,16 @@ fn append_market_resource(
     accounts: &[AccountInfo],
     payload: &[u8],
 ) -> ProgramResult {
-    if accounts.len() != 5 || payload.len() != BackpackSlotRecord::LEN {
+    if accounts.len() != 4 || payload.len() != BackpackSlotRecord::LEN {
         return Err(NicechunkBackpackError::InvalidInstruction.into());
     }
 
-    let mut record = BackpackSlotRecord::unpack(payload)?;
+    let record = BackpackSlotRecord::unpack(payload)?;
     let account_info_iter = &mut accounts.iter();
     let market_authority = next_account_info(account_info_iter)?;
     let owner = next_account_info(account_info_iter)?;
     let backpack = next_account_info(account_info_iter)?;
     let material_physics = next_account_info(account_info_iter)?;
-    let global_config = next_account_info(account_info_iter)?;
 
     if !market_authority.is_signer {
         return Err(NicechunkBackpackError::InvalidMarketAuthority.into());
@@ -783,13 +721,10 @@ fn append_market_resource(
         NicechunkBackpackError::InvalidBackpackOwner,
     )?;
     validate_existing_backpack_pda(program_id, backpack, owner.key)?;
-    ensure_record_mass(
-        program_id,
-        material_physics,
-        global_config,
-        &mut record,
-        true,
-    )?;
+    validate_material_physics_pda(program_id, material_physics)?;
+    let physics_data = material_physics.try_borrow_data()?;
+    MaterialPhysicsTableView::new(&physics_data)?.validate_mass(&record)?;
+    drop(physics_data);
 
     let clock = Clock::get()?;
     let mut backpack_data = backpack.try_borrow_mut_data()?;
@@ -801,7 +736,7 @@ fn append_smelting_item(
     accounts: &[AccountInfo],
     payload: &[u8],
 ) -> ProgramResult {
-    if accounts.len() != 5 || payload.len() != BackpackSlotRecord::LEN {
+    if accounts.len() != 4 || payload.len() != BackpackSlotRecord::LEN {
         return Err(NicechunkBackpackError::InvalidInstruction.into());
     }
 
@@ -811,7 +746,6 @@ fn append_smelting_item(
     let owner = next_account_info(account_info_iter)?;
     let backpack = next_account_info(account_info_iter)?;
     let material_physics = next_account_info(account_info_iter)?;
-    let global_config = next_account_info(account_info_iter)?;
 
     if !smelting_authority.is_signer {
         return Err(NicechunkBackpackError::InvalidSmeltingAuthority.into());
@@ -832,13 +766,10 @@ fn append_smelting_item(
         NicechunkBackpackError::InvalidBackpackOwner,
     )?;
     validate_existing_backpack_pda(program_id, backpack, owner.key)?;
-    ensure_record_mass(
-        program_id,
-        material_physics,
-        global_config,
-        &mut record,
-        false,
-    )?;
+    validate_material_physics_pda(program_id, material_physics)?;
+    let physics_data = material_physics.try_borrow_data()?;
+    MaterialPhysicsTableView::new(&physics_data)?.apply_mass(&mut record)?;
+    drop(physics_data);
 
     let clock = Clock::get()?;
     let mut backpack_data = backpack.try_borrow_mut_data()?;
@@ -1063,6 +994,52 @@ fn validate_backpack_pda(
     Ok(bump)
 }
 
+fn validate_global_config(global_config: &AccountInfo) -> ProgramResult {
+    require_key_eq(
+        global_config.owner,
+        &NICECHUNK_CORE_PROGRAM_ID,
+        NicechunkBackpackError::InvalidGlobalConfig,
+    )?;
+    let (expected, _) =
+        Pubkey::find_program_address(&[GLOBAL_CONFIG_SEED], &NICECHUNK_CORE_PROGRAM_ID);
+    require_key_eq(
+        global_config.key,
+        &expected,
+        NicechunkBackpackError::InvalidGlobalConfig,
+    )?;
+    let data = global_config.try_borrow_data()?;
+    if data.len() != GLOBAL_CONFIG_LEN || data[0..8] != GLOBAL_CONFIG_MAGIC {
+        return Err(NicechunkBackpackError::InvalidGlobalConfig.into());
+    }
+    Ok(())
+}
+
+fn validate_material_physics_pda(
+    program_id: &Pubkey,
+    material_physics: &AccountInfo,
+) -> ProgramResult {
+    require_key_eq(
+        material_physics.owner,
+        program_id,
+        NicechunkBackpackError::InvalidMaterialPhysicsPda,
+    )?;
+    let (global_config, _) =
+        Pubkey::find_program_address(&[GLOBAL_CONFIG_SEED], &NICECHUNK_CORE_PROGRAM_ID);
+    let (expected, bump) =
+        Pubkey::find_program_address(&[MATERIAL_PHYSICS_SEED, global_config.as_ref()], program_id);
+    require_key_eq(
+        material_physics.key,
+        &expected,
+        NicechunkBackpackError::InvalidMaterialPhysicsPda,
+    )?;
+    let data = material_physics.try_borrow_data()?;
+    MaterialPhysicsTableState::validate_header(&data)?;
+    if data.get(9).copied() != Some(bump) {
+        return Err(NicechunkBackpackError::InvalidMaterialPhysicsData.into());
+    }
+    Ok(())
+}
+
 fn validate_chunk_reward_authority(
     program_id: &Pubkey,
     chunk_broken: &AccountInfo,
@@ -1172,91 +1149,6 @@ fn validate_chunk_broken_pda_for_record(
     Ok(())
 }
 
-fn validate_global_config_treasury(
-    global_config: &AccountInfo,
-) -> Result<Pubkey, solana_program::program_error::ProgramError> {
-    require_key_eq(
-        global_config.owner,
-        &NICECHUNK_CORE_PROGRAM_ID,
-        NicechunkBackpackError::InvalidGlobalConfig,
-    )?;
-    let data = global_config.try_borrow_data()?;
-    if data.len() != GLOBAL_CONFIG_LEN || data[0..8] != GLOBAL_CONFIG_MAGIC {
-        return Err(NicechunkBackpackError::InvalidGlobalConfig.into());
-    }
-    let bytes: [u8; 32] = data[GLOBAL_CONFIG_TREASURY_OFFSET..GLOBAL_CONFIG_TREASURY_OFFSET + 32]
-        .try_into()
-        .map_err(|_| NicechunkBackpackError::InvalidGlobalConfig)?;
-    Ok(Pubkey::new_from_array(bytes))
-}
-
-fn validate_material_physics_pda(
-    program_id: &Pubkey,
-    material_physics: &AccountInfo,
-    global_config: &AccountInfo,
-) -> ProgramResult {
-    require_key_eq(
-        material_physics.owner,
-        program_id,
-        NicechunkBackpackError::InvalidMaterialPhysicsData,
-    )?;
-    let (expected, _) = Pubkey::find_program_address(
-        &[MATERIAL_PHYSICS_SEED, global_config.key.as_ref()],
-        program_id,
-    );
-    require_key_eq(
-        material_physics.key,
-        &expected,
-        NicechunkBackpackError::InvalidMaterialPhysicsData,
-    )?;
-    let data = material_physics.try_borrow_data()?;
-    MaterialPhysicsState::validate(&data, global_config.key)?;
-    Ok(())
-}
-
-fn validate_material_physics_authority(
-    authority: &Pubkey,
-    treasury: &Pubkey,
-    bootstrap_allowed: bool,
-) -> ProgramResult {
-    if authority == treasury || (bootstrap_allowed && authority == &NICECHUNK_BOOTSTRAP_AUTHORITY) {
-        return Ok(());
-    }
-    Err(NicechunkBackpackError::InvalidMaterialPhysicsAuthority.into())
-}
-
-fn mined_resource_mass(
-    physics_data: &[u8],
-    global_config: &Pubkey,
-    record: &BackpackResourceRecord,
-    volume_mm3: u32,
-) -> Result<u32, solana_program::program_error::ProgramError> {
-    if record.world_y < 0 {
-        return Err(NicechunkBackpackError::MissingMaterialPhysicsRecord.into());
-    }
-    let material_id = (record.world_y as u16) >> BACKPACK_PACKED_Y_BITS;
-    MaterialPhysicsState::mass_grams(physics_data, global_config, material_id, volume_mm3)
-        .map_err(Into::into)
-}
-
-fn ensure_record_mass(
-    program_id: &Pubkey,
-    material_physics: &AccountInfo,
-    global_config: &AccountInfo,
-    record: &mut BackpackSlotRecord,
-    preserve_valid_mass: bool,
-) -> ProgramResult {
-    validate_global_config_treasury(global_config)?;
-    validate_material_physics_pda(program_id, material_physics, global_config)?;
-    if preserve_valid_mass && record.has_valid_mass() {
-        return Ok(());
-    }
-    let physics_data = material_physics.try_borrow_data()?;
-    let mass_grams = record.derived_mass_grams(&physics_data, global_config.key)?;
-    record.set_mass_grams(mass_grams);
-    Ok(())
-}
-
 fn create_backpack_pda<'a>(
     payer: &AccountInfo<'a>,
     backpack: &AccountInfo<'a>,
@@ -1293,29 +1185,26 @@ fn create_backpack_pda<'a>(
 }
 
 fn create_material_physics_pda<'a>(
-    payer: &AccountInfo<'a>,
+    authority: &AccountInfo<'a>,
     material_physics: &AccountInfo<'a>,
-    global_config: &AccountInfo<'a>,
     system_program_account: &AccountInfo<'a>,
     program_id: &Pubkey,
+    global_config: &Pubkey,
     bump: u8,
 ) -> ProgramResult {
-    if material_physics.owner != &system_program::ID || material_physics.data_len() != 0 {
-        return Err(NicechunkBackpackError::InvalidSystemAccount.into());
-    }
-    let seeds = &[MATERIAL_PHYSICS_SEED, global_config.key.as_ref(), &[bump]];
+    let seeds = &[MATERIAL_PHYSICS_SEED, global_config.as_ref(), &[bump]];
     let rent = Rent::get()?;
     let create = system_instruction::create_account(
-        payer.key,
+        authority.key,
         material_physics.key,
-        rent.minimum_balance(MaterialPhysicsState::LEN),
-        MaterialPhysicsState::LEN as u64,
+        rent.minimum_balance(MaterialPhysicsTableState::LEN),
+        MaterialPhysicsTableState::LEN as u64,
         program_id,
     );
     invoke_signed(
         &create,
         &[
-            payer.clone(),
+            authority.clone(),
             material_physics.clone(),
             system_program_account.clone(),
         ],
@@ -1408,6 +1297,15 @@ fn read_u16(data: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([data[offset], data[offset + 1]])
 }
 
+fn read_u32(data: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
+}
+
 fn read_u64(data: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes([
         data[offset],
@@ -1434,26 +1332,5 @@ mod instruction_tests {
             ProgramError::Custom(code)
                 if code == NicechunkBackpackError::UnverifiedForgeInstructionDisabled as u32
         ));
-    }
-
-    #[test]
-    fn material_physics_bootstrap_is_one_time_only() {
-        let treasury = Pubkey::new_unique();
-        let stranger = Pubkey::new_unique();
-
-        assert!(validate_material_physics_authority(&treasury, &treasury, false).is_ok());
-        assert!(validate_material_physics_authority(
-            &NICECHUNK_BOOTSTRAP_AUTHORITY,
-            &treasury,
-            true,
-        )
-        .is_ok());
-        assert!(validate_material_physics_authority(
-            &NICECHUNK_BOOTSTRAP_AUTHORITY,
-            &treasury,
-            false,
-        )
-        .is_err());
-        assert!(validate_material_physics_authority(&stranger, &treasury, true).is_err());
     }
 }

@@ -41,14 +41,13 @@ pub enum NicechunkBackpackError {
     InvalidEquipmentTransferAuthority = 6435,
     InvalidEquipmentSlot = 6436,
     EquipmentSlotEmpty = 6437,
-    InvalidMaterialPhysicsData = 6438,
-    InvalidMaterialPhysicsAuthority = 6439,
-    InvalidMaterialPhysicsRecord = 6440,
-    MissingMaterialPhysicsRecord = 6441,
-    BackpackMassMigrationRequired = 6442,
-    BackpackMassInvariantViolation = 6443,
-    ArithmeticOverflow = 6444,
-    InvalidMiningAction = 6445,
+    InvalidMaterialPhysicsPda = 6438,
+    InvalidMaterialPhysicsData = 6439,
+    InvalidMaterialPhysicsRule = 6440,
+    InvalidMaterialPhysicsAuthority = 6441,
+    InvalidBackpackMassState = 6442,
+    BackpackMassOverflow = 6443,
+    InvalidMiningAction = 6444,
 }
 
 impl From<NicechunkBackpackError> for ProgramError {

@@ -3,7 +3,7 @@ use solana_program::{entrypoint::ProgramResult, pubkey::Pubkey};
 use crate::errors::NicechunkBackpackError;
 
 pub const BACKPACK_MAGIC: [u8; 8] = *b"NCKBPK01";
-pub const BACKPACK_VERSION: u16 = 3;
+pub const BACKPACK_VERSION: u16 = 4;
 pub const BACKPACK_SEED: &[u8] = b"backpack";
 pub const BACKPACK_DEFAULT_CAPACITY: u8 = 50;
 pub const BACKPACK_MAX_CAPACITY: u8 = 99;
@@ -23,18 +23,16 @@ pub const BACKPACK_FORGED_ITEM_CODE: u16 = 8;
 pub const BACKPACK_BLUEPRINT_ITEM_CODE: u16 = 9;
 pub const BACKPACK_ITEM_FLAG_UNIQUE: u16 = 1;
 pub const BACKPACK_ITEM_FLAG_MASS_VALID: u16 = 1 << 15;
-pub const BACKPACK_FLAG_TOTAL_MASS_INITIALIZED: u8 = 1;
-pub const BACKPACK_DEFAULT_RESOURCE_VOLUME_MM3: u32 = 1_000_000;
-pub const BACKPACK_PACKED_Y_BITS: u16 = 9;
-pub const LEGACY_FORGED_MATERIAL_ID: u16 = u16::MAX;
-pub const MATERIAL_PHYSICS_MAGIC: [u8; 8] = *b"NCKPHY01";
-pub const MATERIAL_PHYSICS_VERSION: u16 = 1;
-pub const MATERIAL_PHYSICS_SEED: &[u8] = b"material-physics-v1";
-pub const MATERIAL_PHYSICS_HEADER_LEN: usize = 128;
-pub const MATERIAL_PHYSICS_RECORD_LEN: usize = 4;
-pub const MATERIAL_PHYSICS_MAX_RECORDS: usize = 240;
+pub const BACKPACK_FLAG_MASS_STATE_VALID: u8 = 1;
+pub const MATERIAL_PHYSICS_MAGIC: [u8; 8] = *b"NCKPHY02";
+pub const MATERIAL_PHYSICS_VERSION: u8 = 2;
+pub const MATERIAL_PHYSICS_SEED: &[u8] = b"material-physics-v2";
+pub const MATERIAL_PHYSICS_HEADER_LEN: usize = 16;
+pub const MATERIAL_PHYSICS_RULE_LEN: usize = 8;
+pub const MATERIAL_PHYSICS_MAX_RULES: usize = 128;
 pub const MATERIAL_PHYSICS_LEN: usize =
-    MATERIAL_PHYSICS_HEADER_LEN + MATERIAL_PHYSICS_MAX_RECORDS * MATERIAL_PHYSICS_RECORD_LEN;
+    MATERIAL_PHYSICS_HEADER_LEN + MATERIAL_PHYSICS_MAX_RULES * MATERIAL_PHYSICS_RULE_LEN;
+pub const MATERIAL_PHYSICS_ITEM_KEY_MASK: u16 = 1 << 15;
 pub const BLUEPRINT_ITEM_MAGIC: [u8; 8] = *b"NCKBPT01";
 pub const BLUEPRINT_ITEM_VERSION: u16 = 1;
 pub const BLUEPRINT_ITEM_SEED: &[u8] = b"blueprint-item";
@@ -44,6 +42,260 @@ pub const MAX_FORGING_INPUTS: usize = 24;
 pub const MAX_VERIFIED_FORGE_CODE_BYTES: usize = 640;
 const NCF1_VERSION: u32 = 14;
 const NCF1_ATTRIBUTE_COUNT: usize = 12;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MaterialPhysicsRule {
+    pub key: u16,
+    pub density_kg_m3: u16,
+    pub standard_volume_mm3: u32,
+}
+
+impl MaterialPhysicsRule {
+    pub fn block_key(block_id: u16) -> Result<u16, NicechunkBackpackError> {
+        if block_id == 0 || block_id & MATERIAL_PHYSICS_ITEM_KEY_MASK != 0 {
+            return Err(NicechunkBackpackError::InvalidMaterialPhysicsRule);
+        }
+        Ok(block_id)
+    }
+
+    pub fn item_key(item_code: u16) -> Result<u16, NicechunkBackpackError> {
+        if item_code == 0 || item_code & MATERIAL_PHYSICS_ITEM_KEY_MASK != 0 {
+            return Err(NicechunkBackpackError::InvalidMaterialPhysicsRule);
+        }
+        Ok(item_code | MATERIAL_PHYSICS_ITEM_KEY_MASK)
+    }
+
+    pub fn unpack(data: &[u8]) -> Result<Self, NicechunkBackpackError> {
+        if data.len() != MATERIAL_PHYSICS_RULE_LEN {
+            return Err(NicechunkBackpackError::InvalidMaterialPhysicsRule);
+        }
+        let rule = Self {
+            key: read_u16(data, 0),
+            density_kg_m3: read_u16(data, 2),
+            standard_volume_mm3: read_u32(data, 4),
+        };
+        rule.validate()?;
+        Ok(rule)
+    }
+
+    pub fn pack(&self, dst: &mut [u8]) -> ProgramResult {
+        if dst.len() != MATERIAL_PHYSICS_RULE_LEN {
+            return Err(NicechunkBackpackError::InvalidMaterialPhysicsRule.into());
+        }
+        self.validate()?;
+        dst[0..2].copy_from_slice(&self.key.to_le_bytes());
+        dst[2..4].copy_from_slice(&self.density_kg_m3.to_le_bytes());
+        dst[4..8].copy_from_slice(&self.standard_volume_mm3.to_le_bytes());
+        Ok(())
+    }
+
+    pub fn mass_grams(&self, volume_mm3: u32) -> Result<u32, NicechunkBackpackError> {
+        if volume_mm3 == 0 {
+            return Err(NicechunkBackpackError::InvalidMaterialPhysicsRule);
+        }
+        let numerator = (volume_mm3 as u64)
+            .checked_mul(self.density_kg_m3 as u64)
+            .ok_or(NicechunkBackpackError::BackpackMassOverflow)?;
+        let rounded = numerator
+            .checked_add(500_000)
+            .ok_or(NicechunkBackpackError::BackpackMassOverflow)?
+            / 1_000_000;
+        u32::try_from(rounded).map_err(|_| NicechunkBackpackError::BackpackMassOverflow)
+    }
+
+    fn validate(&self) -> Result<(), NicechunkBackpackError> {
+        let id = self.key & !MATERIAL_PHYSICS_ITEM_KEY_MASK;
+        if id == 0 || self.density_kg_m3 == 0 || self.standard_volume_mm3 == 0 {
+            return Err(NicechunkBackpackError::InvalidMaterialPhysicsRule);
+        }
+        Ok(())
+    }
+}
+
+pub struct MaterialPhysicsTableState;
+
+impl MaterialPhysicsTableState {
+    pub const LEN: usize = MATERIAL_PHYSICS_LEN;
+    pub const REVISION_OFFSET: usize = 12;
+
+    pub fn validate_payload(payload: &[u8]) -> Result<usize, NicechunkBackpackError> {
+        if payload.len() < 5 {
+            return Err(NicechunkBackpackError::InvalidMaterialPhysicsData);
+        }
+        if read_u32(payload, 0) == 0 {
+            return Err(NicechunkBackpackError::InvalidMaterialPhysicsData);
+        }
+        let count = payload[4] as usize;
+        if count == 0
+            || count > MATERIAL_PHYSICS_MAX_RULES
+            || payload.len() != 5 + count * MATERIAL_PHYSICS_RULE_LEN
+        {
+            return Err(NicechunkBackpackError::InvalidMaterialPhysicsData);
+        }
+        Self::validate_sorted_rules(&payload[5..], count)?;
+        Ok(count)
+    }
+
+    pub fn pack_payload(dst: &mut [u8], bump: u8, payload: &[u8]) -> ProgramResult {
+        let count = Self::validate_payload(payload)?;
+        if dst.len() != Self::LEN {
+            return Err(NicechunkBackpackError::InvalidMaterialPhysicsData.into());
+        }
+        dst.fill(0);
+        dst[0..8].copy_from_slice(&MATERIAL_PHYSICS_MAGIC);
+        dst[8] = MATERIAL_PHYSICS_VERSION;
+        dst[9] = bump;
+        dst[10] = count as u8;
+        dst[Self::REVISION_OFFSET..Self::REVISION_OFFSET + 4].copy_from_slice(&payload[0..4]);
+        let byte_len = count * MATERIAL_PHYSICS_RULE_LEN;
+        dst[MATERIAL_PHYSICS_HEADER_LEN..MATERIAL_PHYSICS_HEADER_LEN + byte_len]
+            .copy_from_slice(&payload[5..]);
+        Ok(())
+    }
+
+    pub fn validate_header(data: &[u8]) -> Result<usize, NicechunkBackpackError> {
+        if data.len() != Self::LEN
+            || data[0..8] != MATERIAL_PHYSICS_MAGIC
+            || data[8] != MATERIAL_PHYSICS_VERSION
+        {
+            return Err(NicechunkBackpackError::InvalidMaterialPhysicsData);
+        }
+        let count = data[10] as usize;
+        if count == 0 || count > MATERIAL_PHYSICS_MAX_RULES {
+            return Err(NicechunkBackpackError::InvalidMaterialPhysicsData);
+        }
+        Ok(count)
+    }
+
+    pub fn block_rule(
+        data: &[u8],
+        block_id: u16,
+    ) -> Result<MaterialPhysicsRule, NicechunkBackpackError> {
+        MaterialPhysicsTableView::new(data)?.block_rule(block_id)
+    }
+
+    pub fn item_rule(
+        data: &[u8],
+        item_code: u16,
+    ) -> Result<MaterialPhysicsRule, NicechunkBackpackError> {
+        MaterialPhysicsTableView::new(data)?.item_rule(item_code)
+    }
+
+    pub fn apply_mass(
+        data: &[u8],
+        slot: &mut BackpackSlotRecord,
+    ) -> Result<u32, NicechunkBackpackError> {
+        MaterialPhysicsTableView::new(data)?.apply_mass(slot)
+    }
+
+    pub fn validate_mass(
+        data: &[u8],
+        slot: &BackpackSlotRecord,
+    ) -> Result<u32, NicechunkBackpackError> {
+        MaterialPhysicsTableView::new(data)?.validate_mass(slot)
+    }
+
+    fn validate_sorted_rules(data: &[u8], count: usize) -> Result<(), NicechunkBackpackError> {
+        let mut previous = 0_u16;
+        for index in 0..count {
+            let offset = index * MATERIAL_PHYSICS_RULE_LEN;
+            let rule =
+                MaterialPhysicsRule::unpack(&data[offset..offset + MATERIAL_PHYSICS_RULE_LEN])?;
+            if index > 0 && rule.key <= previous {
+                return Err(NicechunkBackpackError::InvalidMaterialPhysicsData);
+            }
+            previous = rule.key;
+        }
+        Ok(())
+    }
+
+    pub fn revision(data: &[u8]) -> Result<u32, NicechunkBackpackError> {
+        Self::validate_header(data)?;
+        Ok(read_u32(data, Self::REVISION_OFFSET))
+    }
+}
+
+pub struct MaterialPhysicsTableView<'a> {
+    data: &'a [u8],
+    count: usize,
+}
+
+impl<'a> MaterialPhysicsTableView<'a> {
+    pub fn new(data: &'a [u8]) -> Result<Self, NicechunkBackpackError> {
+        Ok(Self {
+            data,
+            count: MaterialPhysicsTableState::validate_header(data)?,
+        })
+    }
+
+    pub fn block_rule(&self, block_id: u16) -> Result<MaterialPhysicsRule, NicechunkBackpackError> {
+        self.rule(MaterialPhysicsRule::block_key(block_id)?)
+    }
+
+    pub fn item_rule(&self, item_code: u16) -> Result<MaterialPhysicsRule, NicechunkBackpackError> {
+        self.rule(MaterialPhysicsRule::item_key(item_code)?)
+    }
+
+    pub fn block_mass_grams(
+        &self,
+        block_id: u16,
+        volume_mm3: u32,
+    ) -> Result<u32, NicechunkBackpackError> {
+        self.block_rule(block_id)?.mass_grams(volume_mm3)
+    }
+
+    pub fn apply_mass(&self, slot: &mut BackpackSlotRecord) -> Result<u32, NicechunkBackpackError> {
+        let mass_grams = match slot.kind {
+            BACKPACK_SLOT_KIND_BLOCK => self
+                .block_rule(slot.block_id()?)?
+                .mass_grams(slot.volume_mm3)?,
+            BACKPACK_SLOT_KIND_ITEM if slot.category == BACKPACK_ITEM_CATEGORY_MATERIAL => self
+                .item_rule(slot.item_code)?
+                .mass_grams(slot.volume_mm3)?,
+            BACKPACK_SLOT_KIND_ITEM
+                if matches!(
+                    slot.category,
+                    BACKPACK_ITEM_CATEGORY_FORGED | BACKPACK_ITEM_CATEGORY_BLUEPRINT
+                ) =>
+            {
+                slot.mass_grams()?
+            }
+            _ => return Err(NicechunkBackpackError::InvalidInventoryItem),
+        };
+        slot.set_mass_grams(mass_grams)
+            .map_err(|_| NicechunkBackpackError::InvalidInventoryItem)?;
+        Ok(mass_grams)
+    }
+
+    pub fn validate_mass(&self, slot: &BackpackSlotRecord) -> Result<u32, NicechunkBackpackError> {
+        let stored = slot.mass_grams()?;
+        let mut verified = *slot;
+        let expected = self.apply_mass(&mut verified)?;
+        if stored != expected {
+            return Err(NicechunkBackpackError::InvalidBackpackMassState);
+        }
+        Ok(stored)
+    }
+
+    fn rule(&self, key: u16) -> Result<MaterialPhysicsRule, NicechunkBackpackError> {
+        let mut low = 0_usize;
+        let mut high = self.count;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let offset = MATERIAL_PHYSICS_HEADER_LEN + middle * MATERIAL_PHYSICS_RULE_LEN;
+            match read_u16(self.data, offset).cmp(&key) {
+                core::cmp::Ordering::Less => low = middle + 1,
+                core::cmp::Ordering::Greater => high = middle,
+                core::cmp::Ordering::Equal => {
+                    return MaterialPhysicsRule::unpack(
+                        &self.data[offset..offset + MATERIAL_PHYSICS_RULE_LEN],
+                    )
+                }
+            }
+        }
+        Err(NicechunkBackpackError::InvalidMaterialPhysicsRule)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ForgeMaterialRequirements {
@@ -177,183 +429,6 @@ pub const PLAYER_SESSION_PROFILE_OFFSET: usize = 76;
 pub const PLAYER_SESSION_ALLOWED_ACTIONS_OFFSET: usize = 142;
 pub const PLAYER_SESSION_EXPIRES_AT_OFFSET: usize = 144;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MaterialPhysicsRecord {
-    pub material_id: u16,
-    pub density_kg_m3: u16,
-}
-
-pub struct MaterialPhysicsState {
-    pub authority: Pubkey,
-    pub global_config: Pubkey,
-    pub revision: u32,
-    pub record_count: u8,
-}
-
-impl MaterialPhysicsState {
-    pub const LEN: usize = MATERIAL_PHYSICS_LEN;
-    pub const AUTHORITY_OFFSET: usize = 12;
-    pub const GLOBAL_CONFIG_OFFSET: usize = 44;
-    pub const REVISION_OFFSET: usize = 76;
-    pub const RECORD_COUNT_OFFSET: usize = 80;
-    pub const CREATED_SLOT_OFFSET: usize = 84;
-    pub const UPDATED_SLOT_OFFSET: usize = 92;
-    pub const CREATED_AT_OFFSET: usize = 100;
-    pub const RECORDS_OFFSET: usize = MATERIAL_PHYSICS_HEADER_LEN;
-
-    pub fn pack_empty(
-        dst: &mut [u8],
-        bump: u8,
-        authority: &Pubkey,
-        global_config: &Pubkey,
-        created_slot: u64,
-        created_at: i64,
-    ) -> ProgramResult {
-        if dst.len() != Self::LEN || *authority == Pubkey::default() {
-            return Err(NicechunkBackpackError::InvalidMaterialPhysicsData.into());
-        }
-        dst.fill(0);
-        dst[0..8].copy_from_slice(&MATERIAL_PHYSICS_MAGIC);
-        dst[8..10].copy_from_slice(&MATERIAL_PHYSICS_VERSION.to_le_bytes());
-        dst[10] = bump;
-        dst[11] = 1;
-        dst[Self::AUTHORITY_OFFSET..Self::AUTHORITY_OFFSET + 32]
-            .copy_from_slice(authority.as_ref());
-        dst[Self::GLOBAL_CONFIG_OFFSET..Self::GLOBAL_CONFIG_OFFSET + 32]
-            .copy_from_slice(global_config.as_ref());
-        dst[Self::CREATED_SLOT_OFFSET..Self::CREATED_SLOT_OFFSET + 8]
-            .copy_from_slice(&created_slot.to_le_bytes());
-        dst[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
-            .copy_from_slice(&created_slot.to_le_bytes());
-        dst[Self::CREATED_AT_OFFSET..Self::CREATED_AT_OFFSET + 8]
-            .copy_from_slice(&created_at.to_le_bytes());
-        Ok(())
-    }
-
-    pub fn validate(data: &[u8], global_config: &Pubkey) -> Result<Self, NicechunkBackpackError> {
-        if data.len() != Self::LEN
-            || data[0..8] != MATERIAL_PHYSICS_MAGIC
-            || read_u16(data, 8) != MATERIAL_PHYSICS_VERSION
-            || data[11] != 1
-            || data[Self::RECORD_COUNT_OFFSET] as usize > MATERIAL_PHYSICS_MAX_RECORDS
-            || &data[Self::GLOBAL_CONFIG_OFFSET..Self::GLOBAL_CONFIG_OFFSET + 32]
-                != global_config.as_ref()
-        {
-            return Err(NicechunkBackpackError::InvalidMaterialPhysicsData);
-        }
-        let state = Self {
-            authority: read_pubkey(data, Self::AUTHORITY_OFFSET)?,
-            global_config: read_pubkey(data, Self::GLOBAL_CONFIG_OFFSET)?,
-            revision: read_u32(data, Self::REVISION_OFFSET),
-            record_count: data[Self::RECORD_COUNT_OFFSET],
-        };
-        let mut previous = 0_u16;
-        for index in 0..state.record_count as usize {
-            let record = Self::record(data, index)?;
-            if record.material_id == 0
-                || record.density_kg_m3 == 0
-                || (index > 0 && record.material_id <= previous)
-            {
-                return Err(NicechunkBackpackError::InvalidMaterialPhysicsData);
-            }
-            previous = record.material_id;
-        }
-        Ok(state)
-    }
-
-    pub fn replace_records(
-        data: &mut [u8],
-        global_config: &Pubkey,
-        authority: &Pubkey,
-        records: &[MaterialPhysicsRecord],
-        updated_slot: u64,
-    ) -> ProgramResult {
-        let state = Self::validate(data, global_config)?;
-        if records.is_empty() || records.len() > MATERIAL_PHYSICS_MAX_RECORDS {
-            return Err(NicechunkBackpackError::InvalidMaterialPhysicsRecord.into());
-        }
-        let mut previous = 0_u16;
-        for (index, record) in records.iter().enumerate() {
-            if record.material_id == 0
-                || record.density_kg_m3 == 0
-                || (index > 0 && record.material_id <= previous)
-            {
-                return Err(NicechunkBackpackError::InvalidMaterialPhysicsRecord.into());
-            }
-            previous = record.material_id;
-        }
-        let revision = state
-            .revision
-            .checked_add(1)
-            .ok_or(NicechunkBackpackError::ArithmeticOverflow)?;
-
-        data[Self::RECORDS_OFFSET..].fill(0);
-        for (index, record) in records.iter().enumerate() {
-            let offset = Self::RECORDS_OFFSET + index * MATERIAL_PHYSICS_RECORD_LEN;
-            data[offset..offset + 2].copy_from_slice(&record.material_id.to_le_bytes());
-            data[offset + 2..offset + 4].copy_from_slice(&record.density_kg_m3.to_le_bytes());
-        }
-        data[Self::RECORD_COUNT_OFFSET] = records.len() as u8;
-        if &state.authority != authority {
-            data[Self::AUTHORITY_OFFSET..Self::AUTHORITY_OFFSET + 32]
-                .copy_from_slice(authority.as_ref());
-        }
-        data[Self::REVISION_OFFSET..Self::REVISION_OFFSET + 4]
-            .copy_from_slice(&revision.to_le_bytes());
-        data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
-            .copy_from_slice(&updated_slot.to_le_bytes());
-        Ok(())
-    }
-
-    pub fn density_kg_m3(
-        data: &[u8],
-        global_config: &Pubkey,
-        material_id: u16,
-    ) -> Result<u16, NicechunkBackpackError> {
-        let state = Self::validate(data, global_config)?;
-        let mut low = 0_usize;
-        let mut high = state.record_count as usize;
-        while low < high {
-            let middle = low + (high - low) / 2;
-            let record = Self::record(data, middle)?;
-            match record.material_id.cmp(&material_id) {
-                core::cmp::Ordering::Less => low = middle + 1,
-                core::cmp::Ordering::Greater => high = middle,
-                core::cmp::Ordering::Equal => return Ok(record.density_kg_m3),
-            }
-        }
-        Err(NicechunkBackpackError::MissingMaterialPhysicsRecord)
-    }
-
-    pub fn mass_grams(
-        data: &[u8],
-        global_config: &Pubkey,
-        material_id: u16,
-        volume_mm3: u32,
-    ) -> Result<u32, NicechunkBackpackError> {
-        let density = Self::density_kg_m3(data, global_config, material_id)? as u64;
-        let volume = volume_mm3.max(1) as u64;
-        let mass = volume
-            .checked_mul(density)
-            .ok_or(NicechunkBackpackError::ArithmeticOverflow)?
-            .checked_add(999_999)
-            .ok_or(NicechunkBackpackError::ArithmeticOverflow)?
-            / 1_000_000;
-        u32::try_from(mass.max(1)).map_err(|_| NicechunkBackpackError::ArithmeticOverflow)
-    }
-
-    fn record(data: &[u8], index: usize) -> Result<MaterialPhysicsRecord, NicechunkBackpackError> {
-        if index >= MATERIAL_PHYSICS_MAX_RECORDS {
-            return Err(NicechunkBackpackError::InvalidMaterialPhysicsRecord);
-        }
-        let offset = Self::RECORDS_OFFSET + index * MATERIAL_PHYSICS_RECORD_LEN;
-        Ok(MaterialPhysicsRecord {
-            material_id: read_u16(data, offset),
-            density_kg_m3: read_u16(data, offset + 2),
-        })
-    }
-}
-
 pub struct BackpackInitArgs<'a> {
     pub bump: u8,
     pub backpack_id: u64,
@@ -396,7 +471,7 @@ impl BackpackAccount {
         writer.u8(args.capacity)?;
         writer.u8(0)?;
         writer.u8(BACKPACK_STATE_CARRIED)?;
-        writer.u8(BACKPACK_FLAG_TOTAL_MASS_INITIALIZED)?;
+        writer.u8(BACKPACK_FLAG_MASS_STATE_VALID)?;
         writer.i32(0)?;
         writer.i16(0)?;
         writer.i32(0)?;
@@ -419,7 +494,10 @@ impl BackpackAccount {
             return Err(NicechunkBackpackError::InvalidBackpackData);
         }
         let version = read_u16(data, 8);
-        if version != BACKPACK_VERSION || data[11] != 1 {
+        if version != BACKPACK_VERSION
+            || data[11] != 1
+            || data[Self::FLAGS_OFFSET] & BACKPACK_FLAG_MASS_STATE_VALID == 0
+        {
             return Err(NicechunkBackpackError::InvalidBackpackData);
         }
         validate_capacity(data[Self::CAPACITY_OFFSET])?;
@@ -430,72 +508,19 @@ impl BackpackAccount {
         Ok(())
     }
 
-    pub fn validate_owner(data: &[u8], owner: &Pubkey) -> ProgramResult {
-        Self::validate(data)?;
-        if &data[Self::OWNER_OFFSET..Self::OWNER_OFFSET + 32] != owner.as_ref() {
-            return Err(NicechunkBackpackError::InvalidBackpackOwner.into());
-        }
-        Ok(())
-    }
-
     pub fn total_mass_grams(data: &[u8]) -> Result<u64, NicechunkBackpackError> {
         Self::validate(data)?;
-        if data[Self::FLAGS_OFFSET] & BACKPACK_FLAG_TOTAL_MASS_INITIALIZED == 0 {
-            return Err(NicechunkBackpackError::BackpackMassMigrationRequired);
-        }
         Ok(read_u64(data, Self::TOTAL_MASS_GRAMS_OFFSET))
     }
 
     pub fn last_mine_pre_mass_grams(data: &[u8]) -> Result<u64, NicechunkBackpackError> {
-        Self::total_mass_grams(data)?;
+        Self::validate(data)?;
         Ok(read_u64(data, Self::LAST_MINE_PRE_MASS_GRAMS_OFFSET))
     }
 
     pub fn mine_sequence(data: &[u8]) -> Result<u64, NicechunkBackpackError> {
-        Self::total_mass_grams(data)?;
+        Self::validate(data)?;
         Ok(read_u64(data, Self::MINE_SEQUENCE_OFFSET))
-    }
-
-    pub fn migrate_mass(
-        data: &mut [u8],
-        owner: &Pubkey,
-        physics_data: &[u8],
-        global_config: &Pubkey,
-        updated_slot: u64,
-    ) -> ProgramResult {
-        Self::validate_owner(data, owner)?;
-        MaterialPhysicsState::validate(physics_data, global_config)?;
-        if data[Self::FLAGS_OFFSET] & BACKPACK_FLAG_TOTAL_MASS_INITIALIZED != 0 {
-            return Ok(());
-        }
-        let item_count = data[Self::ITEM_COUNT_OFFSET] as usize;
-        let mut migrated_records = Vec::with_capacity(item_count);
-        let mut total_mass = 0_u64;
-        for index in 0..item_count {
-            let offset = Self::RECORDS_OFFSET + index * BACKPACK_SLOT_RECORD_LEN;
-            let mut record =
-                BackpackSlotRecord::unpack(&data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
-            if !record.has_valid_mass() {
-                let mass = record.derived_mass_grams(physics_data, global_config)?;
-                record.set_mass_grams(mass);
-            }
-            total_mass = total_mass
-                .checked_add(record.mass_grams().unwrap_or(0) as u64)
-                .ok_or(NicechunkBackpackError::ArithmeticOverflow)?;
-            let mut packed = [0_u8; BACKPACK_SLOT_RECORD_LEN];
-            record.pack(&mut packed)?;
-            migrated_records.push(packed);
-        }
-        for (index, packed) in migrated_records.iter().enumerate() {
-            let offset = Self::RECORDS_OFFSET + index * BACKPACK_SLOT_RECORD_LEN;
-            data[offset..offset + BACKPACK_SLOT_RECORD_LEN].copy_from_slice(packed);
-        }
-        data[Self::TOTAL_MASS_GRAMS_OFFSET..Self::TOTAL_MASS_GRAMS_OFFSET + 8]
-            .copy_from_slice(&total_mass.to_le_bytes());
-        data[Self::FLAGS_OFFSET] |= BACKPACK_FLAG_TOTAL_MASS_INITIALIZED;
-        data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
-            .copy_from_slice(&updated_slot.to_le_bytes());
-        Ok(())
     }
 
     pub fn record_mining_action(
@@ -508,11 +533,11 @@ impl BackpackAccount {
         if action_id == 0 {
             return Err(NicechunkBackpackError::InvalidMiningAction.into());
         }
-        let total_mass = Self::total_mass_grams(data)?;
         if read_u64(data, Self::LAST_MINE_ACTION_ID_OFFSET) != action_id {
+            let total_mass = read_u64(data, Self::TOTAL_MASS_GRAMS_OFFSET);
             let next_sequence = read_u64(data, Self::MINE_SEQUENCE_OFFSET)
                 .checked_add(1)
-                .ok_or(NicechunkBackpackError::ArithmeticOverflow)?;
+                .ok_or(NicechunkBackpackError::BackpackMassOverflow)?;
             data[Self::LAST_MINE_PRE_MASS_GRAMS_OFFSET..Self::LAST_MINE_PRE_MASS_GRAMS_OFFSET + 8]
                 .copy_from_slice(&total_mass.to_le_bytes());
             data[Self::LAST_MINE_ACTION_ID_OFFSET..Self::LAST_MINE_ACTION_ID_OFFSET + 8]
@@ -525,32 +550,30 @@ impl BackpackAccount {
         Ok(())
     }
 
-    fn mass_after_add(data: &[u8], mass_grams: u64) -> Result<u64, NicechunkBackpackError> {
-        let current = Self::total_mass_grams(data)?;
-        current
-            .checked_add(mass_grams)
-            .ok_or(NicechunkBackpackError::ArithmeticOverflow)
-    }
-
-    fn mass_after_subtract(data: &[u8], mass_grams: u64) -> Result<u64, NicechunkBackpackError> {
-        let current = Self::total_mass_grams(data)?;
-        current
-            .checked_sub(mass_grams)
-            .ok_or(NicechunkBackpackError::BackpackMassInvariantViolation)
-    }
-
-    fn write_total_mass(data: &mut [u8], total_mass_grams: u64) {
+    fn add_total_mass(data: &mut [u8], mass_grams: u32) -> ProgramResult {
+        let next = read_u64(data, Self::TOTAL_MASS_GRAMS_OFFSET)
+            .checked_add(mass_grams as u64)
+            .ok_or(NicechunkBackpackError::BackpackMassOverflow)?;
         data[Self::TOTAL_MASS_GRAMS_OFFSET..Self::TOTAL_MASS_GRAMS_OFFSET + 8]
-            .copy_from_slice(&total_mass_grams.to_le_bytes());
+            .copy_from_slice(&next.to_le_bytes());
+        Ok(())
     }
 
-    pub fn append_resource(
-        data: &mut [u8],
-        owner: &Pubkey,
-        record: &BackpackResourceRecord,
-        updated_slot: u64,
-    ) -> ProgramResult {
-        Self::append_resource_with_volume(data, owner, record, 0, updated_slot)
+    fn subtract_total_mass(data: &mut [u8], mass_grams: u32) -> ProgramResult {
+        let next = read_u64(data, Self::TOTAL_MASS_GRAMS_OFFSET)
+            .checked_sub(mass_grams as u64)
+            .ok_or(NicechunkBackpackError::InvalidBackpackMassState)?;
+        data[Self::TOTAL_MASS_GRAMS_OFFSET..Self::TOTAL_MASS_GRAMS_OFFSET + 8]
+            .copy_from_slice(&next.to_le_bytes());
+        Ok(())
+    }
+
+    pub fn validate_owner(data: &[u8], owner: &Pubkey) -> ProgramResult {
+        Self::validate(data)?;
+        if &data[Self::OWNER_OFFSET..Self::OWNER_OFFSET + 32] != owner.as_ref() {
+            return Err(NicechunkBackpackError::InvalidBackpackOwner.into());
+        }
+        Ok(())
     }
 
     pub fn append_resource_with_volume(
@@ -558,6 +581,7 @@ impl BackpackAccount {
         owner: &Pubkey,
         record: &BackpackResourceRecord,
         volume_mm3: u32,
+        mass_grams: u32,
         updated_slot: u64,
     ) -> ProgramResult {
         Self::append_resource_with_volume_and_metadata(
@@ -566,30 +590,12 @@ impl BackpackAccount {
             record,
             volume_mm3,
             0,
+            mass_grams,
             updated_slot,
         )
     }
 
     pub fn append_resource_with_volume_and_metadata(
-        data: &mut [u8],
-        owner: &Pubkey,
-        record: &BackpackResourceRecord,
-        volume_mm3: u32,
-        metadata: u32,
-        updated_slot: u64,
-    ) -> ProgramResult {
-        Self::append_resource_with_volume_metadata_and_mass(
-            data,
-            owner,
-            record,
-            volume_mm3,
-            metadata,
-            0,
-            updated_slot,
-        )
-    }
-
-    pub fn append_resource_with_volume_metadata_and_mass(
         data: &mut [u8],
         owner: &Pubkey,
         record: &BackpackResourceRecord,
@@ -605,67 +611,19 @@ impl BackpackAccount {
             return Err(NicechunkBackpackError::BackpackFull.into());
         }
         let offset = Self::RECORDS_OFFSET + item_count as usize * BACKPACK_SLOT_RECORD_LEN;
-        let slot = BackpackSlotRecord::from_block_resource_with_volume_metadata_and_mass(
-            *record, volume_mm3, metadata, mass_grams,
+        let mut slot = BackpackSlotRecord::from_block_resource_with_volume_and_metadata(
+            *record, volume_mm3, metadata,
         );
-        let mut packed = [0_u8; BACKPACK_SLOT_RECORD_LEN];
-        slot.pack(&mut packed)?;
-        let next_mass = Self::mass_after_add(data, mass_grams as u64)?;
-
-        data[offset..offset + BACKPACK_SLOT_RECORD_LEN].copy_from_slice(&packed);
-        Self::write_total_mass(data, next_mass);
+        slot.set_mass_grams(mass_grams)?;
+        slot.pack(&mut data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
+        Self::add_total_mass(data, mass_grams)?;
         data[Self::ITEM_COUNT_OFFSET] = item_count.saturating_add(1);
         data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
             .copy_from_slice(&updated_slot.to_le_bytes());
         Ok(())
     }
 
-    pub fn append_resources_lossy(
-        data: &mut [u8],
-        owner: &Pubkey,
-        records: &[BackpackResourceRecord],
-        updated_slot: u64,
-    ) -> ProgramResult {
-        Self::append_resources_lossy_with_volumes(data, owner, records, &[], updated_slot)
-    }
-
-    pub fn append_resources_lossy_with_volumes(
-        data: &mut [u8],
-        owner: &Pubkey,
-        records: &[BackpackResourceRecord],
-        volumes_mm3: &[u32],
-        updated_slot: u64,
-    ) -> ProgramResult {
-        Self::append_resources_lossy_with_volumes_and_metadata(
-            data,
-            owner,
-            records,
-            volumes_mm3,
-            &[],
-            updated_slot,
-        )
-    }
-
     pub fn append_resources_lossy_with_volumes_and_metadata(
-        data: &mut [u8],
-        owner: &Pubkey,
-        records: &[BackpackResourceRecord],
-        volumes_mm3: &[u32],
-        metadata: &[u32],
-        updated_slot: u64,
-    ) -> ProgramResult {
-        Self::append_resources_lossy_with_physics(
-            data,
-            owner,
-            records,
-            volumes_mm3,
-            metadata,
-            &[],
-            updated_slot,
-        )
-    }
-
-    pub fn append_resources_lossy_with_physics(
         data: &mut [u8],
         owner: &Pubkey,
         records: &[BackpackResourceRecord],
@@ -675,40 +633,33 @@ impl BackpackAccount {
         updated_slot: u64,
     ) -> ProgramResult {
         Self::validate_owner(data, owner)?;
+        if records.len() != volumes_mm3.len()
+            || records.len() != metadata.len()
+            || records.len() != masses_grams.len()
+        {
+            return Err(NicechunkBackpackError::InvalidInstruction.into());
+        }
         let capacity = data[Self::CAPACITY_OFFSET];
         let mut item_count = data[Self::ITEM_COUNT_OFFSET];
         if records.is_empty() || item_count >= capacity {
             return Ok(());
         }
 
-        let accepted_count = records
-            .len()
-            .min(capacity.saturating_sub(item_count) as usize);
-        let mut packed_records = Vec::with_capacity(accepted_count);
-        let mut added_mass = 0_u64;
-        for (index, record) in records.iter().take(accepted_count).enumerate() {
-            let mass_grams = masses_grams.get(index).copied().unwrap_or(0);
-            let slot = BackpackSlotRecord::from_block_resource_with_volume_metadata_and_mass(
-                *record,
-                volumes_mm3.get(index).copied().unwrap_or(0),
-                metadata.get(index).copied().unwrap_or(0),
-                mass_grams,
-            );
-            let mut packed = [0_u8; BACKPACK_SLOT_RECORD_LEN];
-            slot.pack(&mut packed)?;
-            packed_records.push(packed);
-            added_mass = added_mass
-                .checked_add(mass_grams as u64)
-                .ok_or(NicechunkBackpackError::ArithmeticOverflow)?;
-        }
-        let next_mass = Self::mass_after_add(data, added_mass)?;
-
-        for packed in packed_records {
+        for (index, record) in records.iter().enumerate() {
+            if item_count >= capacity {
+                break;
+            }
             let offset = Self::RECORDS_OFFSET + item_count as usize * BACKPACK_SLOT_RECORD_LEN;
-            data[offset..offset + BACKPACK_SLOT_RECORD_LEN].copy_from_slice(&packed);
+            let mut slot = BackpackSlotRecord::from_block_resource_with_volume_and_metadata(
+                *record,
+                volumes_mm3[index],
+                metadata[index],
+            );
+            slot.set_mass_grams(masses_grams[index])?;
+            slot.pack(&mut data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
+            Self::add_total_mass(data, masses_grams[index])?;
             item_count = item_count.saturating_add(1);
         }
-        Self::write_total_mass(data, next_mass);
         data[Self::ITEM_COUNT_OFFSET] = item_count;
         data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
             .copy_from_slice(&updated_slot.to_le_bytes());
@@ -722,6 +673,7 @@ impl BackpackAccount {
         updated_slot: u64,
     ) -> ProgramResult {
         Self::validate_owner(data, owner)?;
+        let mass_grams = record.mass_grams()?;
         if record.kind == BACKPACK_SLOT_KIND_BLOCK && record.quantity == 0 {
             return Err(NicechunkBackpackError::InvalidInventoryItem.into());
         }
@@ -730,20 +682,14 @@ impl BackpackAccount {
         {
             return Err(NicechunkBackpackError::InvalidInventoryItem.into());
         }
-        if !record.has_valid_mass() {
-            return Err(NicechunkBackpackError::BackpackMassInvariantViolation.into());
-        }
         let capacity = data[Self::CAPACITY_OFFSET];
         let item_count = data[Self::ITEM_COUNT_OFFSET];
         if item_count >= capacity {
             return Err(NicechunkBackpackError::BackpackFull.into());
         }
-        let mut packed = [0_u8; BACKPACK_SLOT_RECORD_LEN];
-        record.pack(&mut packed)?;
-        let next_mass = Self::mass_after_add(data, record.mass_grams().unwrap_or(0) as u64)?;
         let offset = Self::RECORDS_OFFSET + item_count as usize * BACKPACK_SLOT_RECORD_LEN;
-        data[offset..offset + BACKPACK_SLOT_RECORD_LEN].copy_from_slice(&packed);
-        Self::write_total_mass(data, next_mass);
+        record.pack(&mut data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
+        Self::add_total_mass(data, mass_grams)?;
         data[Self::ITEM_COUNT_OFFSET] = item_count.saturating_add(1);
         data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
             .copy_from_slice(&updated_slot.to_le_bytes());
@@ -757,9 +703,7 @@ impl BackpackAccount {
         updated_slot: u64,
     ) -> ProgramResult {
         Self::validate_owner(data, owner)?;
-        if !record.has_valid_mass() {
-            return Err(NicechunkBackpackError::BackpackMassInvariantViolation.into());
-        }
+        let mass_grams = record.mass_grams()?;
         let mut packed = [0_u8; BACKPACK_SLOT_RECORD_LEN];
         record.pack(&mut packed)?;
 
@@ -770,13 +714,12 @@ impl BackpackAccount {
                 return Err(NicechunkBackpackError::BackpackFull.into());
             }
             capacity = capacity.saturating_add(1);
+            data[Self::CAPACITY_OFFSET] = capacity;
         }
-        let next_mass = Self::mass_after_add(data, record.mass_grams().unwrap_or(0) as u64)?;
 
         let offset = Self::RECORDS_OFFSET + item_count as usize * BACKPACK_SLOT_RECORD_LEN;
         data[offset..offset + BACKPACK_SLOT_RECORD_LEN].copy_from_slice(&packed);
-        data[Self::CAPACITY_OFFSET] = capacity;
-        Self::write_total_mass(data, next_mass);
+        Self::add_total_mass(data, mass_grams)?;
         data[Self::ITEM_COUNT_OFFSET] = item_count.saturating_add(1);
         data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
             .copy_from_slice(&updated_slot.to_le_bytes());
@@ -795,10 +738,9 @@ impl BackpackAccount {
             return Err(NicechunkBackpackError::InvalidResourceIndex.into());
         }
 
-        let removed = Self::slot_at(data, index)?;
-        let next_mass = Self::mass_after_subtract(data, removed.mass_grams().unwrap_or(0) as u64)?;
-
         let start = Self::RECORDS_OFFSET + index as usize * BACKPACK_SLOT_RECORD_LEN;
+        let removed = BackpackSlotRecord::unpack(&data[start..start + BACKPACK_SLOT_RECORD_LEN])?;
+        Self::subtract_total_mass(data, removed.mass_grams()?)?;
         let end = Self::RECORDS_OFFSET + item_count as usize * BACKPACK_SLOT_RECORD_LEN;
         if start + BACKPACK_SLOT_RECORD_LEN < end {
             data.copy_within(start + BACKPACK_SLOT_RECORD_LEN..end, start);
@@ -806,7 +748,6 @@ impl BackpackAccount {
         let last_start =
             Self::RECORDS_OFFSET + (item_count - 1) as usize * BACKPACK_SLOT_RECORD_LEN;
         data[last_start..last_start + BACKPACK_SLOT_RECORD_LEN].fill(0);
-        Self::write_total_mass(data, next_mass);
         data[Self::ITEM_COUNT_OFFSET] = item_count.saturating_sub(1);
         data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
             .copy_from_slice(&updated_slot.to_le_bytes());
@@ -824,20 +765,18 @@ impl BackpackAccount {
         if index >= data[Self::ITEM_COUNT_OFFSET] {
             return Err(NicechunkBackpackError::InvalidResourceIndex.into());
         }
-        if !record.has_valid_mass() {
-            return Err(NicechunkBackpackError::BackpackMassInvariantViolation.into());
-        }
-        let previous = Self::slot_at(data, index)?;
-        let current_mass = Self::total_mass_grams(data)?;
-        let next_mass = current_mass
-            .checked_sub(previous.mass_grams().unwrap_or(0) as u64)
-            .and_then(|mass| mass.checked_add(record.mass_grams().unwrap_or(0) as u64))
-            .ok_or(NicechunkBackpackError::BackpackMassInvariantViolation)?;
-        let mut packed = [0_u8; BACKPACK_SLOT_RECORD_LEN];
-        record.pack(&mut packed)?;
         let offset = Self::RECORDS_OFFSET + index as usize * BACKPACK_SLOT_RECORD_LEN;
-        data[offset..offset + BACKPACK_SLOT_RECORD_LEN].copy_from_slice(&packed);
-        Self::write_total_mass(data, next_mass);
+        let previous =
+            BackpackSlotRecord::unpack(&data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
+        let previous_mass = previous.mass_grams()?;
+        let replacement_mass = record.mass_grams()?;
+        let next_mass = read_u64(data, Self::TOTAL_MASS_GRAMS_OFFSET)
+            .checked_sub(previous_mass as u64)
+            .and_then(|mass| mass.checked_add(replacement_mass as u64))
+            .ok_or(NicechunkBackpackError::InvalidBackpackMassState)?;
+        record.pack(&mut data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
+        data[Self::TOTAL_MASS_GRAMS_OFFSET..Self::TOTAL_MASS_GRAMS_OFFSET + 8]
+            .copy_from_slice(&next_mass.to_le_bytes());
         data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
             .copy_from_slice(&updated_slot.to_le_bytes());
         Ok(())
@@ -867,35 +806,14 @@ impl BackpackAccount {
             selected[selected_index] = true;
         }
 
-        let mut removed_mass = 0_u64;
-        for (index, is_selected) in selected.iter().enumerate().take(item_count as usize) {
-            if *is_selected {
-                removed_mass = removed_mass
-                    .checked_add(Self::slot_at(data, index as u8)?.mass_grams().unwrap_or(0) as u64)
-                    .ok_or(NicechunkBackpackError::ArithmeticOverflow)?;
+        // Remove from high to low so earlier selected indexes keep their original meaning.
+        let mut cursor = BACKPACK_MAX_CAPACITY as usize;
+        while cursor > 0 {
+            cursor -= 1;
+            if selected[cursor] {
+                Self::remove_resource_at(data, owner, cursor as u8, updated_slot)?;
             }
         }
-        let next_mass = Self::mass_after_subtract(data, removed_mass)?;
-
-        let mut write_index = 0_usize;
-        for read_index in 0..item_count as usize {
-            if selected[read_index] {
-                continue;
-            }
-            if write_index != read_index {
-                let source = Self::RECORDS_OFFSET + read_index * BACKPACK_SLOT_RECORD_LEN;
-                let target = Self::RECORDS_OFFSET + write_index * BACKPACK_SLOT_RECORD_LEN;
-                data.copy_within(source..source + BACKPACK_SLOT_RECORD_LEN, target);
-            }
-            write_index += 1;
-        }
-        let clear_start = Self::RECORDS_OFFSET + write_index * BACKPACK_SLOT_RECORD_LEN;
-        let clear_end = Self::RECORDS_OFFSET + item_count as usize * BACKPACK_SLOT_RECORD_LEN;
-        data[clear_start..clear_end].fill(0);
-        data[Self::ITEM_COUNT_OFFSET] = write_index as u8;
-        Self::write_total_mass(data, next_mass);
-        data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
-            .copy_from_slice(&updated_slot.to_le_bytes());
         Ok(())
     }
 
@@ -1013,10 +931,8 @@ impl BackpackAccount {
             .unwrap_or_else(|| {
                 materials
                     .iter()
-                    .fold(0_u64, |total, material| {
-                        total.saturating_add(material.mass_grams().unwrap_or(0) as u64)
-                    })
-                    .min(u32::MAX as u64) as u32
+                    .filter_map(|material| material.mass_grams().ok())
+                    .fold(0_u32, u32::saturating_add)
             });
         Self::remove_resources_at(data, owner, indexes, updated_slot)?;
         let mut output = BackpackSlotRecord {
@@ -1036,7 +952,7 @@ impl BackpackAccount {
             quality_bps: outcome.quality_bps,
             metadata: design_hash,
         };
-        output.set_mass_grams(outcome.mass_grams);
+        output.set_mass_grams(outcome.mass_grams)?;
         Self::append_item(data, owner, &output, updated_slot)?;
         Ok(outcome)
     }
@@ -1158,98 +1074,56 @@ impl BackpackSlotRecord {
         volume_mm3: u32,
         metadata: u32,
     ) -> Self {
-        Self::from_block_resource_with_volume_metadata_and_mass(resource, volume_mm3, metadata, 0)
-    }
-
-    pub fn from_block_resource_with_volume_metadata_and_mass(
-        resource: BackpackResourceRecord,
-        volume_mm3: u32,
-        metadata: u32,
-        mass_grams: u32,
-    ) -> Self {
-        let mut record = Self {
+        Self {
             kind: BACKPACK_SLOT_KIND_BLOCK,
             category: 0,
-            flags: BACKPACK_ITEM_FLAG_MASS_VALID,
+            flags: 0,
             quantity: 1,
             resource,
             item_code: 0,
             item_id: 0,
             item_pda: Pubkey::default(),
             volume_mm3,
-            durability_current: mass_grams,
+            durability_current: 0,
             durability_max: 0,
             grade: 0,
             item_level: 0,
             quality_bps: 0,
             metadata,
-        };
-        record.set_mass_grams(mass_grams);
-        record
-    }
-
-    pub fn has_valid_mass(&self) -> bool {
-        self.flags & BACKPACK_ITEM_FLAG_MASS_VALID != 0
-    }
-
-    pub fn mass_grams(&self) -> Option<u32> {
-        if !self.has_valid_mass() {
-            return None;
-        }
-        Some(if self.kind == BACKPACK_SLOT_KIND_BLOCK {
-            self.durability_current
-        } else {
-            self.resource.world_x as u32
-        })
-    }
-
-    pub fn set_mass_grams(&mut self, mass_grams: u32) {
-        self.flags |= BACKPACK_ITEM_FLAG_MASS_VALID;
-        if self.kind == BACKPACK_SLOT_KIND_BLOCK {
-            self.durability_current = mass_grams;
-        } else {
-            self.resource.world_x = mass_grams as i32;
         }
     }
 
-    pub fn derived_mass_grams(
-        &self,
-        physics_data: &[u8],
-        global_config: &Pubkey,
-    ) -> Result<u32, NicechunkBackpackError> {
-        if self.kind == BACKPACK_SLOT_KIND_BLOCK {
-            let packed_y = self.resource.world_y;
-            if packed_y < 0 {
-                return Err(NicechunkBackpackError::MissingMaterialPhysicsRecord);
+    pub fn block_id(&self) -> Result<u16, NicechunkBackpackError> {
+        if self.kind != BACKPACK_SLOT_KIND_BLOCK {
+            return Err(NicechunkBackpackError::InvalidInventoryItem);
+        }
+        let block_id = (self.resource.world_y as u16) >> 9;
+        if block_id == 0 {
+            return Err(NicechunkBackpackError::InvalidInventoryItem);
+        }
+        Ok(block_id)
+    }
+
+    pub fn set_mass_grams(&mut self, mass_grams: u32) -> ProgramResult {
+        match self.kind {
+            BACKPACK_SLOT_KIND_BLOCK => self.durability_current = mass_grams,
+            BACKPACK_SLOT_KIND_ITEM => {
+                self.resource.world_x = i32::from_le_bytes(mass_grams.to_le_bytes())
             }
-            let material_id = (packed_y as u16) >> BACKPACK_PACKED_Y_BITS;
-            let volume = if self.volume_mm3 == 0 {
-                BACKPACK_DEFAULT_RESOURCE_VOLUME_MM3
-            } else {
-                self.volume_mm3
-            };
-            return MaterialPhysicsState::mass_grams(
-                physics_data,
-                global_config,
-                material_id,
-                volume,
-            );
+            _ => return Err(NicechunkBackpackError::InvalidInventoryItem.into()),
         }
-        match self.category {
-            BACKPACK_ITEM_CATEGORY_MATERIAL => MaterialPhysicsState::mass_grams(
-                physics_data,
-                global_config,
-                self.item_code,
-                self.volume_mm3,
-            ),
-            BACKPACK_ITEM_CATEGORY_FORGED => MaterialPhysicsState::mass_grams(
-                physics_data,
-                global_config,
-                LEGACY_FORGED_MATERIAL_ID,
-                self.volume_mm3,
-            ),
-            BACKPACK_ITEM_CATEGORY_BLUEPRINT => Ok(0),
-            _ => Ok(0),
+        self.flags |= BACKPACK_ITEM_FLAG_MASS_VALID;
+        Ok(())
+    }
+
+    pub fn mass_grams(&self) -> Result<u32, NicechunkBackpackError> {
+        if self.flags & BACKPACK_ITEM_FLAG_MASS_VALID == 0 {
+            return Err(NicechunkBackpackError::InvalidBackpackMassState);
+        }
+        match self.kind {
+            BACKPACK_SLOT_KIND_BLOCK => Ok(self.durability_current),
+            BACKPACK_SLOT_KIND_ITEM => Ok(u32::from_le_bytes(self.resource.world_x.to_le_bytes())),
+            _ => Err(NicechunkBackpackError::InvalidInventoryItem),
         }
     }
 
@@ -1749,15 +1623,6 @@ fn read_i64(data: &[u8], offset: usize) -> i64 {
     ])
 }
 
-fn read_pubkey(data: &[u8], offset: usize) -> Result<Pubkey, NicechunkBackpackError> {
-    let bytes: [u8; 32] = data
-        .get(offset..offset + 32)
-        .ok_or(NicechunkBackpackError::InvalidMaterialPhysicsData)?
-        .try_into()
-        .map_err(|_| NicechunkBackpackError::InvalidMaterialPhysicsData)?;
-    Ok(Pubkey::new_from_array(bytes))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1781,7 +1646,7 @@ mod tests {
     }
 
     fn material_slot(durability_current: u32, durability_max: u32) -> BackpackSlotRecord {
-        let mut record = BackpackSlotRecord {
+        let mut slot = BackpackSlotRecord {
             kind: BACKPACK_SLOT_KIND_ITEM,
             category: BACKPACK_ITEM_CATEGORY_MATERIAL,
             flags: 0,
@@ -1798,12 +1663,12 @@ mod tests {
             quality_bps: 7_000,
             metadata: 0,
         };
-        record.set_mass_grams(1_620);
-        record
+        slot.set_mass_grams(600).unwrap();
+        slot
     }
 
     fn blueprint_slot(item_id: u64) -> BackpackSlotRecord {
-        let mut record = BackpackSlotRecord {
+        let mut slot = BackpackSlotRecord {
             kind: BACKPACK_SLOT_KIND_ITEM,
             category: BACKPACK_ITEM_CATEGORY_BLUEPRINT,
             flags: BACKPACK_ITEM_FLAG_UNIQUE,
@@ -1820,18 +1685,8 @@ mod tests {
             quality_bps: 10_000,
             metadata: 0,
         };
-        record.set_mass_grams(0);
-        record
-    }
-
-    fn material_physics(global_config: &Pubkey, records: &[MaterialPhysicsRecord]) -> Vec<u8> {
-        let authority = Pubkey::new_unique();
-        let mut data = vec![0_u8; MaterialPhysicsState::LEN];
-        MaterialPhysicsState::pack_empty(&mut data, 250, &authority, global_config, 10, 20)
-            .unwrap();
-        MaterialPhysicsState::replace_records(&mut data, global_config, &authority, records, 11)
-            .unwrap();
-        data
+        slot.set_mass_grams(0).unwrap();
+        slot
     }
 
     fn packed_slot(record: &BackpackSlotRecord) -> [u8; BACKPACK_SLOT_RECORD_LEN] {
@@ -1986,6 +1841,7 @@ mod tests {
             &record,
             1_000_000,
             0x0001_0002,
+            2_600,
             11,
         )
         .unwrap();
@@ -2066,7 +1922,7 @@ mod tests {
             ForgeMaterialRequirements {
                 required_volume_mm3: 600_001,
                 required_effective_durability: 840,
-                output_mass_grams: 1_000,
+                output_mass_grams: 700,
             },
         )
         .unwrap_err();
@@ -2100,7 +1956,7 @@ mod tests {
             ForgeMaterialRequirements {
                 required_volume_mm3: 600_000,
                 required_effective_durability: 840,
-                output_mass_grams: 1_000,
+                output_mass_grams: 700,
             },
         )
         .unwrap();
@@ -2129,7 +1985,7 @@ mod tests {
             ForgeMaterialRequirements {
                 required_volume_mm3: 600_000,
                 required_effective_durability: 841,
-                output_mass_grams: 1_000,
+                output_mass_grams: 700,
             },
         )
         .unwrap_err();
@@ -2149,258 +2005,74 @@ mod tests {
         assert_eq!(design_hash, 0x5c09_3cc3);
         assert_eq!(requirements.required_volume_mm3, 3_000_000);
         assert_eq!(requirements.required_effective_durability, 3_110);
+        assert_eq!(requirements.output_mass_grams, 12_000);
         assert!(verified_forge_design(&code[..13]).is_err());
     }
 
     #[test]
-    fn material_physics_uses_sorted_lookup_and_ceil_rounding() {
-        let global_config = Pubkey::new_unique();
-        let data = material_physics(
-            &global_config,
-            &[
-                MaterialPhysicsRecord {
-                    material_id: 1,
-                    density_kg_m3: 1_000,
-                },
-                MaterialPhysicsRecord {
-                    material_id: 1008,
-                    density_kg_m3: 2_700,
-                },
-            ],
-        );
+    fn material_physics_uses_canonical_density_and_cubic_volume() {
+        let data = material_physics_fixture();
+        let physics = MaterialPhysicsTableView::new(&data).unwrap();
 
         assert_eq!(
-            MaterialPhysicsState::density_kg_m3(&data, &global_config, 1008),
-            Ok(2_700)
+            physics.block_rule(3).unwrap().standard_volume_mm3,
+            1_000_000
+        );
+        assert_eq!(physics.block_mass_grams(3, 1_000_000).unwrap(), 2_600);
+        assert_eq!(physics.block_mass_grams(23, 1_000_000).unwrap(), 250);
+        assert_eq!(physics.block_mass_grams(49, 100_000).unwrap(), 14);
+        assert_eq!(
+            physics.item_rule(1010).unwrap().standard_volume_mm3,
+            250_000
         );
         assert_eq!(
-            MaterialPhysicsState::mass_grams(&data, &global_config, 1, 1_000_000),
-            Ok(1_000)
-        );
-        assert_eq!(
-            MaterialPhysicsState::mass_grams(&data, &global_config, 1008, 1),
-            Ok(1)
-        );
-        assert_eq!(
-            MaterialPhysicsState::density_kg_m3(&data, &global_config, 44),
-            Err(NicechunkBackpackError::MissingMaterialPhysicsRecord)
+            physics
+                .item_rule(1010)
+                .unwrap()
+                .mass_grams(250_000)
+                .unwrap(),
+            625
         );
     }
 
     #[test]
-    fn material_physics_rejects_unsorted_or_duplicate_records_without_mutation() {
-        let global_config = Pubkey::new_unique();
-        let authority = Pubkey::new_unique();
-        let mut data = vec![0_u8; MaterialPhysicsState::LEN];
-        MaterialPhysicsState::pack_empty(&mut data, 250, &authority, &global_config, 10, 20)
-            .unwrap();
-        let before = data.clone();
-
-        let error = MaterialPhysicsState::replace_records(
-            &mut data,
-            &global_config,
-            &authority,
-            &[
-                MaterialPhysicsRecord {
-                    material_id: 2,
-                    density_kg_m3: 1_000,
-                },
-                MaterialPhysicsRecord {
-                    material_id: 2,
-                    density_kg_m3: 2_000,
-                },
-            ],
-            11,
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            error,
-            ProgramError::Custom(code)
-                if code == NicechunkBackpackError::InvalidMaterialPhysicsRecord as u32
-        ));
-        assert_eq!(data, before);
-    }
-
-    #[test]
-    fn material_physics_update_adopts_the_current_treasury_authority() {
-        let global_config = Pubkey::new_unique();
-        let previous_authority = Pubkey::new_unique();
-        let current_authority = Pubkey::new_unique();
-        let mut data = vec![0_u8; MaterialPhysicsState::LEN];
-        MaterialPhysicsState::pack_empty(
-            &mut data,
-            250,
-            &previous_authority,
-            &global_config,
-            10,
-            20,
-        )
-        .unwrap();
-
-        MaterialPhysicsState::replace_records(
-            &mut data,
-            &global_config,
-            &current_authority,
-            &[MaterialPhysicsRecord {
-                material_id: 1,
-                density_kg_m3: 1_200,
-            }],
-            11,
-        )
-        .unwrap();
-
-        let state = MaterialPhysicsState::validate(&data, &global_config).unwrap();
-        assert_eq!(state.authority, current_authority);
-        assert_eq!(state.revision, 1);
-    }
-
-    #[test]
-    fn legacy_backpack_mass_migration_is_exact_and_atomic() {
+    fn backpack_total_mass_tracks_append_remove_replace_and_forge() {
         let owner = Pubkey::new_unique();
-        let global_config = Pubkey::new_unique();
-        let physics = material_physics(
-            &global_config,
-            &[
-                MaterialPhysicsRecord {
-                    material_id: 1,
-                    density_kg_m3: 1_000,
-                },
-                MaterialPhysicsRecord {
-                    material_id: 1008,
-                    density_kg_m3: 2_700,
-                },
-            ],
-        );
         let mut data = empty_backpack(&owner, 4);
-        BackpackAccount::append_resource_with_volume_metadata_and_mass(
+        let material = material_slot(1_200, 1_200);
+        BackpackAccount::append_item(&mut data, &owner, &material, 11).unwrap();
+        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 600);
+
+        let replacement = blueprint_slot(901);
+        BackpackAccount::replace_slot_at(&mut data, &owner, 0, &replacement, 12).unwrap();
+        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 0);
+
+        BackpackAccount::remove_resource_at(&mut data, &owner, 0, 13).unwrap();
+        BackpackAccount::append_item(&mut data, &owner, &material, 14).unwrap();
+        BackpackAccount::forge_equipment_from_verified_materials(
             &mut data,
             &owner,
-            &BackpackResourceRecord {
-                world_x: 4,
-                world_y: (1_u16 << BACKPACK_PACKED_Y_BITS) as i16,
-                world_z: 5,
+            &[0],
+            902,
+            0x1234_abcd,
+            &Pubkey::new_unique(),
+            3,
+            15,
+            ForgeMaterialRequirements {
+                required_volume_mm3: 600_000,
+                required_effective_durability: 840,
+                output_mass_grams: 700,
             },
-            1_000_000,
-            0,
-            1_000,
-            11,
         )
         .unwrap();
-        BackpackAccount::append_item(&mut data, &owner, &material_slot(1_200, 1_200), 12).unwrap();
-        for index in 0..2 {
-            let offset = BackpackAccount::RECORDS_OFFSET + index * BACKPACK_SLOT_RECORD_LEN + 2;
-            let flags = read_u16(&data, offset) & !BACKPACK_ITEM_FLAG_MASS_VALID;
-            data[offset..offset + 2].copy_from_slice(&flags.to_le_bytes());
-        }
-        data[BackpackAccount::FLAGS_OFFSET] &= !BACKPACK_FLAG_TOTAL_MASS_INITIALIZED;
-        data[BackpackAccount::TOTAL_MASS_GRAMS_OFFSET
-            ..BackpackAccount::TOTAL_MASS_GRAMS_OFFSET + 8]
-            .fill(0);
-
-        BackpackAccount::migrate_mass(&mut data, &owner, &physics, &global_config, 13).unwrap();
-
-        assert_eq!(BackpackAccount::total_mass_grams(&data), Ok(2_620));
+        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 700);
         assert_eq!(
-            BackpackAccount::slot_at(&data, 0).unwrap().mass_grams(),
-            Some(1_000)
+            BackpackAccount::slot_at(&data, 0)
+                .unwrap()
+                .mass_grams()
+                .unwrap(),
+            700
         );
-        assert_eq!(
-            BackpackAccount::slot_at(&data, 1).unwrap().mass_grams(),
-            Some(1_620)
-        );
-    }
-
-    #[test]
-    fn failed_mass_migration_leaves_legacy_backpack_unchanged() {
-        let owner = Pubkey::new_unique();
-        let global_config = Pubkey::new_unique();
-        let physics = material_physics(
-            &global_config,
-            &[MaterialPhysicsRecord {
-                material_id: 1,
-                density_kg_m3: 1_000,
-            }],
-        );
-        let mut data = empty_backpack(&owner, 2);
-        BackpackAccount::append_item(&mut data, &owner, &material_slot(1_200, 1_200), 11).unwrap();
-        let flags_offset = BackpackAccount::RECORDS_OFFSET + 2;
-        let flags = read_u16(&data, flags_offset) & !BACKPACK_ITEM_FLAG_MASS_VALID;
-        data[flags_offset..flags_offset + 2].copy_from_slice(&flags.to_le_bytes());
-        data[BackpackAccount::FLAGS_OFFSET] &= !BACKPACK_FLAG_TOTAL_MASS_INITIALIZED;
-        let before = data.clone();
-
-        assert!(
-            BackpackAccount::migrate_mass(&mut data, &owner, &physics, &global_config, 12).is_err()
-        );
-        assert_eq!(data, before);
-    }
-
-    #[test]
-    fn append_replace_remove_and_lossy_batch_keep_total_mass_exact() {
-        let owner = Pubkey::new_unique();
-        let mut data = empty_backpack(&owner, 3);
-        let block = BackpackResourceRecord {
-            world_x: 1,
-            world_y: 2,
-            world_z: 3,
-        };
-        BackpackAccount::append_resources_lossy_with_physics(
-            &mut data,
-            &owner,
-            &[block, block, block, block],
-            &[1, 1, 1, 1],
-            &[],
-            &[100, 200, 300, 400],
-            11,
-        )
-        .unwrap();
-        assert_eq!(BackpackAccount::total_mass_grams(&data), Ok(600));
-
-        let mut replacement = blueprint_slot(900);
-        replacement.set_mass_grams(50);
-        BackpackAccount::replace_slot_at(&mut data, &owner, 1, &replacement, 12).unwrap();
-        assert_eq!(BackpackAccount::total_mass_grams(&data), Ok(450));
-
-        BackpackAccount::remove_resources_at(&mut data, &owner, &[0, 2], 13).unwrap();
-        assert_eq!(BackpackAccount::total_mass_grams(&data), Ok(50));
-        assert_eq!(data[BackpackAccount::ITEM_COUNT_OFFSET], 1);
-        assert_eq!(BackpackAccount::slot_at(&data, 0).unwrap().item_id, 900);
-    }
-
-    #[test]
-    fn failed_append_and_replace_do_not_partially_mutate_backpack() {
-        let owner = Pubkey::new_unique();
-        let mut append_data = empty_backpack(&owner, 2);
-        append_data[BackpackAccount::TOTAL_MASS_GRAMS_OFFSET
-            ..BackpackAccount::TOTAL_MASS_GRAMS_OFFSET + 8]
-            .copy_from_slice(&u64::MAX.to_le_bytes());
-        let before_append = append_data.clone();
-        assert!(BackpackAccount::append_item(
-            &mut append_data,
-            &owner,
-            &material_slot(1_200, 1_200),
-            11,
-        )
-        .is_err());
-        assert_eq!(append_data, before_append);
-
-        let mut replace_data = empty_backpack(&owner, 2);
-        BackpackAccount::append_item(&mut replace_data, &owner, &material_slot(1_200, 1_200), 11)
-            .unwrap();
-        replace_data[BackpackAccount::TOTAL_MASS_GRAMS_OFFSET
-            ..BackpackAccount::TOTAL_MASS_GRAMS_OFFSET + 8]
-            .fill(0);
-        let before_replace = replace_data.clone();
-        assert!(BackpackAccount::replace_slot_at(
-            &mut replace_data,
-            &owner,
-            0,
-            &blueprint_slot(901),
-            12,
-        )
-        .is_err());
-        assert_eq!(replace_data, before_replace);
     }
 
     #[test]
@@ -2408,13 +2080,13 @@ mod tests {
         let owner = Pubkey::new_unique();
         let mut data = empty_backpack(&owner, 4);
         let mut carried = material_slot(1_200, 1_200);
-        carried.set_mass_grams(25_000);
+        carried.set_mass_grams(25_000).unwrap();
         BackpackAccount::append_item(&mut data, &owner, &carried, 11).unwrap();
 
         BackpackAccount::record_mining_action(&mut data, &owner, 7, 12).unwrap();
         assert_eq!(BackpackAccount::last_mine_pre_mass_grams(&data), Ok(25_000));
         assert_eq!(BackpackAccount::mine_sequence(&data), Ok(1));
-        BackpackAccount::append_resource_with_volume_metadata_and_mass(
+        BackpackAccount::append_resource_with_volume_and_metadata(
             &mut data,
             &owner,
             &BackpackResourceRecord::default(),
@@ -2432,6 +2104,42 @@ mod tests {
         BackpackAccount::record_mining_action(&mut data, &owner, 8, 15).unwrap();
         assert_eq!(BackpackAccount::last_mine_pre_mass_grams(&data), Ok(26_000));
         assert_eq!(BackpackAccount::mine_sequence(&data), Ok(2));
+    }
+
+    fn material_physics_fixture() -> Vec<u8> {
+        let rules = [
+            MaterialPhysicsRule {
+                key: 3,
+                density_kg_m3: 2_600,
+                standard_volume_mm3: 1_000_000,
+            },
+            MaterialPhysicsRule {
+                key: 23,
+                density_kg_m3: 250,
+                standard_volume_mm3: 1_000_000,
+            },
+            MaterialPhysicsRule {
+                key: 49,
+                density_kg_m3: 140,
+                standard_volume_mm3: 1_000_000,
+            },
+            MaterialPhysicsRule {
+                key: MATERIAL_PHYSICS_ITEM_KEY_MASK | 1010,
+                density_kg_m3: 2_500,
+                standard_volume_mm3: 250_000,
+            },
+        ];
+        let mut payload = Vec::with_capacity(5 + rules.len() * MATERIAL_PHYSICS_RULE_LEN);
+        payload.extend_from_slice(&1_u32.to_le_bytes());
+        payload.push(rules.len() as u8);
+        for rule in rules {
+            let mut packed = [0_u8; MATERIAL_PHYSICS_RULE_LEN];
+            rule.pack(&mut packed).unwrap();
+            payload.extend_from_slice(&packed);
+        }
+        let mut data = vec![0_u8; MaterialPhysicsTableState::LEN];
+        MaterialPhysicsTableState::pack_payload(&mut data, 252, &payload).unwrap();
+        data
     }
 
     fn hex_bytes(value: &str) -> Vec<u8> {

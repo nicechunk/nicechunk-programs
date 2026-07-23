@@ -58,7 +58,7 @@ pub const GLOBAL_CONFIG_MAX_BUILD_Y_OFFSET: usize = 265;
 
 pub const BACKPACK_LEN: usize = 8048;
 pub const BACKPACK_MAGIC: [u8; 8] = *b"NCKBPK01";
-pub const BACKPACK_VERSION: u16 = 3;
+pub const BACKPACK_VERSION: u16 = 4;
 pub const BACKPACK_SEED: &[u8] = b"backpack";
 pub const BACKPACK_HEADER_LEN: usize = 128;
 pub const BACKPACK_SLOT_RECORD_LEN: usize = 80;

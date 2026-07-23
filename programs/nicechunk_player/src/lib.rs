@@ -1019,7 +1019,6 @@ fn transfer_equipment_slot(
                 backpack,
                 player_equipment,
                 material_physics,
-                global_config,
                 &[1, 11, slot],
                 transfer_bump,
             )?;
@@ -1046,7 +1045,6 @@ fn transfer_equipment_slot(
             backpack,
             player_equipment,
             material_physics,
-            global_config,
             &[1, 10, slot, backpack_index],
             transfer_bump,
         )?;
@@ -1134,7 +1132,6 @@ fn invoke_backpack_equipment_transfer<'a>(
     backpack: &AccountInfo<'a>,
     player_equipment: &AccountInfo<'a>,
     material_physics: &AccountInfo<'a>,
-    global_config: &AccountInfo<'a>,
     data: &[u8],
     transfer_bump: u8,
 ) -> ProgramResult {
@@ -1146,7 +1143,6 @@ fn invoke_backpack_equipment_transfer<'a>(
             AccountMeta::new(*backpack.key, false),
             AccountMeta::new_readonly(*player_equipment.key, false),
             AccountMeta::new_readonly(*material_physics.key, false),
-            AccountMeta::new_readonly(*global_config.key, false),
         ],
         data: data.to_vec(),
     };
@@ -1160,7 +1156,6 @@ fn invoke_backpack_equipment_transfer<'a>(
             backpack.clone(),
             player_equipment.clone(),
             material_physics.clone(),
-            global_config.clone(),
             game_program.clone(),
         ],
         &[signer_seeds],
