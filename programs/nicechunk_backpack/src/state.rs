@@ -40,8 +40,12 @@ pub const SESSION_ACTION_BREAK_BLOCK: u8 = 1;
 pub const DURABILITY_BPS_DENOMINATOR: u64 = 10_000;
 pub const MAX_FORGING_INPUTS: usize = 24;
 pub const MAX_VERIFIED_FORGE_CODE_BYTES: usize = 640;
-const NCF1_VERSION: u32 = 14;
+const NCF1_LEGACY_VERSION: u32 = 14;
+const NCF1_VERSION: u32 = 15;
 const NCF1_ATTRIBUTE_COUNT: usize = 12;
+const NCF1_V15_VOLUME_MANTISSA_BITS: u32 = 13;
+const NCF1_V15_VOLUME_MANTISSA_MASK: u32 = (1 << NCF1_V15_VOLUME_MANTISSA_BITS) - 1;
+const NCF1_V15_ATTRIBUTE_REFERENCE_VOLUME_MM3: u64 = 1_000_000;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MaterialPhysicsRule {
@@ -323,17 +327,23 @@ pub fn verified_forge_design(
         return Err(NicechunkBackpackError::InvalidForgeMaterialRequirements);
     }
     let mut bit_offset = 0_usize;
-    if read_bits(code, &mut bit_offset, 4)? != NCF1_VERSION {
+    let version = read_bits(code, &mut bit_offset, 4)?;
+    if version != NCF1_LEGACY_VERSION && version != NCF1_VERSION {
         return Err(NicechunkBackpackError::InvalidForgeMaterialRequirements);
     }
     let mass_grams = (read_bits(code, &mut bit_offset, 16)? as u64).saturating_mul(5);
-    let volume_cm3 = read_bits(code, &mut bit_offset, 16)? as u64;
+    let encoded_volume = read_bits(code, &mut bit_offset, 16)?;
+    let volume_mm3 = if version == NCF1_LEGACY_VERSION {
+        (encoded_volume as u64).saturating_mul(1_000)
+    } else {
+        decode_ncf1_v15_volume_mm3(encoded_volume)
+    };
     let mut attributes = [0_u64; NCF1_ATTRIBUTE_COUNT];
     for attribute in attributes.iter_mut() {
         let compact = read_bits(code, &mut bit_offset, 6)? as u64;
         *attribute = compact.saturating_mul(100).saturating_add(31) / 63;
     }
-    if mass_grams == 0 || volume_cm3 == 0 {
+    if mass_grams == 0 || volume_mm3 == 0 {
         return Err(NicechunkBackpackError::InvalidForgeMaterialRequirements);
     }
 
@@ -347,10 +357,22 @@ pub fn verified_forge_design(
         .saturating_sub(brittleness_penalty);
     let material_score = weighted_material_score.saturating_add(50) / 100;
     let mass_requirement = mass_grams.saturating_mul(3).saturating_add(19) / 20;
-    let volume_requirement = integer_sqrt(volume_cm3).saturating_mul(18);
-    let attribute_requirement = material_score.saturating_mul(126).saturating_add(24) / 25;
+    // Preserve the v14 durability curve exactly for whole-cm3 designs while
+    // allowing v15 to carry a non-zero sub-cm3 material requirement.
+    let volume_requirement = integer_sqrt(volume_mm3 / 1_000).saturating_mul(18);
+    let base_attribute_requirement = material_score.saturating_mul(126).saturating_add(24) / 25;
+    // Smelting metadata defines durability per 1,000,000 mm3. Scale the v15
+    // attribute demand by the same physical amount for sub-unit materials;
+    // legacy and unit-or-larger designs retain the deployed requirement.
+    let attribute_requirement = if version == NCF1_LEGACY_VERSION {
+        base_attribute_requirement
+    } else {
+        base_attribute_requirement
+            .saturating_mul(volume_mm3.min(NCF1_V15_ATTRIBUTE_REFERENCE_VOLUME_MM3))
+            / NCF1_V15_ATTRIBUTE_REFERENCE_VOLUME_MM3
+    };
     let requirements = ForgeMaterialRequirements {
-        required_volume_mm3: volume_cm3.saturating_mul(1_000),
+        required_volume_mm3: volume_mm3,
         required_effective_durability: mass_requirement
             .saturating_add(volume_requirement)
             .saturating_add(attribute_requirement)
@@ -359,6 +381,12 @@ pub fn verified_forge_design(
     };
     requirements.validate()?;
     Ok((fnv1a32(code), requirements))
+}
+
+fn decode_ncf1_v15_volume_mm3(encoded_volume: u32) -> u64 {
+    let exponent = encoded_volume >> NCF1_V15_VOLUME_MANTISSA_BITS;
+    let mantissa = encoded_volume & NCF1_V15_VOLUME_MANTISSA_MASK;
+    (mantissa as u64) << exponent.saturating_mul(4)
 }
 
 fn read_bits(
@@ -1238,6 +1266,7 @@ pub struct ForgeOutcome {
 
 pub fn forge_material_capacity(materials: &[BackpackSlotRecord]) -> ForgeMaterialCapacity {
     let mut capacity = ForgeMaterialCapacity::default();
+    let mut effective_durability_numerator = 0_u64;
     for material in materials {
         let quality_bps = material
             .quality_bps
@@ -1249,17 +1278,18 @@ pub fn forge_material_capacity(materials: &[BackpackSlotRecord]) -> ForgeMateria
         capacity.total_volume_mm3 = capacity
             .total_volume_mm3
             .saturating_add(material.volume_mm3 as u64);
-        capacity.total_effective_durability = capacity.total_effective_durability.saturating_add(
-            durability_current.saturating_mul(quality_bps) / DURABILITY_BPS_DENOMINATOR,
-        );
+        effective_durability_numerator = effective_durability_numerator
+            .saturating_add(durability_current.saturating_mul(quality_bps));
     }
+    capacity.total_effective_durability =
+        effective_durability_numerator / DURABILITY_BPS_DENOMINATOR;
     capacity
 }
 
 fn calculate_forge_outcome(materials: &[BackpackSlotRecord], forging_level: u8) -> ForgeOutcome {
     let mut total_volume = 0_u64;
     let mut total_raw_durability = 0_u64;
-    let mut total_effective_durability = 0_u64;
+    let mut effective_durability_numerator = 0_u64;
     let mut weighted_grade = 0_u64;
     let mut weighted_quality = 0_u64;
     let mut weak_grade_cap = 10_u8;
@@ -1277,12 +1307,13 @@ fn calculate_forge_outcome(materials: &[BackpackSlotRecord], forging_level: u8) 
             .min(material.durability_max.max(1)) as u64;
         total_volume = total_volume.saturating_add(volume);
         total_raw_durability = total_raw_durability.saturating_add(max_durability);
-        total_effective_durability = total_effective_durability.saturating_add(
-            current_durability.saturating_mul(quality) / DURABILITY_BPS_DENOMINATOR,
-        );
+        effective_durability_numerator = effective_durability_numerator
+            .saturating_add(current_durability.saturating_mul(quality));
         weighted_grade = weighted_grade.saturating_add(grade as u64 * volume);
         weighted_quality = weighted_quality.saturating_add(quality * volume);
     }
+
+    let total_effective_durability = effective_durability_numerator / DURABILITY_BPS_DENOMINATOR;
 
     for material in materials {
         let volume = material.volume_mm3 as u64;
@@ -1905,6 +1936,18 @@ mod tests {
     }
 
     #[test]
+    fn forge_capacity_aggregates_fractional_quality_before_rounding() {
+        let mut material = material_slot(1, 1);
+        material.volume_mm3 = 155;
+        material.quality_bps = 8_790;
+
+        let capacity = forge_material_capacity(&[material, material]);
+
+        assert_eq!(capacity.total_volume_mm3, 310);
+        assert_eq!(capacity.total_effective_durability, 1);
+    }
+
+    #[test]
     fn verified_forge_rejects_any_material_parameter_deficit_without_consuming_slots() {
         let owner = Pubkey::new_unique();
         let mut data = empty_backpack(&owner, 4);
@@ -1998,7 +2041,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_ncf1_header_derives_chain_requirements_and_raw_design_hash() {
+    fn verified_ncf1_v14_header_remains_compatible() {
         let code = hex_bytes("e09600bb8b2cb2cb2cb2cb2cb2c000");
         let (design_hash, requirements) = verified_forge_design(&code).unwrap();
 
@@ -2007,6 +2050,70 @@ mod tests {
         assert_eq!(requirements.required_effective_durability, 3_110);
         assert_eq!(requirements.output_mass_grams, 12_000);
         assert!(verified_forge_design(&code[..13]).is_err());
+    }
+
+    #[test]
+    fn verified_ncf1_v15_header_supports_two_sub_cm3_materials() {
+        let copper_bloom_attributes = [26, 37, 30, 54, 9, 52, 30, 37, 59, 55, 1, 53];
+        let code = ncf1_header_code(NCF1_VERSION, 1, 310, copper_bloom_attributes);
+        let (_, requirements) = verified_forge_design(&code).unwrap();
+
+        assert_eq!(requirements.required_volume_mm3, 310);
+        assert_eq!(requirements.required_effective_durability, 1);
+        assert_eq!(requirements.output_mass_grams, 5);
+    }
+
+    #[test]
+    fn verified_ncf1_v15_volume_exponent_boundaries_are_exact() {
+        let cases = [
+            (1, 1_u64),
+            (8_191, 8_191),
+            ((1 << 13) | 512, 8_192),
+            ((1 << 13) | 513, 8_208),
+            ((7 << 13) | 8_191, 8_191_u64 << 28),
+        ];
+
+        for (encoded_volume, expected_volume_mm3) in cases {
+            let code = ncf1_header_code(NCF1_VERSION, 1, encoded_volume, [0; NCF1_ATTRIBUTE_COUNT]);
+            let (_, requirements) = verified_forge_design(&code).unwrap();
+            assert_eq!(requirements.required_volume_mm3, expected_volume_mm3);
+        }
+    }
+
+    #[test]
+    fn verified_ncf1_v15_rejects_a_zero_volume_mantissa() {
+        let code = ncf1_header_code(
+            NCF1_VERSION,
+            1,
+            3 << NCF1_V15_VOLUME_MANTISSA_BITS,
+            [0; NCF1_ATTRIBUTE_COUNT],
+        );
+        assert!(verified_forge_design(&code).is_err());
+    }
+
+    fn ncf1_header_code(
+        version: u32,
+        mass_5g: u32,
+        encoded_volume: u32,
+        attributes: [u8; NCF1_ATTRIBUTE_COUNT],
+    ) -> Vec<u8> {
+        let mut code = vec![0_u8; 14];
+        let mut bit_offset = 0_usize;
+        write_test_bits(&mut code, &mut bit_offset, version, 4);
+        write_test_bits(&mut code, &mut bit_offset, mass_5g, 16);
+        write_test_bits(&mut code, &mut bit_offset, encoded_volume, 16);
+        for attribute in attributes {
+            write_test_bits(&mut code, &mut bit_offset, attribute as u32, 6);
+        }
+        code
+    }
+
+    fn write_test_bits(bytes: &mut [u8], bit_offset: &mut usize, value: u32, bit_count: usize) {
+        for shift in (0..bit_count).rev() {
+            let bit = ((value >> shift) & 1) as u8;
+            bytes[*bit_offset / 8] |= bit << (7 - (*bit_offset % 8));
+            *bit_offset += 1;
+        }
     }
 
     #[test]

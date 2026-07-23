@@ -16,6 +16,8 @@ pub const PLAYER_EQUIPMENT_SLOT_LEN: usize = 768;
 pub const PLAYER_EQUIPMENT_MODEL_CODE_MAX_BYTES: usize = 640;
 pub const PLAYER_EQUIPMENT_FLAG_MODEL: u8 = 1 << 0;
 pub const PLAYER_EQUIPMENT_FLAG_CUSTODY: u8 = 1 << 1;
+const NCF1_LEGACY_VERSION: u8 = 14;
+const NCF1_VERSION: u8 = 15;
 pub const EQUIPMENT_TRANSFER_AUTHORITY_SEED: &[u8] = b"equipment-transfer-v1";
 pub const APPEARANCE_MODEL_CODE_MAX_BYTES: usize = 2048;
 pub const APPEARANCE_TITLE_MAX_BYTES: usize = 96;
@@ -702,9 +704,10 @@ impl PlayerEquipment {
         if model_code.is_empty() {
             return Ok(());
         }
+        let model_version = model_code[0] >> 4;
         if !forged
             || model_code.len() < 14
-            || model_code[0] >> 4 != 14
+            || (model_version != NCF1_LEGACY_VERSION && model_version != NCF1_VERSION)
             || fnv1a32(model_code) != read_u32(backpack_record, 76)
         {
             return Err(NicechunkPlayerError::InvalidEquipmentModel.into());
@@ -1669,6 +1672,26 @@ mod tests {
         PlayerEquipment::clear_slot(&mut data, 7, 103).unwrap();
         assert_eq!(data[offset], 0);
         assert_eq!(data[offset + 2], u8::MAX);
+    }
+
+    #[test]
+    fn player_equipment_accepts_legacy_and_current_ncf1_models() {
+        let mut record = [0_u8; BACKPACK_SLOT_RECORD_LEN];
+        record[0] = BACKPACK_SLOT_KIND_ITEM;
+        record[1] = BACKPACK_ITEM_CATEGORY_FORGED;
+        record[18..20].copy_from_slice(&BACKPACK_FORGED_ITEM_CODE.to_le_bytes());
+
+        for version in [NCF1_LEGACY_VERSION, NCF1_VERSION] {
+            let mut model = [0_u8; 14];
+            model[0] = version << 4;
+            record[76..80].copy_from_slice(&fnv1a32(&model).to_le_bytes());
+            PlayerEquipment::validate_model_code(&record, &model).unwrap();
+        }
+
+        let mut retired_model = [0_u8; 14];
+        retired_model[0] = 13 << 4;
+        record[76..80].copy_from_slice(&fnv1a32(&retired_model).to_le_bytes());
+        assert!(PlayerEquipment::validate_model_code(&record, &retired_model).is_err());
     }
 
     #[test]
