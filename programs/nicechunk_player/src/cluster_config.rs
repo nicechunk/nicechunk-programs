@@ -9,6 +9,8 @@ compile_error!("Only one cluster feature can be enabled");
 
 pub const NICECHUNK_GAME_PROGRAM_ID: Pubkey =
     pubkey!("6CurnvneezBuHwPUnrCiFg1QMWeUF67ufQxYebyr2UP7");
+pub const NICECHUNK_TREASURY_AUTHORITY: Pubkey =
+    pubkey!("CtPV2vmqNNwUSfMu5nz58ZtMPy6ZvxL4LyNdPHVW7WvF");
 
 #[cfg(feature = "devnet")]
 pub const NICECHUNK_CORE_PROGRAM_ID: Pubkey =

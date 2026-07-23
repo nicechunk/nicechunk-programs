@@ -1,6 +1,6 @@
 use solana_program::{program_error::ProgramError, pubkey::Pubkey};
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 #[repr(u32)]
 pub enum NicechunkChunkError {
     InvalidInstruction = 6300,
@@ -33,6 +33,45 @@ pub enum NicechunkChunkError {
     InvalidBackpackOwner = 6336,
     InvalidPlayerProgress = 6337,
     InvalidPlayerProgressData = 6338,
+    InvalidCivilizationProgram = 6339,
+    InvalidCivilizationAccount = 6340,
+    InvalidCivilizationRule = 6341,
+    InvalidCivilizationTally = 6342,
+    InvalidCivilizationReceipt = 6343,
+    CivilizationTargetMismatch = 6344,
+    CivilizationPatchHashMismatch = 6345,
+    CivilizationThresholdNotMet = 6346,
+    InvalidSurfaceDecorationTablePda = 6347,
+    InvalidSurfaceDecorationTableData = 6348,
+    SurfaceDecorationMismatch = 6349,
+    InvalidRuleTableAuthority = 6350,
+    InvalidFoundationPda = 6351,
+    InvalidFoundationData = 6352,
+    InvalidFoundationChunkPda = 6353,
+    InvalidFoundationChunkData = 6354,
+    FoundationOverlap = 6355,
+    FoundationChunkCapacityExceeded = 6356,
+    FoundationProtected = 6357,
+    InvalidBuildingPda = 6358,
+    InvalidBuildingData = 6359,
+    BuildingAlreadyExists = 6360,
+    BuildingUploadIncomplete = 6361,
+    BuildingHashMismatch = 6362,
+    BuildingDoesNotFit = 6363,
+    InvalidBuildSitePda = 6364,
+    InvalidBuildSiteData = 6365,
+    InvalidBuildingManifestPda = 6368,
+    InvalidBuildingManifestData = 6369,
+    InvalidBuildingShardPda = 6370,
+    InvalidBuildingShardData = 6371,
+    BuildingRevisionConflict = 6372,
+    InvalidNcm3 = 6373,
+    InvalidBuildingProgram = 6374,
+    InvalidBuildingAuthority = 6375,
+    InvalidFoundationRegistration = 6376,
+    InvalidBatchMine = 6377,
+    BatchMineCrossChunk = 6378,
+    InvalidRangeMine = 6379,
 }
 
 impl From<NicechunkChunkError> for ProgramError {

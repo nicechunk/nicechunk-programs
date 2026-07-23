@@ -28,6 +28,14 @@ pub enum NicechunkSmeltingError {
     FuelHeatTooLow = 6822,
     InvalidPlayerProgress = 6823,
     InvalidPlayerProgressData = 6824,
+    InvalidCivilizationProgram = 6825,
+    InvalidCivilizationAccount = 6826,
+    InvalidCivilizationRule = 6827,
+    InvalidCivilizationTally = 6828,
+    InvalidCivilizationReceipt = 6829,
+    CivilizationTargetMismatch = 6830,
+    CivilizationPatchHashMismatch = 6831,
+    CivilizationThresholdNotMet = 6832,
 }
 
 impl From<NicechunkSmeltingError> for ProgramError {

@@ -18,7 +18,7 @@ pub const PLAYER_PROGRESS_UPDATED_SLOT_OFFSET: usize = 92;
 pub const PLAYER_PROGRESS_CREATED_AT_OFFSET: usize = 100;
 pub const PLAYER_PROGRESS_SMELTING_XP_OFFSET: usize = 108;
 pub const RECIPE_TABLE_HEADER_LEN: usize = 96;
-pub const RECIPE_TABLE_MAX_RECIPES: usize = 12;
+pub const RECIPE_TABLE_MAX_RECIPES: usize = 10;
 pub const RECIPE_MAX_INPUTS: usize = 8;
 pub const RECIPE_MAX_OUTPUTS: usize = 4;
 pub const BACKPACK_RESOURCE_RECORD_LEN: usize = 10;
@@ -28,9 +28,10 @@ pub const BACKPACK_SLOT_KIND_ITEM: u8 = 2;
 pub const BACKPACK_ITEM_CATEGORY_MATERIAL: u8 = 1;
 pub const DEFAULT_RESOURCE_VOLUME_MM3: u32 = 1_000_000;
 pub const RECIPE_YIELD_BPS_DENOMINATOR: u16 = 10_000;
-pub const SMELTING_SKILL_BASE_OUTPUT_BPS: u16 = 7_000;
-pub const SMELTING_SKILL_OUTPUT_BPS_PER_LEVEL: u16 = 300;
+pub const SMELTING_SKILL_BASE_OUTPUT_BPS: u16 = 1_000;
+pub const SMELTING_SKILL_OUTPUT_BPS_PER_LEVEL: u16 = 500;
 pub const SMELTING_XP_PER_INPUT: u64 = 1;
+pub const DURABILITY_BPS_DENOMINATOR: u64 = 10_000;
 pub const SMELTING_TOTAL_XP_BY_LEVEL: [u64; 11] = [
     0, 1_200, 4_738, 11_398, 21_831, 36_608, 56_246, 81_223, 111_984, 148_950, 192_519,
 ];
@@ -124,6 +125,12 @@ pub struct BackpackSlotRecord {
     pub item_id: u64,
     pub item_pda: Pubkey,
     pub volume_mm3: u32,
+    pub durability_current: u32,
+    pub durability_max: u32,
+    pub grade: u8,
+    pub item_level: u8,
+    pub quality_bps: u16,
+    pub metadata: u32,
 }
 
 impl BackpackSlotRecord {
@@ -138,11 +145,17 @@ impl BackpackSlotRecord {
             item_id: 0,
             item_pda: Pubkey::default(),
             volume_mm3: 0,
+            durability_current: 0,
+            durability_max: 0,
+            grade: 0,
+            item_level: 0,
+            quality_bps: 0,
+            metadata: 0,
         }
     }
 
     pub fn unpack(data: &[u8]) -> Result<Self, NicechunkSmeltingError> {
-        if data.len() != BACKPACK_SLOT_RECORD_LEN && data.len() != BACKPACK_V3_SLOT_RECORD_LEN {
+        if data.len() != BACKPACK_SLOT_RECORD_LEN {
             return Err(NicechunkSmeltingError::InvalidRecipe);
         }
         let kind = data[0];
@@ -163,6 +176,12 @@ impl BackpackSlotRecord {
                     .map_err(|_| NicechunkSmeltingError::InvalidRecipe)?,
             ),
             volume_mm3: read_u32(data, 60),
+            durability_current: read_u32(data, 64),
+            durability_max: read_u32(data, 68),
+            grade: data[72],
+            item_level: data[73],
+            quality_bps: read_u16(data, 74),
+            metadata: read_u32(data, 76),
         };
         if record.quantity == 0 {
             return Err(NicechunkSmeltingError::InvalidRecipe);
@@ -197,6 +216,32 @@ impl BackpackSlotRecord {
         dst[20..28].copy_from_slice(&self.item_id.to_le_bytes());
         dst[28..60].copy_from_slice(self.item_pda.as_ref());
         dst[60..64].copy_from_slice(&self.volume_mm3.to_le_bytes());
+        dst[64..68].copy_from_slice(&self.durability_current.to_le_bytes());
+        dst[68..72].copy_from_slice(&self.durability_max.to_le_bytes());
+        dst[72] = self.grade;
+        dst[73] = self.item_level;
+        dst[74..76].copy_from_slice(&self.quality_bps.to_le_bytes());
+        dst[76..80].copy_from_slice(&self.metadata.to_le_bytes());
+        Ok(())
+    }
+
+    pub fn validate_output_item(&self) -> Result<(), NicechunkSmeltingError> {
+        if self.kind == BACKPACK_SLOT_KIND_ITEM
+            && (self.item_id == 0
+                || self.item_pda == Pubkey::default()
+                || self.volume_mm3 == 0
+                || self.durability_current == 0
+                || self.durability_max == 0
+                || self.durability_current > self.durability_max
+                || self.grade == 0
+                || self.grade > 10
+                || self.item_level == 0
+                || self.item_level > 100
+                || self.quality_bps == 0
+                || self.quality_bps as u64 > DURABILITY_BPS_DENOMINATOR)
+        {
+            return Err(NicechunkSmeltingError::InvalidRecipe);
+        }
         Ok(())
     }
 }
@@ -231,6 +276,64 @@ impl Default for RecipeRecord {
 }
 
 impl RecipeRecord {
+    pub fn unpack_civilization_patch_args(
+        data: &[u8],
+        updated_slot: u64,
+    ) -> Result<Self, NicechunkSmeltingError> {
+        if data.len() < 16 {
+            return Err(NicechunkSmeltingError::InvalidInstruction);
+        }
+        let recipe_id = read_u64(data, 0);
+        let enabled = data[8] == 1;
+        let min_heat_tier = data[9];
+        let input_count = data[10];
+        let output_count = data[11];
+        let yield_bps = read_u16(data, 12);
+        let expected_len = 16_usize
+            .saturating_add(input_count as usize * BACKPACK_SLOT_RECORD_LEN)
+            .saturating_add(output_count as usize * BACKPACK_SLOT_RECORD_LEN);
+        if data.len() != expected_len
+            || recipe_id == 0
+            || input_count == 0
+            || input_count as usize > RECIPE_MAX_INPUTS
+            || output_count == 0
+            || output_count as usize > RECIPE_MAX_OUTPUTS
+            || yield_bps == 0
+            || yield_bps > RECIPE_YIELD_BPS_DENOMINATOR
+        {
+            return Err(NicechunkSmeltingError::InvalidRecipe);
+        }
+        let mut inputs = [BackpackSlotRecord::default(); RECIPE_MAX_INPUTS];
+        let mut outputs = [BackpackSlotRecord::default(); RECIPE_MAX_OUTPUTS];
+        let mut offset = 16;
+        for input in inputs.iter_mut().take(input_count as usize) {
+            *input = BackpackSlotRecord::unpack(&data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
+            offset += BACKPACK_SLOT_RECORD_LEN;
+        }
+        for output in outputs.iter_mut().take(output_count as usize) {
+            *output = BackpackSlotRecord::unpack(&data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
+            output.validate_output_item()?;
+            offset += BACKPACK_SLOT_RECORD_LEN;
+        }
+        for index in input_count as usize..RECIPE_MAX_INPUTS {
+            inputs[index] = inputs[0];
+        }
+        for index in output_count as usize..RECIPE_MAX_OUTPUTS {
+            outputs[index] = outputs[0];
+        }
+        Ok(Self {
+            recipe_id,
+            enabled,
+            min_heat_tier,
+            input_count,
+            output_count,
+            yield_bps,
+            inputs,
+            outputs,
+            updated_slot,
+        })
+    }
+
     pub fn unpack_args(data: &[u8], updated_slot: u64) -> Result<Self, NicechunkSmeltingError> {
         if data.len() != UPSERT_RECIPE_ARGS_LEN {
             return Err(NicechunkSmeltingError::InvalidInstruction);
@@ -265,6 +368,7 @@ impl RecipeRecord {
             if index < output_count as usize {
                 *output =
                     BackpackSlotRecord::unpack(&data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
+                output.validate_output_item()?;
             }
             offset += BACKPACK_SLOT_RECORD_LEN;
         }
@@ -578,11 +682,11 @@ pub struct BackpackAccountView;
 
 impl BackpackAccountView {
     pub fn validate(data: &[u8]) -> ProgramResult {
-        if !is_supported_backpack_len(data.len()) || data[0..8] != BACKPACK_MAGIC {
+        if data.len() != BACKPACK_LEN || data[0..8] != BACKPACK_MAGIC {
             return Err(NicechunkSmeltingError::InvalidBackpackData.into());
         }
         let version = read_u16(data, 8);
-        if !is_supported_backpack_version(version) || data[11] != 1 {
+        if version != BACKPACK_VERSION || data[11] != 1 {
             return Err(NicechunkSmeltingError::InvalidBackpackData.into());
         }
         let capacity = data[BACKPACK_CAPACITY_OFFSET] as usize;
@@ -670,13 +774,8 @@ impl BackpackAccountView {
     }
 
     fn slot_at(data: &[u8], index: u8) -> Result<BackpackSlotRecord, NicechunkSmeltingError> {
-        let record_len = backpack_record_len(data)?;
-        let offset = BACKPACK_RECORDS_OFFSET + index as usize * record_len;
-        if record_len == BACKPACK_LEGACY_RECORD_LEN {
-            let resource = BackpackResourceRecord::unpack(&data[offset..offset + record_len])?;
-            return Ok(BackpackSlotRecord::from_block_resource(resource));
-        }
-        BackpackSlotRecord::unpack(&data[offset..offset + record_len])
+        let offset = BACKPACK_RECORDS_OFFSET + index as usize * BACKPACK_SLOT_RECORD_LEN;
+        BackpackSlotRecord::unpack(&data[offset..offset + BACKPACK_SLOT_RECORD_LEN])
     }
 }
 
@@ -805,25 +904,4 @@ fn read_i32(data: &[u8], offset: usize) -> i32 {
         data[offset + 2],
         data[offset + 3],
     ])
-}
-
-fn backpack_record_len(data: &[u8]) -> Result<usize, NicechunkSmeltingError> {
-    if data.len() == BACKPACK_LEGACY_LEN && read_u16(data, 8) == BACKPACK_LEGACY_VERSION {
-        return Ok(BACKPACK_LEGACY_RECORD_LEN);
-    }
-    if data.len() == BACKPACK_LEN && read_u16(data, 8) == BACKPACK_V2_VERSION {
-        return Ok(BACKPACK_SLOT_RECORD_LEN);
-    }
-    if data.len() == BACKPACK_V3_LEN && read_u16(data, 8) == BACKPACK_VERSION {
-        return Ok(BACKPACK_V3_SLOT_RECORD_LEN);
-    }
-    Err(NicechunkSmeltingError::InvalidBackpackData)
-}
-
-fn is_supported_backpack_len(len: usize) -> bool {
-    len == BACKPACK_V3_LEN || len == BACKPACK_LEN || len == BACKPACK_LEGACY_LEN
-}
-
-fn is_supported_backpack_version(version: u16) -> bool {
-    version == BACKPACK_VERSION || version == BACKPACK_V2_VERSION || version == BACKPACK_LEGACY_VERSION
 }

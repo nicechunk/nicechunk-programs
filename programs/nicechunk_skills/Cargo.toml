@@ -1,0 +1,19 @@
+[package]
+name = "nicechunk_skills"
+version = "0.1.0"
+description = "NiceChunk unified player skill XP program"
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "nicechunk_skills"
+
+[features]
+default = ["devnet"]
+devnet = []
+testnet = []
+mainnet = []
+no-entrypoint = []
+
+[dependencies]
+solana-program.workspace = true

@@ -13,11 +13,8 @@ pub enum NicechunkMarketError {
     ListingAlreadyInitialized = 6607,
     InvalidListingOwner = 6608,
     InvalidListingData = 6609,
-    InvalidCategory = 6610,
     InvalidCurrency = 6611,
-    InvalidSourceKind = 6612,
     InvalidPrice = 6613,
-    InvalidQuantity = 6614,
     ListingNotActive = 6615,
     UnauthorizedSeller = 6616,
     PackSizeMismatch = 6617,
@@ -32,12 +29,9 @@ pub enum NicechunkMarketError {
     InvalidMarketAuthority = 6626,
     InvalidTreasury = 6627,
     InvalidFee = 6628,
-    InvalidAssetPda = 6629,
-    AssetAlreadyInitialized = 6630,
-    InvalidAssetOwner = 6631,
-    InvalidAssetData = 6632,
-    AssetNotActive = 6633,
-    AssetNotListed = 6634,
+    InvalidPlayerProgram = 6629,
+    InvalidPlayerProfile = 6630,
+    InvalidEquipmentSource = 6631,
 }
 
 impl From<NicechunkMarketError> for ProgramError {

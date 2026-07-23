@@ -16,16 +16,18 @@ use solana_program::{
 #[cfg(not(feature = "no-entrypoint"))]
 use solana_program::entrypoint;
 
+pub mod civilization_adapter;
 pub mod cluster_config;
 pub mod errors;
 pub mod state;
 
-use cluster_config::NICECHUNK_BACKPACK_PROGRAM_ID;
+use cluster_config::{NICECHUNK_BACKPACK_PROGRAM_ID, NICECHUNK_CIVILIZATION_PROGRAM_ID};
 use errors::{require_key_eq, NicechunkSmeltingError};
 use state::{
     BackpackAccountView, PlayerProgressInitArgs, PlayerProgressState, RecipeRecord, RecipeTable,
-    RecipeTableInitArgs, PLAYER_PROGRESS_LEN, PLAYER_PROGRESS_SEED, RECIPE_TABLE_SEED,
-    RECIPE_YIELD_BPS_DENOMINATOR, SMELTING_AUTHORITY_SEED, SMELTING_XP_PER_INPUT,
+    RecipeTableInitArgs, DEFAULT_RESOURCE_VOLUME_MM3, DURABILITY_BPS_DENOMINATOR,
+    PLAYER_PROGRESS_LEN, PLAYER_PROGRESS_SEED, RECIPE_TABLE_SEED, RECIPE_YIELD_BPS_DENOMINATOR,
+    SMELTING_AUTHORITY_SEED, SMELTING_XP_PER_INPUT,
 };
 
 declare_id!("7imEiNtpiN487HRwrftdLrMFs8TcAnjLE94vKsDgU6L7");
@@ -47,6 +49,7 @@ pub fn process_instruction(
         1 => upsert_recipe(program_id, accounts, payload),
         2 => execute_smelting(program_id, accounts, payload),
         3 => set_recipe_table_authority(program_id, accounts),
+        4 => apply_civilization_recipe_receipt(program_id, accounts, payload),
         _ => Err(NicechunkSmeltingError::InvalidInstruction.into()),
     }
 }
@@ -160,12 +163,114 @@ fn set_recipe_table_authority(program_id: &Pubkey, accounts: &[AccountInfo]) -> 
     RecipeTable::set_authority(&mut data, new_authority.key, clock.slot)
 }
 
+fn apply_civilization_recipe_receipt(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    payload: &[u8],
+) -> ProgramResult {
+    if accounts.len() != 8 {
+        return Err(NicechunkSmeltingError::InvalidAccountCount.into());
+    }
+    let account_info_iter = &mut accounts.iter();
+    let executor = next_account_info(account_info_iter)?;
+    let recipe_table = next_account_info(account_info_iter)?;
+    let civilization_program = next_account_info(account_info_iter)?;
+    let rule_book = next_account_info(account_info_iter)?;
+    let tally = next_account_info(account_info_iter)?;
+    let receipt = next_account_info(account_info_iter)?;
+    let system_program_account = next_account_info(account_info_iter)?;
+    let adapter_authority = next_account_info(account_info_iter)?;
+
+    if !executor.is_signer || !executor.is_writable {
+        return Err(NicechunkSmeltingError::InvalidPayer.into());
+    }
+    if !recipe_table.is_writable || !rule_book.is_writable || !receipt.is_writable {
+        return Err(NicechunkSmeltingError::InvalidWritableAccount.into());
+    }
+    if civilization_program.key == program_id {
+        return Err(NicechunkSmeltingError::InvalidCivilizationProgram.into());
+    }
+    require_key_eq(
+        civilization_program.key,
+        &NICECHUNK_CIVILIZATION_PROGRAM_ID,
+        NicechunkSmeltingError::InvalidCivilizationProgram,
+    )?;
+    require_key_eq(
+        recipe_table.owner,
+        program_id,
+        NicechunkSmeltingError::InvalidRecipeTableOwner,
+    )?;
+    require_key_eq(
+        rule_book.owner,
+        civilization_program.key,
+        NicechunkSmeltingError::InvalidCivilizationRule,
+    )?;
+    require_key_eq(
+        tally.owner,
+        civilization_program.key,
+        NicechunkSmeltingError::InvalidCivilizationTally,
+    )?;
+
+    {
+        let rule_data = rule_book.try_borrow_data()?;
+        civilization_adapter::validate_rule_book_for_smelting_patch(
+            &rule_data,
+            civilization_program.key,
+            program_id,
+            recipe_table.key,
+            payload,
+            civilization_adapter::CIVILIZATION_STATUS_FINALIZED,
+        )?;
+    }
+    {
+        let tally_data = tally.try_borrow_data()?;
+        civilization_adapter::validate_tally_threshold(&tally_data, rule_book.key)?;
+    }
+
+    civilization_adapter::invoke_civilization_execute_receipt(
+        executor,
+        rule_book,
+        tally,
+        receipt,
+        system_program_account,
+        civilization_program,
+        adapter_authority,
+        program_id,
+    )?;
+
+    require_key_eq(
+        receipt.owner,
+        civilization_program.key,
+        NicechunkSmeltingError::InvalidCivilizationReceipt,
+    )?;
+    {
+        let rule_data = rule_book.try_borrow_data()?;
+        civilization_adapter::validate_rule_book_for_smelting_patch(
+            &rule_data,
+            civilization_program.key,
+            program_id,
+            recipe_table.key,
+            payload,
+            civilization_adapter::CIVILIZATION_STATUS_EXECUTED,
+        )?;
+    }
+    {
+        let receipt_data = receipt.try_borrow_data()?;
+        civilization_adapter::validate_execution_receipt(&receipt_data, rule_book.key)?;
+    }
+
+    let clock = Clock::get()?;
+    let recipe = RecipeRecord::unpack_civilization_patch_args(payload, clock.slot)?;
+    let mut data = recipe_table.try_borrow_mut_data()?;
+    RecipeTable::upsert_recipe(&mut data, &recipe, clock.slot)
+}
+
 fn execute_smelting(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     payload: &[u8],
 ) -> ProgramResult {
-    if accounts.len() != 8 || payload.len() < 10 {
+    if accounts.len() != 9 || payload.len() < 10 {
         return Err(NicechunkSmeltingError::InvalidInstruction.into());
     }
     let recipe_id = read_u64(payload, 0);
@@ -178,12 +283,15 @@ fn execute_smelting(
         1
     };
     let index_offset = if has_multiplier { 12 } else { 10 };
-    if input_count == 0
-        || fuel_count == 0
-        || input_count + fuel_count > 99
-        || multiplier == 0
-        || (!has_multiplier && payload.len() != 10 + input_count + fuel_count)
-    {
+    // Ambient crafting recipes intentionally submit no fuel. Heated recipes
+    // are still rejected later when max fuel tier is below min_heat_tier.
+    if !smelting_payload_shape_is_valid(
+        payload.len(),
+        input_count,
+        fuel_count,
+        has_multiplier,
+        multiplier,
+    ) {
         return Err(NicechunkSmeltingError::InvalidInstruction.into());
     }
     let indexes = &payload[index_offset..index_offset + input_count];
@@ -195,6 +303,7 @@ fn execute_smelting(
     let backpack = next_account_info(account_info_iter)?;
     let player_progress = next_account_info(account_info_iter)?;
     let global_config = next_account_info(account_info_iter)?;
+    let material_physics = next_account_info(account_info_iter)?;
     let smelting_authority = next_account_info(account_info_iter)?;
     let backpack_program = next_account_info(account_info_iter)?;
     let system_program_account = next_account_info(account_info_iter)?;
@@ -267,18 +376,26 @@ fn execute_smelting(
     };
 
     remove_backpack_resources(owner, backpack, backpack_program, indexes, fuel_indexes)?;
-    let output_total_volume_mm3 =
-        smelting_output_volume_mm3(input_volume_mm3, recipe.yield_bps, skill_output_bps);
-    let output_count = (recipe.output_count as u64).max(1);
-    let output_volume_mm3 = output_total_volume_mm3.saturating_div(output_count).max(1);
+    let recipe_input_volume_mm3 = recipe_input_volume_mm3(&recipe);
     for output_index in 0..recipe.output_count as usize {
+        let output = &recipe.outputs[output_index];
+        let output_volume_mm3 = smelting_output_volume_mm3(
+            output.volume_mm3,
+            input_volume_mm3,
+            recipe_input_volume_mm3,
+            multiplier,
+            recipe.yield_bps,
+            skill_output_bps,
+        );
         append_smelting_output_to_backpack(
             program_id,
             smelting_authority,
             owner,
             backpack,
             backpack_program,
-            &recipe.outputs[output_index],
+            material_physics,
+            global_config,
+            output,
             output_volume_mm3,
         )?;
     }
@@ -293,6 +410,24 @@ fn execute_smelting(
         )?;
     }
     Ok(())
+}
+
+fn smelting_payload_shape_is_valid(
+    payload_len: usize,
+    input_count: usize,
+    fuel_count: usize,
+    has_multiplier: bool,
+    multiplier: u16,
+) -> bool {
+    input_count > 0
+        && input_count + fuel_count <= 99
+        && multiplier > 0
+        && payload_len
+            == if has_multiplier {
+                12 + input_count + fuel_count
+            } else {
+                10 + input_count + fuel_count
+            }
 }
 
 fn remove_backpack_resources<'a>(
@@ -325,6 +460,8 @@ fn append_smelting_output_to_backpack<'a>(
     owner: &AccountInfo<'a>,
     backpack: &AccountInfo<'a>,
     _backpack_program: &AccountInfo<'a>,
+    material_physics: &AccountInfo<'a>,
+    global_config: &AccountInfo<'a>,
     record: &state::BackpackSlotRecord,
     output_volume_mm3: u64,
 ) -> ProgramResult {
@@ -333,6 +470,7 @@ fn append_smelting_output_to_backpack<'a>(
     data[0] = 5;
     let mut output = *record;
     output.volume_mm3 = output_volume_mm3.min(u32::MAX as u64).max(1) as u32;
+    normalize_smelting_output_metadata(&mut output);
     output.pack(&mut data[1..])?;
     let data = backpack_cpi_data(&data);
     let ix = Instruction {
@@ -341,22 +479,119 @@ fn append_smelting_output_to_backpack<'a>(
             AccountMeta::new_readonly(*smelting_authority.key, true),
             AccountMeta::new_readonly(*owner.key, false),
             AccountMeta::new(*backpack.key, false),
+            AccountMeta::new_readonly(*material_physics.key, false),
+            AccountMeta::new_readonly(*global_config.key, false),
         ],
         data,
     };
     invoke_signed(
         &ix,
-        &[smelting_authority.clone(), owner.clone(), backpack.clone()],
+        &[
+            smelting_authority.clone(),
+            owner.clone(),
+            backpack.clone(),
+            material_physics.clone(),
+            global_config.clone(),
+        ],
         &[&[SMELTING_AUTHORITY_SEED, &[bump]]],
     )
 }
 
+fn normalize_smelting_output_metadata(output: &mut state::BackpackSlotRecord) {
+    if output.kind != state::BACKPACK_SLOT_KIND_ITEM {
+        return;
+    }
+    let per_unit_durability = output.durability_max.max(1) as u64;
+    let current_bps = if output.durability_max > 0 {
+        (output.durability_current.max(1) as u64)
+            .saturating_mul(DURABILITY_BPS_DENOMINATOR)
+            .saturating_div(output.durability_max.max(1) as u64)
+    } else {
+        DURABILITY_BPS_DENOMINATOR
+    };
+    let scaled_max = per_unit_durability
+        .saturating_mul(output.volume_mm3.max(1) as u64)
+        .saturating_add(500_000)
+        .saturating_div(1_000_000)
+        .max(1)
+        .min(u32::MAX as u64) as u32;
+    let scaled_current = (scaled_max as u64)
+        .saturating_mul(current_bps.max(1).min(DURABILITY_BPS_DENOMINATOR))
+        .saturating_add(DURABILITY_BPS_DENOMINATOR / 2)
+        .saturating_div(DURABILITY_BPS_DENOMINATOR)
+        .max(1)
+        .min(scaled_max as u64) as u32;
+    output.durability_max = scaled_max;
+    output.durability_current = scaled_current;
+    output.grade = output.grade.max(1).min(10);
+    output.quality_bps = output
+        .quality_bps
+        .max(1)
+        .min(DURABILITY_BPS_DENOMINATOR as u16);
+    let effective_durability = (output.durability_current as u64)
+        .saturating_mul(output.quality_bps as u64)
+        .saturating_div(DURABILITY_BPS_DENOMINATOR);
+    output.item_level =
+        smelting_material_item_level(effective_durability, output.volume_mm3 as u64)
+            .max(output.item_level.max(1))
+            .min(100);
+}
+
+fn smelting_material_item_level(effective_durability: u64, total_volume_mm3: u64) -> u8 {
+    let durability_level = integer_sqrt(effective_durability / 25).min(80);
+    let volume_level = (total_volume_mm3 / 500_000).min(20);
+    (1_u64
+        .saturating_add(durability_level)
+        .saturating_add(volume_level))
+    .min(100) as u8
+}
+
+fn integer_sqrt(value: u64) -> u64 {
+    if value <= 1 {
+        return value;
+    }
+    let mut estimate = value;
+    let mut next = (estimate + value / estimate) / 2;
+    while next < estimate {
+        estimate = next;
+        next = (estimate + value / estimate) / 2;
+    }
+    estimate
+}
+
+fn recipe_input_volume_mm3(recipe: &RecipeRecord) -> u64 {
+    recipe
+        .inputs
+        .iter()
+        .take(recipe.input_count as usize)
+        .map(|input| {
+            if input.volume_mm3 > 0 {
+                input.volume_mm3 as u64
+            } else {
+                DEFAULT_RESOURCE_VOLUME_MM3 as u64
+            }
+        })
+        .sum::<u64>()
+        .max(1)
+}
+
 fn smelting_output_volume_mm3(
+    pda_output_volume_mm3: u32,
     input_volume_mm3: u64,
+    recipe_input_volume_mm3: u64,
+    multiplier: u16,
     recipe_yield_bps: u16,
     skill_output_bps: u16,
 ) -> u64 {
-    let recipe_volume = (input_volume_mm3 as u128)
+    let multiplier = multiplier.max(1) as u128;
+    let expected_input_volume = (recipe_input_volume_mm3.max(1) as u128)
+        .saturating_mul(multiplier)
+        .max(1);
+    let pda_volume = (pda_output_volume_mm3.max(1) as u128)
+        .saturating_mul(multiplier)
+        .saturating_mul(input_volume_mm3.max(1) as u128)
+        .saturating_div(expected_input_volume);
+    let recipe_volume = pda_volume
         .saturating_mul(recipe_yield_bps as u128)
         .saturating_div(RECIPE_YIELD_BPS_DENOMINATOR as u128);
     recipe_volume
@@ -559,4 +794,71 @@ fn read_u64(data: &[u8], offset: usize) -> u64 {
 
 fn read_u16(data: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([data[offset], data[offset + 1]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{smelting_output_volume_mm3, smelting_payload_shape_is_valid};
+    use crate::state::{PlayerProgressState, SMELTING_TOTAL_XP_BY_LEVEL};
+
+    #[test]
+    fn smelting_skill_yield_starts_at_ten_percent_and_caps_at_sixty() {
+        assert_eq!(PlayerProgressState::smelting_output_bps_from_xp(0), 1_000);
+        assert_eq!(
+            PlayerProgressState::smelting_output_bps_from_xp(SMELTING_TOTAL_XP_BY_LEVEL[1]),
+            1_500,
+        );
+        assert_eq!(PlayerProgressState::smelting_output_bps_from_xp(u64::MAX), 6_000);
+    }
+
+    #[test]
+    fn smelting_skill_yield_scales_real_output_volume() {
+        let base = smelting_output_volume_mm3(1_000_000, 1_000_000, 1_000_000, 1, 10_000, 1_000);
+        let maximum = smelting_output_volume_mm3(1_000_000, 1_000_000, 1_000_000, 1, 10_000, 6_000);
+
+        assert_eq!(base, 100_000);
+        assert_eq!(maximum, 600_000);
+    }
+
+    #[test]
+    fn ambient_recipe_payload_accepts_zero_fuel_indexes() {
+        assert!(smelting_payload_shape_is_valid(14, 4, 0, false, 1));
+        assert!(smelting_payload_shape_is_valid(16, 4, 0, true, 2));
+        assert!(!smelting_payload_shape_is_valid(13, 4, 0, false, 1));
+        assert!(!smelting_payload_shape_is_valid(10, 0, 0, false, 1));
+        assert!(!smelting_payload_shape_is_valid(16, 4, 0, true, 0));
+    }
+
+    #[test]
+    fn pda_output_volume_controls_each_material_independently() {
+        let cloth = smelting_output_volume_mm3(1_000_000, 5_000_000, 5_000_000, 1, 6_500, 7_000);
+        let dye = smelting_output_volume_mm3(20_000, 3_000_000, 3_000_000, 1, 6_000, 7_000);
+
+        assert_eq!(cloth, 455_000);
+        assert_eq!(dye, 8_400);
+    }
+
+    #[test]
+    fn actual_input_volume_scales_the_pda_output() {
+        let full = smelting_output_volume_mm3(1_000_000, 3_000_000, 3_000_000, 1, 6_000, 10_000);
+        let half = smelting_output_volume_mm3(1_000_000, 1_500_000, 3_000_000, 1, 6_000, 10_000);
+
+        assert_eq!(full, 600_000);
+        assert_eq!(half, 300_000);
+    }
+
+    #[test]
+    fn batch_multiplier_scales_pda_output_without_equal_splitting() {
+        let large = smelting_output_volume_mm3(1_000_000, 6_000_000, 3_000_000, 2, 10_000, 10_000);
+        let small = smelting_output_volume_mm3(20_000, 6_000_000, 3_000_000, 2, 10_000, 10_000);
+
+        assert_eq!(large, 2_000_000);
+        assert_eq!(small, 40_000);
+    }
+
+    #[test]
+    fn merge_recipe_preserves_real_input_volume_before_skill_loss() {
+        let output = smelting_output_volume_mm3(20_000, 8_400, 20_000, 1, 10_000, 7_000);
+        assert_eq!(output, 5_880);
+    }
 }
