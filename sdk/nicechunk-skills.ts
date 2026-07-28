@@ -30,6 +30,7 @@ export const SKILL_BURDEN_RULE_MAGIC = "NCKBRD01";
 export const SKILL_BURDEN_RULE_VERSION = 1;
 export const SKILL_RULE_TABLE_LEN =
   SKILL_RULE_TABLE_HEADER_LEN + SKILL_SOURCE_RULE_MAX_COUNT * SKILL_SOURCE_RULE_LEN;
+export const SKILL_RULE_TABLE_THRESHOLDS_OFFSET = 108;
 export const SKILL_COUNT = 10;
 export const SKILL_MAX_LEVEL = 10;
 export const SOURCE_RULE_FLAG_BACKFILL_ON_FIRST_SYNC = 1 << 0;
@@ -106,6 +107,7 @@ export interface DecodedSkillRuleTable {
   createdSlot: bigint;
   updatedSlot: bigint;
   createdAt: bigint;
+  thresholds: Readonly<Record<PlayerSkillId, readonly bigint[]>>;
   miningTravelRule: Readonly<{
     enabled: boolean;
     minimumDistance: number;
@@ -461,7 +463,9 @@ export function decodePlayerSkills(data: Buffer | Uint8Array): DecodedPlayerSkil
   const levels = {} as Record<PlayerSkillId, number>;
   PLAYER_SKILL_IDS.forEach((skillId, index) => {
     xp[skillId] = bytes.readBigUInt64LE(76 + index * 8);
-    levels[skillId] = bytes.readUInt8(156 + index);
+    const level = bytes.readUInt8(156 + index);
+    if (level > SKILL_MAX_LEVEL) throw new Error("Invalid PlayerSkills level.");
+    levels[skillId] = level;
   });
   const hasLastMiningCoordinate = (bytes.readUInt8(468) & 1) !== 0;
   return {
@@ -517,6 +521,19 @@ export function decodeSkillRuleTable(data: Buffer | Uint8Array): DecodedSkillRul
   const burdenMiningRule = burdenRecord.every((value) => value === 0)
     ? null
     : decodeBurdenMiningRule(burdenRecord);
+  const thresholds = {} as Record<PlayerSkillId, readonly bigint[]>;
+  PLAYER_SKILL_IDS.forEach((skillId, skillIndex) => {
+    let previous = 0n;
+    const values = Array.from({ length: SKILL_MAX_LEVEL }, (_, levelIndex) => {
+      const offset = SKILL_RULE_TABLE_THRESHOLDS_OFFSET
+        + (skillIndex * SKILL_MAX_LEVEL + levelIndex) * 8;
+      const value = bytes.readBigUInt64LE(offset);
+      if (value <= previous) throw new Error(`Invalid ${skillId} skill thresholds.`);
+      previous = value;
+      return value;
+    });
+    thresholds[skillId] = Object.freeze(values);
+  });
   return {
     version,
     authority: new PublicKey(bytes.subarray(12, 44)),
@@ -526,6 +543,7 @@ export function decodeSkillRuleTable(data: Buffer | Uint8Array): DecodedSkillRul
     createdSlot: bytes.readBigUInt64LE(84),
     updatedSlot: bytes.readBigUInt64LE(92),
     createdAt: bytes.readBigInt64LE(100),
+    thresholds: Object.freeze(thresholds),
     miningTravelRule: Object.freeze({
       enabled: bytes.readUInt8(911) !== 0,
       minimumDistance: bytes.readUInt16LE(78),

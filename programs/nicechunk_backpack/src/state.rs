@@ -36,11 +36,16 @@ pub const MATERIAL_PHYSICS_ITEM_KEY_MASK: u16 = 1 << 15;
 pub const BLUEPRINT_ITEM_MAGIC: [u8; 8] = *b"NCKBPT01";
 pub const BLUEPRINT_ITEM_VERSION: u16 = 1;
 pub const BLUEPRINT_ITEM_SEED: &[u8] = b"blueprint-item";
+pub const FORGED_ITEM_MAGIC: [u8; 8] = *b"NCKFGI01";
+pub const FORGED_ITEM_VERSION: u16 = 1;
+pub const FORGED_ITEM_SEED: &[u8] = b"forged-item-v1";
+pub const FORGED_ITEM_CODE_MAX_BYTES: usize = 640;
+pub const FORGED_ITEM_HEADER_LEN: usize = 96;
+pub const FORGED_ITEM_LEN: usize = 752;
 pub const SESSION_ACTION_BREAK_BLOCK: u8 = 1;
 pub const DURABILITY_BPS_DENOMINATOR: u64 = 10_000;
 pub const MAX_FORGING_INPUTS: usize = 24;
 pub const MAX_VERIFIED_FORGE_CODE_BYTES: usize = 640;
-const NCF1_LEGACY_VERSION: u32 = 14;
 const NCF1_VERSION: u32 = 15;
 const NCF1_ATTRIBUTE_COUNT: usize = 12;
 const NCF1_V15_VOLUME_MANTISSA_BITS: u32 = 13;
@@ -328,16 +333,12 @@ pub fn verified_forge_design(
     }
     let mut bit_offset = 0_usize;
     let version = read_bits(code, &mut bit_offset, 4)?;
-    if version != NCF1_LEGACY_VERSION && version != NCF1_VERSION {
+    if version != NCF1_VERSION {
         return Err(NicechunkBackpackError::InvalidForgeMaterialRequirements);
     }
     let mass_grams = (read_bits(code, &mut bit_offset, 16)? as u64).saturating_mul(5);
     let encoded_volume = read_bits(code, &mut bit_offset, 16)?;
-    let volume_mm3 = if version == NCF1_LEGACY_VERSION {
-        (encoded_volume as u64).saturating_mul(1_000)
-    } else {
-        decode_ncf1_v15_volume_mm3(encoded_volume)
-    };
+    let volume_mm3 = decode_ncf1_v15_volume_mm3(encoded_volume);
     let mut attributes = [0_u64; NCF1_ATTRIBUTE_COUNT];
     for attribute in attributes.iter_mut() {
         let compact = read_bits(code, &mut bit_offset, 6)? as u64;
@@ -357,20 +358,13 @@ pub fn verified_forge_design(
         .saturating_sub(brittleness_penalty);
     let material_score = weighted_material_score.saturating_add(50) / 100;
     let mass_requirement = mass_grams.saturating_mul(3).saturating_add(19) / 20;
-    // Preserve the v14 durability curve exactly for whole-cm3 designs while
-    // allowing v15 to carry a non-zero sub-cm3 material requirement.
     let volume_requirement = integer_sqrt(volume_mm3 / 1_000).saturating_mul(18);
     let base_attribute_requirement = material_score.saturating_mul(126).saturating_add(24) / 25;
-    // Smelting metadata defines durability per 1,000,000 mm3. Scale the v15
-    // attribute demand by the same physical amount for sub-unit materials;
-    // legacy and unit-or-larger designs retain the deployed requirement.
-    let attribute_requirement = if version == NCF1_LEGACY_VERSION {
-        base_attribute_requirement
-    } else {
-        base_attribute_requirement
-            .saturating_mul(volume_mm3.min(NCF1_V15_ATTRIBUTE_REFERENCE_VOLUME_MM3))
-            / NCF1_V15_ATTRIBUTE_REFERENCE_VOLUME_MM3
-    };
+    // Smelting metadata defines durability per 1,000,000 mm3. Scale attribute
+    // demand by the same physical amount for sub-unit materials.
+    let attribute_requirement = base_attribute_requirement
+        .saturating_mul(volume_mm3.min(NCF1_V15_ATTRIBUTE_REFERENCE_VOLUME_MM3))
+        / NCF1_V15_ATTRIBUTE_REFERENCE_VOLUME_MM3;
     let requirements = ForgeMaterialRequirements {
         required_volume_mm3: volume_mm3,
         required_effective_durability: mass_requirement
@@ -420,20 +414,26 @@ fn fnv1a32(bytes: &[u8]) -> u32 {
 pub struct ForgeMaterialCapacity {
     pub total_volume_mm3: u64,
     pub total_effective_durability: u64,
+    pub total_mass_grams: u64,
 }
 
 impl ForgeMaterialCapacity {
     pub fn satisfies(&self, requirements: &ForgeMaterialRequirements) -> bool {
         self.total_volume_mm3 >= requirements.required_volume_mm3
             && self.total_effective_durability >= requirements.required_effective_durability
+            && self.total_mass_grams >= requirements.output_mass_grams as u64
     }
 }
 
 pub const PLAYER_PROFILE_LEN: usize = 773;
 pub const PLAYER_PROFILE_MAGIC: [u8; 8] = *b"NCKPLY01";
+pub const PLAYER_PROFILE_VERSION: u16 = 7;
+pub const PLAYER_PROFILE_INITIALIZED_OFFSET: usize = 11;
 pub const PLAYER_PROFILE_OWNER_OFFSET: usize = 12;
 pub const PLAYER_PROFILE_GLOBAL_CONFIG_OFFSET: usize = 44;
-pub const PLAYER_PROFILE_FORGING_XP_OFFSET: usize = 449;
+pub const PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT_OFFSET: usize = 102;
+pub const PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT: usize = 9;
+pub const PLAYER_PROFILE_EQUIPPED_BACKPACK_OFFSET: usize = 393;
 
 pub const PLAYER_EQUIPMENT_MAGIC: [u8; 8] = *b"NCKEQP01";
 pub const PLAYER_EQUIPMENT_VERSION: u16 = 1;
@@ -451,6 +451,8 @@ pub const EQUIPMENT_TRANSFER_AUTHORITY_SEED: &[u8] = b"equipment-transfer-v1";
 
 pub const PLAYER_SESSION_LEN: usize = 184;
 pub const PLAYER_SESSION_MAGIC: [u8; 8] = *b"NCKSES01";
+pub const PLAYER_SESSION_VERSION: u16 = 1;
+pub const PLAYER_SESSION_INITIALIZED_OFFSET: usize = 11;
 pub const PLAYER_SESSION_OWNER_OFFSET: usize = 12;
 pub const PLAYER_SESSION_AUTHORITY_OFFSET: usize = 44;
 pub const PLAYER_SESSION_PROFILE_OFFSET: usize = 76;
@@ -845,6 +847,82 @@ impl BackpackAccount {
         Ok(())
     }
 
+    pub fn consume_smelting_resources(
+        data: &mut [u8],
+        owner: &Pubkey,
+        input_quantities: &[u32; BACKPACK_MAX_CAPACITY as usize],
+        fuel_indexes: &[bool; BACKPACK_MAX_CAPACITY as usize],
+        material_physics: &MaterialPhysicsTableView<'_>,
+        updated_slot: u64,
+    ) -> ProgramResult {
+        Self::validate_owner(data, owner)?;
+        let item_count = data[Self::ITEM_COUNT_OFFSET] as usize;
+        let mut selected_count = 0_usize;
+        for index in 0..BACKPACK_MAX_CAPACITY as usize {
+            let input_quantity = input_quantities[index];
+            if input_quantity > 0 && fuel_indexes[index] {
+                return Err(NicechunkBackpackError::InvalidSmeltingConsumption.into());
+            }
+            if input_quantity > 0 || fuel_indexes[index] {
+                if index >= item_count {
+                    return Err(NicechunkBackpackError::InvalidSmeltingConsumption.into());
+                }
+                selected_count = selected_count.saturating_add(1);
+            }
+        }
+        if selected_count == 0 {
+            return Err(NicechunkBackpackError::InvalidSmeltingConsumption.into());
+        }
+
+        // Original indexes remain stable while records are processed from high to low.
+        for index in (0..item_count).rev() {
+            let input_quantity = input_quantities[index];
+            if input_quantity == 0 && !fuel_indexes[index] {
+                continue;
+            }
+            let record = Self::slot_at(data, index as u8)?;
+            let consumed_quantity = if fuel_indexes[index] {
+                1
+            } else {
+                input_quantity
+            };
+            if consumed_quantity == 0 || consumed_quantity > record.quantity {
+                return Err(NicechunkBackpackError::InvalidSmeltingConsumption.into());
+            }
+            if consumed_quantity == record.quantity {
+                Self::remove_resource_at(data, owner, index as u8, updated_slot)?;
+                continue;
+            }
+            if record.kind != BACKPACK_SLOT_KIND_ITEM || record.volume_mm3 <= 1 {
+                return Err(NicechunkBackpackError::InvalidSmeltingConsumption.into());
+            }
+
+            let consumed_volume = proportional_consumed_volume_mm3(
+                record.volume_mm3,
+                record.quantity,
+                consumed_quantity,
+            )?;
+            let remaining_volume = record.volume_mm3.saturating_sub(consumed_volume);
+            if remaining_volume == 0 {
+                return Err(NicechunkBackpackError::InvalidSmeltingConsumption.into());
+            }
+            let mut remaining = record;
+            remaining.quantity = record.quantity.saturating_sub(consumed_quantity);
+            remaining.volume_mm3 = remaining_volume;
+            remaining.durability_max =
+                scale_nonzero_metadata(record.durability_max, remaining_volume, record.volume_mm3);
+            remaining.durability_current = scale_nonzero_metadata(
+                record.durability_current,
+                remaining_volume,
+                record.volume_mm3,
+            )
+            .min(remaining.durability_max);
+            material_physics.apply_mass(&mut remaining)?;
+            Self::replace_slot_at(data, owner, index as u8, &remaining, updated_slot)?;
+        }
+        Ok(())
+    }
+
     pub fn slot_at(data: &[u8], index: u8) -> Result<BackpackSlotRecord, NicechunkBackpackError> {
         Self::validate(data)?;
         if index >= data[Self::ITEM_COUNT_OFFSET] {
@@ -947,21 +1025,22 @@ impl BackpackAccount {
         }
 
         if let Some(required) = requirements {
-            let capacity = forge_material_capacity(&materials);
+            let capacity = forge_material_capacity(&materials)?;
             if !capacity.satisfies(&required) {
                 return Err(NicechunkBackpackError::InsufficientForgeMaterialParameters.into());
             }
         }
 
         let mut outcome = calculate_forge_outcome(&materials, forging_level);
-        outcome.mass_grams = requirements
-            .map(|required| required.output_mass_grams)
-            .unwrap_or_else(|| {
-                materials
-                    .iter()
-                    .filter_map(|material| material.mass_grams().ok())
-                    .fold(0_u32, u32::saturating_add)
-            });
+        if let Some(required) = requirements {
+            outcome.volume_mm3 = required.required_volume_mm3.min(u32::MAX as u64) as u32;
+            outcome.mass_grams = required.output_mass_grams;
+        } else {
+            outcome.mass_grams = materials
+                .iter()
+                .filter_map(|material| material.mass_grams().ok())
+                .fold(0_u32, u32::saturating_add);
+        }
         Self::remove_resources_at(data, owner, indexes, updated_slot)?;
         let mut output = BackpackSlotRecord {
             kind: BACKPACK_SLOT_KIND_ITEM,
@@ -984,6 +1063,37 @@ impl BackpackAccount {
         Self::append_item(data, owner, &output, updated_slot)?;
         Ok(outcome)
     }
+}
+
+fn proportional_consumed_volume_mm3(
+    total_volume_mm3: u32,
+    total_quantity: u32,
+    consumed_quantity: u32,
+) -> Result<u32, NicechunkBackpackError> {
+    if total_volume_mm3 == 0
+        || total_quantity == 0
+        || consumed_quantity == 0
+        || consumed_quantity > total_quantity
+    {
+        return Err(NicechunkBackpackError::InvalidSmeltingConsumption);
+    }
+    if consumed_quantity == total_quantity {
+        return Ok(total_volume_mm3);
+    }
+    let proportional = (total_volume_mm3 as u64)
+        .saturating_mul(consumed_quantity as u64)
+        .saturating_div(total_quantity as u64);
+    Ok(proportional
+        .max(1)
+        .min(total_volume_mm3.saturating_sub(1) as u64) as u32)
+}
+
+fn scale_nonzero_metadata(value: u32, numerator: u32, denominator: u32) -> u32 {
+    (value as u64)
+        .saturating_mul(numerator as u64)
+        .saturating_div(denominator.max(1) as u64)
+        .max(1)
+        .min(u32::MAX as u64) as u32
 }
 
 pub struct BlueprintItemAccount;
@@ -1029,6 +1139,105 @@ impl BlueprintItemAccount {
             return Err(NicechunkBackpackError::InvalidBlueprintItem);
         }
         Ok(())
+    }
+}
+
+pub struct ForgedItemInitArgs<'a> {
+    pub bump: u8,
+    pub item_id: u64,
+    pub creator: &'a Pubkey,
+    pub origin_backpack: &'a Pubkey,
+    pub design_hash: u32,
+    pub code: &'a [u8],
+    pub created_slot: u64,
+    pub created_at: i64,
+}
+
+/// Immutable canonical model data for one forged item.
+pub struct ForgedItemAccount;
+
+impl ForgedItemAccount {
+    pub const LEN: usize = FORGED_ITEM_LEN;
+    pub const ITEM_ID_OFFSET: usize = 12;
+    pub const CREATOR_OFFSET: usize = 20;
+    pub const ORIGIN_BACKPACK_OFFSET: usize = 52;
+    pub const DESIGN_HASH_OFFSET: usize = 84;
+    pub const CODE_LENGTH_OFFSET: usize = 88;
+    pub const CODE_OFFSET: usize = FORGED_ITEM_HEADER_LEN;
+    pub const CREATED_SLOT_OFFSET: usize = 736;
+    pub const CREATED_AT_OFFSET: usize = 744;
+
+    pub fn pack(dst: &mut [u8], args: &ForgedItemInitArgs) -> ProgramResult {
+        if dst.len() != Self::LEN
+            || args.item_id == 0
+            || *args.creator == Pubkey::default()
+            || *args.origin_backpack == Pubkey::default()
+            || args.code.len() < 14
+            || args.code.len() > FORGED_ITEM_CODE_MAX_BYTES
+        {
+            return Err(NicechunkBackpackError::InvalidForgedItemData.into());
+        }
+        let (design_hash, _) = verified_forge_design(args.code)?;
+        if design_hash != args.design_hash {
+            return Err(NicechunkBackpackError::InvalidForgedItemData.into());
+        }
+
+        dst.fill(0);
+        let mut writer = ByteWriter { dst, offset: 0 };
+        writer.bytes(&FORGED_ITEM_MAGIC)?;
+        writer.u16(FORGED_ITEM_VERSION)?;
+        writer.u8(args.bump)?;
+        writer.u8(1)?;
+        writer.u64(args.item_id)?;
+        writer.pubkey(args.creator)?;
+        writer.pubkey(args.origin_backpack)?;
+        writer.bytes(&args.design_hash.to_le_bytes())?;
+        writer.u16(args.code.len() as u16)?;
+        writer.bytes(&[0_u8; 6])?;
+        if writer.offset != FORGED_ITEM_HEADER_LEN {
+            return Err(NicechunkBackpackError::PackSizeMismatch.into());
+        }
+        writer.bytes(args.code)?;
+        writer.offset = Self::CREATED_SLOT_OFFSET;
+        writer.u64(args.created_slot)?;
+        writer.i64(args.created_at)?;
+        if writer.offset != Self::LEN {
+            return Err(NicechunkBackpackError::PackSizeMismatch.into());
+        }
+        Ok(())
+    }
+
+    pub fn validate(data: &[u8]) -> ProgramResult {
+        if data.len() != Self::LEN
+            || data[0..8] != FORGED_ITEM_MAGIC
+            || read_u16(data, 8) != FORGED_ITEM_VERSION
+            || data[11] != 1
+            || read_u64(data, Self::ITEM_ID_OFFSET) == 0
+            || data[Self::CREATOR_OFFSET..Self::CREATOR_OFFSET + 32]
+                .iter()
+                .all(|byte| *byte == 0)
+            || data[Self::ORIGIN_BACKPACK_OFFSET..Self::ORIGIN_BACKPACK_OFFSET + 32]
+                .iter()
+                .all(|byte| *byte == 0)
+        {
+            return Err(NicechunkBackpackError::InvalidForgedItemData.into());
+        }
+        let code_len = read_u16(data, Self::CODE_LENGTH_OFFSET) as usize;
+        if code_len < 14 || code_len > FORGED_ITEM_CODE_MAX_BYTES {
+            return Err(NicechunkBackpackError::InvalidForgedItemData.into());
+        }
+        let code = &data[Self::CODE_OFFSET..Self::CODE_OFFSET + code_len];
+        let (design_hash, _) = verified_forge_design(code)?;
+        if design_hash != read_u32(data, Self::DESIGN_HASH_OFFSET) {
+            return Err(NicechunkBackpackError::InvalidForgedItemData.into());
+        }
+        Ok(())
+    }
+
+    pub fn code(data: &[u8]) -> Result<&[u8], NicechunkBackpackError> {
+        Self::validate(data).map_err(|_| NicechunkBackpackError::InvalidForgedItemData)?;
+        let code_len = read_u16(data, Self::CODE_LENGTH_OFFSET) as usize;
+        Ok(&data[Self::CODE_OFFSET..Self::CODE_OFFSET + code_len])
     }
 }
 
@@ -1264,7 +1473,9 @@ pub struct ForgeOutcome {
     pub gained_xp: u64,
 }
 
-pub fn forge_material_capacity(materials: &[BackpackSlotRecord]) -> ForgeMaterialCapacity {
+pub fn forge_material_capacity(
+    materials: &[BackpackSlotRecord],
+) -> Result<ForgeMaterialCapacity, NicechunkBackpackError> {
     let mut capacity = ForgeMaterialCapacity::default();
     let mut effective_durability_numerator = 0_u64;
     for material in materials {
@@ -1278,12 +1489,16 @@ pub fn forge_material_capacity(materials: &[BackpackSlotRecord]) -> ForgeMateria
         capacity.total_volume_mm3 = capacity
             .total_volume_mm3
             .saturating_add(material.volume_mm3 as u64);
+        capacity.total_mass_grams = capacity
+            .total_mass_grams
+            .checked_add(material.mass_grams()? as u64)
+            .ok_or(NicechunkBackpackError::BackpackMassOverflow)?;
         effective_durability_numerator = effective_durability_numerator
             .saturating_add(durability_current.saturating_mul(quality_bps));
     }
     capacity.total_effective_durability =
         effective_durability_numerator / DURABILITY_BPS_DENOMINATOR;
-    capacity
+    Ok(capacity)
 }
 
 fn calculate_forge_outcome(materials: &[BackpackSlotRecord], forging_level: u8) -> ForgeOutcome {
@@ -1411,6 +1626,7 @@ impl PlayerEquipmentView {
         if data.len() != PLAYER_EQUIPMENT_LEN
             || data[0..8] != PLAYER_EQUIPMENT_MAGIC
             || read_u16(data, 8) != PLAYER_EQUIPMENT_VERSION
+            || data[11] != 1
             || data[108] as usize != PLAYER_EQUIPMENT_SLOT_COUNT
             || &data[PLAYER_EQUIPMENT_OWNER_OFFSET..PLAYER_EQUIPMENT_OWNER_OFFSET + 32]
                 != owner.as_ref()
@@ -1453,31 +1669,25 @@ pub struct PlayerProfileView;
 
 impl PlayerProfileView {
     pub fn validate_owner(data: &[u8], owner: &Pubkey) -> ProgramResult {
-        if data.len() != PLAYER_PROFILE_LEN || data[0..8] != PLAYER_PROFILE_MAGIC {
-            return Err(NicechunkBackpackError::InvalidPlayerProfile.into());
-        }
+        Self::validate_layout(data)?;
         if &data[PLAYER_PROFILE_OWNER_OFFSET..PLAYER_PROFILE_OWNER_OFFSET + 32] != owner.as_ref() {
             return Err(NicechunkBackpackError::InvalidBackpackOwner.into());
         }
         Ok(())
     }
 
-    pub fn forging_level(data: &[u8]) -> Result<u8, NicechunkBackpackError> {
-        if data.len() != PLAYER_PROFILE_LEN || data[0..8] != PLAYER_PROFILE_MAGIC {
-            return Err(NicechunkBackpackError::InvalidPlayerProfile);
-        }
-        Ok(forging_level_from_xp(read_u64(
-            data,
-            PLAYER_PROFILE_FORGING_XP_OFFSET,
-        )))
+    pub fn has_equipped_backpack(data: &[u8]) -> Result<bool, NicechunkBackpackError> {
+        Self::validate_layout(data)?;
+        Ok(data
+            [PLAYER_PROFILE_EQUIPPED_BACKPACK_OFFSET..PLAYER_PROFILE_EQUIPPED_BACKPACK_OFFSET + 32]
+            .iter()
+            .any(|byte| *byte != 0))
     }
 
     pub fn owner_and_global_config(
         data: &[u8],
     ) -> Result<(Pubkey, Pubkey), NicechunkBackpackError> {
-        if data.len() != PLAYER_PROFILE_LEN || data[0..8] != PLAYER_PROFILE_MAGIC {
-            return Err(NicechunkBackpackError::InvalidPlayerProfile);
-        }
+        Self::validate_layout(data)?;
         Ok((
             Pubkey::new_from_array(
                 data[PLAYER_PROFILE_OWNER_OFFSET..PLAYER_PROFILE_OWNER_OFFSET + 32]
@@ -1490,6 +1700,19 @@ impl PlayerProfileView {
                     .map_err(|_| NicechunkBackpackError::InvalidPlayerProfile)?,
             ),
         ))
+    }
+
+    fn validate_layout(data: &[u8]) -> Result<(), NicechunkBackpackError> {
+        if data.len() != PLAYER_PROFILE_LEN
+            || data[0..8] != PLAYER_PROFILE_MAGIC
+            || read_u16(data, 8) != PLAYER_PROFILE_VERSION
+            || data[PLAYER_PROFILE_INITIALIZED_OFFSET] != 1
+            || data[PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT_OFFSET] as usize
+                != PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT
+        {
+            return Err(NicechunkBackpackError::InvalidPlayerProfile);
+        }
+        Ok(())
     }
 }
 
@@ -1505,7 +1728,11 @@ impl PlayerSessionView {
         action: u8,
         now: i64,
     ) -> Result<Self, NicechunkBackpackError> {
-        if data.len() != PLAYER_SESSION_LEN || data[0..8] != PLAYER_SESSION_MAGIC {
+        if data.len() != PLAYER_SESSION_LEN
+            || data[0..8] != PLAYER_SESSION_MAGIC
+            || read_u16(data, 8) != PLAYER_SESSION_VERSION
+            || data[PLAYER_SESSION_INITIALIZED_OFFSET] != 1
+        {
             return Err(NicechunkBackpackError::InvalidPlayerSession);
         }
         if &data[PLAYER_SESSION_AUTHORITY_OFFSET..PLAYER_SESSION_AUTHORITY_OFFSET + 32]
@@ -1542,20 +1769,6 @@ pub fn validate_capacity(capacity: u8) -> Result<(), NicechunkBackpackError> {
     }
     Ok(())
 }
-
-pub fn forging_level_from_xp(xp: u64) -> u8 {
-    let mut level = 0_u8;
-    for (index, required_total) in FORGING_TOTAL_XP_BY_LEVEL.iter().enumerate() {
-        if xp >= *required_total {
-            level = index as u8;
-        }
-    }
-    level.min(10)
-}
-
-const FORGING_TOTAL_XP_BY_LEVEL: [u64; 11] = [
-    0, 250, 900, 2_100, 4_000, 6_800, 10_700, 16_000, 23_000, 32_000, 45_000,
-];
 
 struct ByteWriter<'a> {
     dst: &'a mut [u8],
@@ -1674,6 +1887,97 @@ mod tests {
         )
         .unwrap();
         data
+    }
+
+    fn player_profile(owner: &Pubkey, global_config: &Pubkey) -> Vec<u8> {
+        let mut data = vec![0_u8; PLAYER_PROFILE_LEN];
+        data[0..8].copy_from_slice(&PLAYER_PROFILE_MAGIC);
+        data[8..10].copy_from_slice(&PLAYER_PROFILE_VERSION.to_le_bytes());
+        data[PLAYER_PROFILE_INITIALIZED_OFFSET] = 1;
+        data[PLAYER_PROFILE_OWNER_OFFSET..PLAYER_PROFILE_OWNER_OFFSET + 32]
+            .copy_from_slice(owner.as_ref());
+        data[PLAYER_PROFILE_GLOBAL_CONFIG_OFFSET..PLAYER_PROFILE_GLOBAL_CONFIG_OFFSET + 32]
+            .copy_from_slice(global_config.as_ref());
+        data[PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT_OFFSET] =
+            PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT as u8;
+        data
+    }
+
+    fn player_session(
+        owner: &Pubkey,
+        authority: &Pubkey,
+        profile: &Pubkey,
+        expires_at: i64,
+    ) -> Vec<u8> {
+        let mut data = vec![0_u8; PLAYER_SESSION_LEN];
+        data[0..8].copy_from_slice(&PLAYER_SESSION_MAGIC);
+        data[8..10].copy_from_slice(&PLAYER_SESSION_VERSION.to_le_bytes());
+        data[PLAYER_SESSION_INITIALIZED_OFFSET] = 1;
+        data[PLAYER_SESSION_OWNER_OFFSET..PLAYER_SESSION_OWNER_OFFSET + 32]
+            .copy_from_slice(owner.as_ref());
+        data[PLAYER_SESSION_AUTHORITY_OFFSET..PLAYER_SESSION_AUTHORITY_OFFSET + 32]
+            .copy_from_slice(authority.as_ref());
+        data[PLAYER_SESSION_PROFILE_OFFSET..PLAYER_SESSION_PROFILE_OFFSET + 32]
+            .copy_from_slice(profile.as_ref());
+        data[PLAYER_SESSION_ALLOWED_ACTIONS_OFFSET..PLAYER_SESSION_ALLOWED_ACTIONS_OFFSET + 2]
+            .copy_from_slice(&(1_u16 << SESSION_ACTION_BREAK_BLOCK).to_le_bytes());
+        data[PLAYER_SESSION_EXPIRES_AT_OFFSET..PLAYER_SESSION_EXPIRES_AT_OFFSET + 8]
+            .copy_from_slice(&expires_at.to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn player_profile_view_requires_the_final_initialized_layout() {
+        let owner = Pubkey::new_unique();
+        let global_config = Pubkey::new_unique();
+        let data = player_profile(&owner, &global_config);
+        PlayerProfileView::validate_owner(&data, &owner).unwrap();
+        PlayerProfileView::owner_and_global_config(&data).unwrap();
+
+        let mut retired = data.clone();
+        retired[8..10].copy_from_slice(&(PLAYER_PROFILE_VERSION - 1).to_le_bytes());
+        assert!(PlayerProfileView::validate_owner(&retired, &owner).is_err());
+
+        let mut uninitialized = data.clone();
+        uninitialized[PLAYER_PROFILE_INITIALIZED_OFFSET] = 0;
+        assert!(PlayerProfileView::has_equipped_backpack(&uninitialized).is_err());
+
+        let mut wrong_slot_count = data;
+        wrong_slot_count[PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT_OFFSET] =
+            (PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT - 1) as u8;
+        assert!(PlayerProfileView::owner_and_global_config(&wrong_slot_count).is_err());
+    }
+
+    #[test]
+    fn player_session_view_requires_the_final_initialized_layout() {
+        let owner = Pubkey::new_unique();
+        let authority = Pubkey::new_unique();
+        let profile = Pubkey::new_unique();
+        let data = player_session(&owner, &authority, &profile, 200);
+        PlayerSessionView::validate(&data, &authority, &profile, SESSION_ACTION_BREAK_BLOCK, 100)
+            .unwrap();
+
+        let mut retired = data.clone();
+        retired[8..10].copy_from_slice(&(PLAYER_SESSION_VERSION + 1).to_le_bytes());
+        assert!(PlayerSessionView::validate(
+            &retired,
+            &authority,
+            &profile,
+            SESSION_ACTION_BREAK_BLOCK,
+            100,
+        )
+        .is_err());
+
+        let mut uninitialized = data;
+        uninitialized[PLAYER_SESSION_INITIALIZED_OFFSET] = 0;
+        assert!(PlayerSessionView::validate(
+            &uninitialized,
+            &authority,
+            &profile,
+            SESSION_ACTION_BREAK_BLOCK,
+            100,
+        )
+        .is_err());
     }
 
     fn material_slot(durability_current: u32, durability_max: u32) -> BackpackSlotRecord {
@@ -1941,10 +2245,11 @@ mod tests {
         material.volume_mm3 = 155;
         material.quality_bps = 8_790;
 
-        let capacity = forge_material_capacity(&[material, material]);
+        let capacity = forge_material_capacity(&[material, material]).unwrap();
 
         assert_eq!(capacity.total_volume_mm3, 310);
         assert_eq!(capacity.total_effective_durability, 1);
+        assert_eq!(capacity.total_mass_grams, 1_200);
     }
 
     #[test]
@@ -1965,7 +2270,7 @@ mod tests {
             ForgeMaterialRequirements {
                 required_volume_mm3: 600_001,
                 required_effective_durability: 840,
-                output_mass_grams: 700,
+                output_mass_grams: 600,
             },
         )
         .unwrap_err();
@@ -1987,7 +2292,7 @@ mod tests {
         let mut data = empty_backpack(&owner, 4);
         BackpackAccount::append_item(&mut data, &owner, &material_slot(1_200, 1_200), 11).unwrap();
 
-        BackpackAccount::forge_equipment_from_verified_materials(
+        let outcome = BackpackAccount::forge_equipment_from_verified_materials(
             &mut data,
             &owner,
             &[0],
@@ -1997,17 +2302,19 @@ mod tests {
             3,
             12,
             ForgeMaterialRequirements {
-                required_volume_mm3: 600_000,
+                required_volume_mm3: 300_000,
                 required_effective_durability: 840,
-                output_mass_grams: 700,
+                output_mass_grams: 300,
             },
         )
         .unwrap();
 
-        assert_eq!(
-            BackpackAccount::slot_at(&data, 0).unwrap().category,
-            BACKPACK_ITEM_CATEGORY_FORGED
-        );
+        let forged = BackpackAccount::slot_at(&data, 0).unwrap();
+        assert_eq!(forged.category, BACKPACK_ITEM_CATEGORY_FORGED);
+        assert_eq!(forged.volume_mm3, 300_000);
+        assert_eq!(forged.mass_grams().unwrap(), 300);
+        assert_eq!(outcome.volume_mm3, 300_000);
+        assert_eq!(outcome.mass_grams, 300);
     }
 
     #[test]
@@ -2028,7 +2335,7 @@ mod tests {
             ForgeMaterialRequirements {
                 required_volume_mm3: 600_000,
                 required_effective_durability: 841,
-                output_mass_grams: 700,
+                output_mass_grams: 600,
             },
         )
         .unwrap_err();
@@ -2041,79 +2348,44 @@ mod tests {
     }
 
     #[test]
-    fn verified_ncf1_v14_header_remains_compatible() {
-        let code = hex_bytes("e09600bb8b2cb2cb2cb2cb2cb2c000");
-        let (design_hash, requirements) = verified_forge_design(&code).unwrap();
+    fn verified_forge_rejects_mass_creation_without_consuming_slots() {
+        let owner = Pubkey::new_unique();
+        let mut data = empty_backpack(&owner, 4);
+        BackpackAccount::append_item(&mut data, &owner, &material_slot(1_200, 1_200), 11).unwrap();
 
-        assert_eq!(design_hash, 0x5c09_3cc3);
-        assert_eq!(requirements.required_volume_mm3, 3_000_000);
-        assert_eq!(requirements.required_effective_durability, 3_110);
-        assert_eq!(requirements.output_mass_grams, 12_000);
-        assert!(verified_forge_design(&code[..13]).is_err());
-    }
+        let error = BackpackAccount::forge_equipment_from_verified_materials(
+            &mut data,
+            &owner,
+            &[0],
+            901,
+            0x1234_abcd,
+            &Pubkey::new_unique(),
+            3,
+            12,
+            ForgeMaterialRequirements {
+                required_volume_mm3: 600_000,
+                required_effective_durability: 840,
+                output_mass_grams: 601,
+            },
+        )
+        .unwrap_err();
 
-    #[test]
-    fn verified_ncf1_v15_header_supports_two_sub_cm3_materials() {
-        let copper_bloom_attributes = [26, 37, 30, 54, 9, 52, 30, 37, 59, 55, 1, 53];
-        let code = ncf1_header_code(NCF1_VERSION, 1, 310, copper_bloom_attributes);
-        let (_, requirements) = verified_forge_design(&code).unwrap();
-
-        assert_eq!(requirements.required_volume_mm3, 310);
-        assert_eq!(requirements.required_effective_durability, 1);
-        assert_eq!(requirements.output_mass_grams, 5);
-    }
-
-    #[test]
-    fn verified_ncf1_v15_volume_exponent_boundaries_are_exact() {
-        let cases = [
-            (1, 1_u64),
-            (8_191, 8_191),
-            ((1 << 13) | 512, 8_192),
-            ((1 << 13) | 513, 8_208),
-            ((7 << 13) | 8_191, 8_191_u64 << 28),
-        ];
-
-        for (encoded_volume, expected_volume_mm3) in cases {
-            let code = ncf1_header_code(NCF1_VERSION, 1, encoded_volume, [0; NCF1_ATTRIBUTE_COUNT]);
-            let (_, requirements) = verified_forge_design(&code).unwrap();
-            assert_eq!(requirements.required_volume_mm3, expected_volume_mm3);
-        }
-    }
-
-    #[test]
-    fn verified_ncf1_v15_rejects_a_zero_volume_mantissa() {
-        let code = ncf1_header_code(
-            NCF1_VERSION,
-            1,
-            3 << NCF1_V15_VOLUME_MANTISSA_BITS,
-            [0; NCF1_ATTRIBUTE_COUNT],
+        assert!(matches!(
+            error,
+            ProgramError::Custom(code)
+                if code == NicechunkBackpackError::InsufficientForgeMaterialParameters as u32
+        ));
+        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 600);
+        assert_eq!(
+            BackpackAccount::slot_at(&data, 0).unwrap().category,
+            BACKPACK_ITEM_CATEGORY_MATERIAL
         );
+    }
+
+    #[test]
+    fn verified_ncf1_rejects_retired_v14_header() {
+        let code = hex_bytes("e09600bb8b2cb2cb2cb2cb2cb2c000");
         assert!(verified_forge_design(&code).is_err());
-    }
-
-    fn ncf1_header_code(
-        version: u32,
-        mass_5g: u32,
-        encoded_volume: u32,
-        attributes: [u8; NCF1_ATTRIBUTE_COUNT],
-    ) -> Vec<u8> {
-        let mut code = vec![0_u8; 14];
-        let mut bit_offset = 0_usize;
-        write_test_bits(&mut code, &mut bit_offset, version, 4);
-        write_test_bits(&mut code, &mut bit_offset, mass_5g, 16);
-        write_test_bits(&mut code, &mut bit_offset, encoded_volume, 16);
-        for attribute in attributes {
-            write_test_bits(&mut code, &mut bit_offset, attribute as u32, 6);
-        }
-        code
-    }
-
-    fn write_test_bits(bytes: &mut [u8], bit_offset: &mut usize, value: u32, bit_count: usize) {
-        for shift in (0..bit_count).rev() {
-            let bit = ((value >> shift) & 1) as u8;
-            bytes[*bit_offset / 8] |= bit << (7 - (*bit_offset % 8));
-            *bit_offset += 1;
-        }
     }
 
     #[test]
@@ -2168,18 +2440,87 @@ mod tests {
             ForgeMaterialRequirements {
                 required_volume_mm3: 600_000,
                 required_effective_durability: 840,
-                output_mass_grams: 700,
+                output_mass_grams: 600,
             },
         )
         .unwrap();
-        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 700);
+        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 600);
         assert_eq!(
             BackpackAccount::slot_at(&data, 0)
                 .unwrap()
                 .mass_grams()
                 .unwrap(),
-            700
+            600
         );
+    }
+
+    #[test]
+    fn smelting_partial_stack_consumption_preserves_physical_state() {
+        let owner = Pubkey::new_unique();
+        let physics_data = material_physics_fixture();
+        let physics = MaterialPhysicsTableView::new(&physics_data).unwrap();
+        let mut data = empty_backpack(&owner, 2);
+        let mut material = material_slot(2_000, 2_400);
+        material.item_code = 1010;
+        material.quantity = 4;
+        material.volume_mm3 = 1_000_000;
+        physics.apply_mass(&mut material).unwrap();
+        BackpackAccount::append_item(&mut data, &owner, &material, 11).unwrap();
+
+        let mut input_quantities = [0_u32; BACKPACK_MAX_CAPACITY as usize];
+        input_quantities[0] = 2;
+        BackpackAccount::consume_smelting_resources(
+            &mut data,
+            &owner,
+            &input_quantities,
+            &[false; BACKPACK_MAX_CAPACITY as usize],
+            &physics,
+            12,
+        )
+        .unwrap();
+
+        let remaining = BackpackAccount::slot_at(&data, 0).unwrap();
+        assert_eq!(remaining.quantity, 2);
+        assert_eq!(remaining.volume_mm3, 500_000);
+        assert_eq!(remaining.durability_current, 1_000);
+        assert_eq!(remaining.durability_max, 1_200);
+        assert_eq!(remaining.mass_grams().unwrap(), 1_250);
+        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 1_250);
+        assert_eq!(data[BackpackAccount::ITEM_COUNT_OFFSET], 1);
+    }
+
+    #[test]
+    fn smelting_consumes_one_unit_from_a_stacked_material_fuel() {
+        let owner = Pubkey::new_unique();
+        let physics_data = material_physics_fixture();
+        let physics = MaterialPhysicsTableView::new(&physics_data).unwrap();
+        let mut data = empty_backpack(&owner, 2);
+        let mut fuel = material_slot(2_000, 2_400);
+        fuel.item_code = 1010;
+        fuel.quantity = 4;
+        fuel.volume_mm3 = 1_000_000;
+        physics.apply_mass(&mut fuel).unwrap();
+        BackpackAccount::append_item(&mut data, &owner, &fuel, 11).unwrap();
+
+        let mut fuel_indexes = [false; BACKPACK_MAX_CAPACITY as usize];
+        fuel_indexes[0] = true;
+        BackpackAccount::consume_smelting_resources(
+            &mut data,
+            &owner,
+            &[0_u32; BACKPACK_MAX_CAPACITY as usize],
+            &fuel_indexes,
+            &physics,
+            12,
+        )
+        .unwrap();
+
+        let remaining = BackpackAccount::slot_at(&data, 0).unwrap();
+        assert_eq!(remaining.quantity, 3);
+        assert_eq!(remaining.volume_mm3, 750_000);
+        assert_eq!(remaining.durability_current, 1_500);
+        assert_eq!(remaining.durability_max, 1_800);
+        assert_eq!(remaining.mass_grams().unwrap(), 1_875);
+        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 1_875);
     }
 
     #[test]
@@ -2247,6 +2588,108 @@ mod tests {
         let mut data = vec![0_u8; MaterialPhysicsTableState::LEN];
         MaterialPhysicsTableState::pack_payload(&mut data, 252, &payload).unwrap();
         data
+    }
+
+    #[test]
+    fn verified_ncf1_v15_header_supports_two_sub_cm3_materials() {
+        let copper_bloom_attributes = [26, 37, 30, 54, 9, 52, 30, 37, 59, 55, 1, 53];
+        let code = ncf1_header_code(NCF1_VERSION, 1, 310, copper_bloom_attributes);
+        let (_, requirements) = verified_forge_design(&code).unwrap();
+
+        assert_eq!(requirements.required_volume_mm3, 310);
+        assert_eq!(requirements.required_effective_durability, 1);
+    }
+
+    #[test]
+    fn forged_item_persists_one_unique_verified_ncf1_model() {
+        let creator = Pubkey::new_unique();
+        let backpack = Pubkey::new_unique();
+        let code = ncf1_header_code(NCF1_VERSION, 1, 310, [7; NCF1_ATTRIBUTE_COUNT]);
+        let (design_hash, _) = verified_forge_design(&code).unwrap();
+        let mut data = vec![0_u8; ForgedItemAccount::LEN];
+        ForgedItemAccount::pack(
+            &mut data,
+            &ForgedItemInitArgs {
+                bump: 250,
+                item_id: 901,
+                creator: &creator,
+                origin_backpack: &backpack,
+                design_hash,
+                code: &code,
+                created_slot: 123,
+                created_at: 456,
+            },
+        )
+        .unwrap();
+
+        ForgedItemAccount::validate(&data).unwrap();
+        assert_eq!(ForgedItemAccount::code(&data).unwrap(), code);
+        assert_eq!(
+            &data[ForgedItemAccount::CREATOR_OFFSET..52],
+            creator.as_ref()
+        );
+        assert_eq!(read_u64(&data, ForgedItemAccount::ITEM_ID_OFFSET), 901);
+
+        let mut retired = data.clone();
+        retired[8..10].copy_from_slice(&(FORGED_ITEM_VERSION + 1).to_le_bytes());
+        assert!(ForgedItemAccount::validate(&retired).is_err());
+
+        let mut corrupted = data;
+        corrupted[ForgedItemAccount::CODE_OFFSET + 2] ^= 1;
+        assert!(ForgedItemAccount::validate(&corrupted).is_err());
+    }
+
+    #[test]
+    fn verified_ncf1_v15_volume_exponent_boundaries_are_exact() {
+        let cases = [
+            (1, 1_u64),
+            (8_191, 8_191),
+            ((1 << 13) | 512, 8_192),
+            ((1 << 13) | 513, 8_208),
+            ((7 << 13) | 8_191, 8_191_u64 << 28),
+        ];
+
+        for (encoded_volume, expected_volume_mm3) in cases {
+            let code = ncf1_header_code(NCF1_VERSION, 1, encoded_volume, [0; NCF1_ATTRIBUTE_COUNT]);
+            let (_, requirements) = verified_forge_design(&code).unwrap();
+            assert_eq!(requirements.required_volume_mm3, expected_volume_mm3);
+        }
+    }
+
+    #[test]
+    fn verified_ncf1_v15_rejects_a_zero_volume_mantissa() {
+        let code = ncf1_header_code(
+            NCF1_VERSION,
+            1,
+            3 << NCF1_V15_VOLUME_MANTISSA_BITS,
+            [0; NCF1_ATTRIBUTE_COUNT],
+        );
+        assert!(verified_forge_design(&code).is_err());
+    }
+
+    fn ncf1_header_code(
+        version: u32,
+        mass_5g: u32,
+        encoded_volume: u32,
+        attributes: [u8; NCF1_ATTRIBUTE_COUNT],
+    ) -> Vec<u8> {
+        let mut code = vec![0_u8; 14];
+        let mut bit_offset = 0_usize;
+        write_test_bits(&mut code, &mut bit_offset, version, 4);
+        write_test_bits(&mut code, &mut bit_offset, mass_5g, 16);
+        write_test_bits(&mut code, &mut bit_offset, encoded_volume, 16);
+        for attribute in attributes {
+            write_test_bits(&mut code, &mut bit_offset, attribute as u32, 6);
+        }
+        code
+    }
+
+    fn write_test_bits(bytes: &mut [u8], bit_offset: &mut usize, value: u32, bit_count: usize) {
+        for shift in (0..bit_count).rev() {
+            let bit = ((value >> shift) & 1) as u8;
+            bytes[*bit_offset / 8] |= bit << (7 - (*bit_offset % 8));
+            *bit_offset += 1;
+        }
     }
 
     fn hex_bytes(value: &str) -> Vec<u8> {

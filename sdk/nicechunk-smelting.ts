@@ -17,6 +17,7 @@ import {
 } from "./nicechunk-civilization.ts";
 import { deriveGlobalConfigPda, NICECHUNK_CORE_PROGRAM_ID } from "./nicechunk-core.ts";
 import { derivePlayerProgressPda } from "./nicechunk-chunk.ts";
+import { derivePlayerSkillsPda } from "./nicechunk-skills.ts";
 
 const env = typeof process !== "undefined" ? process.env : {};
 
@@ -25,6 +26,9 @@ export const NICECHUNK_SMELTING_PROGRAM_ID = new PublicKey(
 );
 export const NICECHUNK_GAME_PROGRAM_ID = new PublicKey(
   env.NICECHUNK_GAME_PROGRAM_ID ?? "6CurnvneezBuHwPUnrCiFg1QMWeUF67ufQxYebyr2UP7",
+);
+export const NICECHUNK_SMELTING_RECIPE_AUTHORITY = new PublicKey(
+  "9XuoVVwqP2jipt3jpJVXCSS2N2jr9vDuV3d6K73FKVud",
 );
 export const RECIPE_TABLE_SEED = "smelting-recipes";
 export const SMELTING_AUTHORITY_SEED = "smelting-authority";
@@ -88,6 +92,8 @@ export function deriveSmeltingAuthorityPda(
   return PublicKey.findProgramAddressSync([Buffer.from(SMELTING_AUTHORITY_SEED)], programId);
 }
 
+export { deriveMaterialPhysicsPda };
+
 export function createInitializeRecipeTableInstruction({
   payer,
   tableId,
@@ -97,6 +103,7 @@ export function createInitializeRecipeTableInstruction({
   tableId: bigint | number;
   smeltingProgramId?: PublicKey;
 }): TransactionInstruction {
+  assertSmeltingRecipeAuthority(payer);
   const [recipeTable] = deriveRecipeTablePda({ tableId, programId: smeltingProgramId });
   const data = Buffer.alloc(9);
   data.writeUInt8(0, 0);
@@ -123,6 +130,8 @@ export function createUpsertSmeltingRecipeInstruction({
   recipe: SmeltingRecipeInput;
   smeltingProgramId?: PublicKey;
 }): TransactionInstruction {
+  assertSmeltingRecipeAuthority(authority);
+  validateSmeltingRecipeOutputs(recipe, recipeTable);
   return new TransactionInstruction({
     programId: smeltingProgramId,
     keys: [
@@ -179,13 +188,14 @@ export function createExecuteSmeltingInstruction({
   const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
   const [materialPhysics] = deriveMaterialPhysicsPda({
     globalConfig,
-    programId: backpackProgramId,
+    backpackProgramId,
   });
   const [playerProgress] = derivePlayerProgressPda({
     globalConfig,
     owner,
     programId: smeltingProgramId,
   });
+  const [playerSkills] = derivePlayerSkillsPda({ owner, globalConfig });
   const indexes = inputIndexes.map((index) => Number(index));
   const fuels = fuelIndexes.map((index) => Number(index));
   const multiplier = Math.max(1, Math.min(0xffff, Math.floor(Number(batchMultiplier) || 1)));
@@ -208,31 +218,10 @@ export function createExecuteSmeltingInstruction({
       { pubkey: materialPhysics, isSigner: false, isWritable: false },
       { pubkey: smeltingAuthority, isSigner: false, isWritable: false },
       { pubkey: backpackProgramId, isSigner: false, isWritable: false },
+      { pubkey: playerSkills, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     data: smeltingInstructionData(smeltingProgramId, data),
-  });
-}
-
-export function createSetRecipeTableAuthorityInstruction({
-  authority,
-  recipeTable,
-  newAuthority,
-  smeltingProgramId = NICECHUNK_SMELTING_PROGRAM_ID,
-}: {
-  authority: PublicKey;
-  recipeTable: PublicKey;
-  newAuthority: PublicKey;
-  smeltingProgramId?: PublicKey;
-}): TransactionInstruction {
-  return new TransactionInstruction({
-    programId: smeltingProgramId,
-    keys: [
-      { pubkey: authority, isSigner: true, isWritable: false },
-      { pubkey: recipeTable, isSigner: false, isWritable: true },
-      { pubkey: newAuthority, isSigner: false, isWritable: false },
-    ],
-    data: smeltingInstructionData(smeltingProgramId, Buffer.from([3])),
   });
 }
 
@@ -246,6 +235,7 @@ export function createApplyCivilizationSmeltingRecipeInstruction({
   smeltingProgramId = NICECHUNK_SMELTING_PROGRAM_ID,
   civilizationProgramId = NICECHUNK_CIVILIZATION_PROGRAM_ID,
 }: ApplyCivilizationSmeltingRecipeInput): TransactionInstruction {
+  validateSmeltingRecipeOutputs(recipe, recipeTable);
   const [adapterAuthority] = deriveCivilizationAdapterAuthorityPda({
     ruleBook,
     targetProgram: smeltingProgramId,
@@ -309,6 +299,25 @@ function validateSmeltingRecipeShape(recipe: SmeltingRecipeInput): void {
   }
   if (!recipe.outputs.length || recipe.outputs.length > RECIPE_MAX_OUTPUTS) {
     throw new Error(`Smelting recipe outputs must be 1-${RECIPE_MAX_OUTPUTS}`);
+  }
+}
+
+function validateSmeltingRecipeOutputs(recipe: SmeltingRecipeInput, recipeTable: PublicKey): void {
+  validateSmeltingRecipeShape(recipe);
+  for (const output of recipe.outputs) {
+    if (
+      output.kind !== 2
+      || output.category !== 1
+      || !output.itemPda.equals(recipeTable)
+    ) {
+      throw new Error("Every smelting output must be a material Item backed by its RecipeTable PDA.");
+    }
+  }
+}
+
+function assertSmeltingRecipeAuthority(authority: PublicKey): void {
+  if (!authority.equals(NICECHUNK_SMELTING_RECIPE_AUTHORITY)) {
+    throw new Error(`Smelting recipe authority must be ${NICECHUNK_SMELTING_RECIPE_AUTHORITY.toBase58()}.`);
   }
 }
 

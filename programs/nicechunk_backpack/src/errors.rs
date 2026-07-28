@@ -48,6 +48,13 @@ pub enum NicechunkBackpackError {
     InvalidBackpackMassState = 6442,
     BackpackMassOverflow = 6443,
     InvalidMiningAction = 6444,
+    InvalidForgedItemPda = 6445,
+    ForgedItemAlreadyInitialized = 6446,
+    InvalidForgedItemData = 6447,
+    InvalidPlayerSkillsPda = 6448,
+    InvalidPlayerSkillsOwner = 6449,
+    InvalidPlayerSkillsData = 6450,
+    InvalidSmeltingConsumption = 6451,
 }
 
 impl From<NicechunkBackpackError> for ProgramError {

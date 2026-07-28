@@ -12,6 +12,7 @@ import {
   derivePlayerProfilePda,
   NICECHUNK_PLAYER_PROGRAM_ID,
 } from "./nicechunk-player.ts";
+import { derivePlayerSkillsPda } from "./nicechunk-skills.ts";
 
 const env = typeof process !== "undefined" ? process.env : {};
 
@@ -63,6 +64,7 @@ export const MATERIAL_PHYSICS_LEN = MATERIAL_PHYSICS_HEADER_LEN
   + MATERIAL_PHYSICS_MAX_RULES * MATERIAL_PHYSICS_RULE_LEN;
 export const MATERIAL_PHYSICS_ITEM_KEY_MASK = 1 << 15;
 export const BLUEPRINT_ITEM_SEED = "blueprint-item";
+export const FORGED_ITEM_SEED = "forged-item-v1";
 export const BLUEPRINT_ITEM_MAGIC = "NCKBPT01";
 export const BLUEPRINT_ITEM_VERSION = 1;
 export const BLUEPRINT_ITEM_LEN = 96;
@@ -98,6 +100,23 @@ export interface BackpackSlotRecord {
   qualityBps?: number;
   metadata?: number;
   massGrams?: number;
+}
+
+export function deriveForgedItemPda({
+  owner,
+  itemId,
+  programId = NICECHUNK_BACKPACK_PROGRAM_ID,
+}: {
+  owner: PublicKey;
+  itemId: bigint | number;
+  programId?: PublicKey;
+}): [PublicKey, number] {
+  const itemIdBytes = Buffer.alloc(8);
+  itemIdBytes.writeBigUInt64LE(BigInt(itemId));
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from(FORGED_ITEM_SEED), owner.toBuffer(), itemIdBytes],
+    programId,
+  );
 }
 
 export interface DecodedBackpack {
@@ -368,6 +387,7 @@ export function createForgeEquipmentInstruction({
   inputIndexes,
   backpackProgramId = NICECHUNK_BACKPACK_PROGRAM_ID,
   playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
+  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
 }: {
   owner: PublicKey;
   backpack: PublicKey;
@@ -376,6 +396,7 @@ export function createForgeEquipmentInstruction({
   inputIndexes: number[];
   backpackProgramId?: PublicKey;
   playerProgramId?: PublicKey;
+  coreProgramId?: PublicKey;
 }): TransactionInstruction {
   const indexes = Array.from(new Set((inputIndexes ?? [])
     .map((index) => Number(index))
@@ -387,10 +408,17 @@ export function createForgeEquipmentInstruction({
   if (!canonicalBytes.length || canonicalBytes.length > VERIFIED_FORGE_CODE_MAX_BYTES) {
     throw new Error(`Forge equipment requires 1-${VERIFIED_FORGE_CODE_MAX_BYTES} canonical NCF1 bytes.`);
   }
+  const normalizedItemId = BigInt(itemId);
+  if (normalizedItemId <= 0n || normalizedItemId > 0xffffffffffffffffn) {
+    throw new Error("Forge item ID must be an unsigned non-zero 64-bit integer.");
+  }
   const [playerProfile] = derivePlayerProfilePda(owner, playerProgramId);
+  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
+  const [playerSkills] = derivePlayerSkillsPda({ owner, globalConfig });
+  const [forgedItem] = deriveForgedItemPda({ owner, itemId: normalizedItemId, programId: backpackProgramId });
   const data = Buffer.alloc(12 + canonicalBytes.length + indexes.length);
   data.writeUInt8(8, 0);
-  data.writeBigUInt64LE(BigInt(itemId), 1);
+  data.writeBigUInt64LE(normalizedItemId, 1);
   data.writeUInt16LE(canonicalBytes.length, 9);
   data.writeUInt8(indexes.length, 11);
   canonicalBytes.copy(data, 12);
@@ -401,7 +429,9 @@ export function createForgeEquipmentInstruction({
       { pubkey: owner, isSigner: true, isWritable: true },
       { pubkey: playerProfile, isSigner: false, isWritable: true },
       { pubkey: backpack, isSigner: false, isWritable: true },
+      { pubkey: forgedItem, isSigner: false, isWritable: true },
       { pubkey: playerProgramId, isSigner: false, isWritable: false },
+      { pubkey: playerSkills, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     data: backpackInstructionData(backpackProgramId, data),

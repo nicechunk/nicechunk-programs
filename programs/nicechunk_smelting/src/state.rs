@@ -28,13 +28,11 @@ pub const BACKPACK_SLOT_KIND_ITEM: u8 = 2;
 pub const BACKPACK_ITEM_CATEGORY_MATERIAL: u8 = 1;
 pub const DEFAULT_RESOURCE_VOLUME_MM3: u32 = 1_000_000;
 pub const RECIPE_YIELD_BPS_DENOMINATOR: u16 = 10_000;
-pub const SMELTING_SKILL_BASE_OUTPUT_BPS: u16 = 1_000;
+pub const SMELTING_SKILL_BASE_OUTPUT_BPS: u16 = 10_000;
 pub const SMELTING_SKILL_OUTPUT_BPS_PER_LEVEL: u16 = 500;
+pub const SMELTING_SKILL_MAX_OUTPUT_BPS: u16 = 15_000;
 pub const SMELTING_XP_PER_INPUT: u64 = 1;
 pub const DURABILITY_BPS_DENOMINATOR: u64 = 10_000;
-pub const SMELTING_TOTAL_XP_BY_LEVEL: [u64; 11] = [
-    0, 1_200, 4_738, 11_398, 21_831, 36_608, 56_246, 81_223, 111_984, 148_950, 192_519,
-];
 const BACKPACK_PACKED_Y_BITS: u16 = 9;
 pub const RECIPE_RECORD_LEN: usize = 8
     + 1
@@ -61,7 +59,7 @@ pub const UPSERT_RECIPE_ARGS_LEN: usize = 8
 const BACKPACK_MAGIC: [u8; 8] = *b"NCKBPK01";
 const BACKPACK_VERSION: u16 = 4;
 const BACKPACK_HEADER_LEN: usize = 128;
-const BACKPACK_MAX_CAPACITY: usize = 99;
+pub const BACKPACK_MAX_CAPACITY: usize = 99;
 const BACKPACK_LEN: usize = BACKPACK_HEADER_LEN + BACKPACK_MAX_CAPACITY * BACKPACK_SLOT_RECORD_LEN;
 const BACKPACK_OWNER_OFFSET: usize = 20;
 const BACKPACK_CAPACITY_OFFSET: usize = 52;
@@ -244,6 +242,20 @@ impl BackpackSlotRecord {
         }
         Ok(())
     }
+
+    pub fn validate_recipe_output(
+        &self,
+        recipe_table: &Pubkey,
+    ) -> Result<(), NicechunkSmeltingError> {
+        self.validate_output_item()?;
+        if self.kind != BACKPACK_SLOT_KIND_ITEM
+            || self.category != BACKPACK_ITEM_CATEGORY_MATERIAL
+            || self.item_pda != *recipe_table
+        {
+            return Err(NicechunkSmeltingError::InvalidRecipeOutput);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -420,6 +432,16 @@ impl RecipeRecord {
         Ok(())
     }
 
+    pub fn validate_outputs_for_table(&self, recipe_table: &Pubkey) -> ProgramResult {
+        if self.output_count == 0 || self.output_count as usize > RECIPE_MAX_OUTPUTS {
+            return Err(NicechunkSmeltingError::InvalidRecipe.into());
+        }
+        for output in self.outputs.iter().take(self.output_count as usize) {
+            output.validate_recipe_output(recipe_table)?;
+        }
+        Ok(())
+    }
+
     pub fn unpack(data: &[u8]) -> Result<Self, NicechunkSmeltingError> {
         if data.len() != RECIPE_RECORD_LEN {
             return Err(NicechunkSmeltingError::InvalidRecipe);
@@ -524,21 +546,11 @@ impl PlayerProgressState {
         })
     }
 
-    pub fn smelting_level_from_xp(xp: u64) -> u8 {
-        let mut level = 0_u8;
-        for (index, required_total) in SMELTING_TOTAL_XP_BY_LEVEL.iter().enumerate() {
-            if xp >= *required_total {
-                level = index as u8;
-            }
-        }
-        level.min(10)
-    }
-
-    pub fn smelting_output_bps_from_xp(xp: u64) -> u16 {
-        let level = Self::smelting_level_from_xp(xp) as u16;
+    pub fn smelting_output_bps_from_level(level: u8) -> u16 {
+        let level = u16::from(level.min(10));
         SMELTING_SKILL_BASE_OUTPUT_BPS
             .saturating_add(level.saturating_mul(SMELTING_SKILL_OUTPUT_BPS_PER_LEVEL))
-            .min(RECIPE_YIELD_BPS_DENOMINATOR)
+            .min(SMELTING_SKILL_MAX_OUTPUT_BPS)
     }
 
     pub fn add_smelting_xp(
@@ -562,6 +574,8 @@ pub struct RecipeTable;
 
 impl RecipeTable {
     pub const LEN: usize = RECIPE_TABLE_LEN;
+    pub const BUMP_OFFSET: usize = 10;
+    pub const TABLE_ID_OFFSET: usize = 12;
     pub const AUTHORITY_OFFSET: usize = 20;
     pub const RECIPE_COUNT_OFFSET: usize = 52;
     pub const UPDATED_SLOT_OFFSET: usize = 62;
@@ -614,21 +628,29 @@ impl RecipeTable {
         ))
     }
 
-    pub fn set_authority(data: &mut [u8], authority: &Pubkey, updated_slot: u64) -> ProgramResult {
-        Self::validate(data)?;
-        data[Self::AUTHORITY_OFFSET..Self::AUTHORITY_OFFSET + 32]
-            .copy_from_slice(authority.as_ref());
-        data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
-            .copy_from_slice(&updated_slot.to_le_bytes());
-        Ok(())
+    pub fn table_id(data: &[u8]) -> Result<u64, NicechunkSmeltingError> {
+        Self::validate(data).map_err(|_| NicechunkSmeltingError::InvalidRecipeTableData)?;
+        Ok(read_u64(data, Self::TABLE_ID_OFFSET))
     }
 
-    pub fn validate_authority(data: &[u8], authority: &Pubkey) -> ProgramResult {
-        Self::validate(data)?;
+    pub fn validate_identity(
+        data: &[u8],
+        program_id: &Pubkey,
+        recipe_table: &Pubkey,
+        authority: &Pubkey,
+    ) -> Result<u64, NicechunkSmeltingError> {
+        Self::validate(data).map_err(|_| NicechunkSmeltingError::InvalidRecipeTableData)?;
         if Self::authority(data)? != *authority {
-            return Err(NicechunkSmeltingError::UnauthorizedAuthority.into());
+            return Err(NicechunkSmeltingError::UnauthorizedAuthority);
         }
-        Ok(())
+        let table_id = Self::table_id(data)?;
+        let table_id_bytes = table_id.to_le_bytes();
+        let (expected_table, expected_bump) =
+            Pubkey::find_program_address(&[RECIPE_TABLE_SEED, &table_id_bytes], program_id);
+        if *recipe_table != expected_table || data[Self::BUMP_OFFSET] != expected_bump {
+            return Err(NicechunkSmeltingError::InvalidRecipeTablePda);
+        }
+        Ok(table_id)
     }
 
     pub fn upsert_recipe(
@@ -680,6 +702,13 @@ impl RecipeTable {
 
 pub struct BackpackAccountView;
 
+#[derive(Debug)]
+pub struct ValidatedRecipeInputs {
+    pub input_volume_mm3: u64,
+    pub consumed_input_units: u64,
+    pub consumption_quantities: [u32; BACKPACK_MAX_CAPACITY],
+}
+
 impl BackpackAccountView {
     pub fn validate(data: &[u8]) -> ProgramResult {
         if data.len() != BACKPACK_LEN || data[0..8] != BACKPACK_MAGIC {
@@ -712,25 +741,23 @@ impl BackpackAccountView {
         fuel_indexes: &[u8],
         recipe: &RecipeRecord,
         multiplier: u16,
-    ) -> Result<u64, solana_program::program_error::ProgramError> {
+    ) -> Result<ValidatedRecipeInputs, solana_program::program_error::ProgramError> {
         Self::validate_owner(data, owner)?;
-        if multiplier == 0 || indexes.len() != recipe.input_count as usize * multiplier as usize {
+        if multiplier == 0 || indexes.is_empty() || indexes.len() > BACKPACK_MAX_CAPACITY {
             return Err(NicechunkSmeltingError::InputRecipeMismatch.into());
         }
         let capacity = data[BACKPACK_CAPACITY_OFFSET] as usize;
         let item_count = data[BACKPACK_ITEM_COUNT_OFFSET] as usize;
-        let remove_count = indexes.len().saturating_add(fuel_indexes.len());
-        if item_count
-            .saturating_sub(remove_count)
-            .saturating_add(recipe.output_count as usize)
-            > capacity
-        {
-            return Err(NicechunkSmeltingError::BackpackCapacityExceeded.into());
-        }
 
         let mut seen_indexes = [false; BACKPACK_MAX_CAPACITY];
-        let mut matched_inputs = [0_u16; RECIPE_MAX_INPUTS];
+        let mut matched_inputs = [0_u64; RECIPE_MAX_INPUTS];
+        let mut consumption_quantities = [0_u32; BACKPACK_MAX_CAPACITY];
         let mut input_volume_mm3 = 0_u64;
+        let mut consumed_input_units = 0_u64;
+        let merge_recipe = recipe_is_material_merge(recipe);
+        if merge_recipe && (indexes.len() < 2 || multiplier as usize != indexes.len()) {
+            return Err(NicechunkSmeltingError::InputRecipeMismatch.into());
+        }
         for index in indexes {
             let selected = *index as usize;
             if selected >= item_count || seen_indexes[selected] {
@@ -738,24 +765,52 @@ impl BackpackAccountView {
             }
             seen_indexes[selected] = true;
             let record = Self::slot_at(data, *index)?;
-            input_volume_mm3 = input_volume_mm3.saturating_add(slot_volume_mm3(&record) as u64);
-            let mut matched = false;
-            for recipe_index in 0..recipe.input_count as usize {
-                if matched_inputs[recipe_index] < multiplier
-                    && recipe_input_matches(&recipe.inputs[recipe_index], &record)
-                {
-                    matched_inputs[recipe_index] = matched_inputs[recipe_index].saturating_add(1);
-                    matched = true;
-                    break;
+            if merge_recipe {
+                if !recipe_input_matches(&recipe.inputs[0], &record) {
+                    return Err(NicechunkSmeltingError::InputRecipeMismatch.into());
                 }
+                consumption_quantities[selected] = record.quantity;
+                consumed_input_units = consumed_input_units.saturating_add(record.quantity as u64);
+                input_volume_mm3 = input_volume_mm3.saturating_add(slot_volume_mm3(&record) as u64);
+                continue;
             }
-            if !matched {
+
+            let mut remaining = record.quantity as u64;
+            for recipe_index in 0..recipe.input_count as usize {
+                let required =
+                    (recipe.inputs[recipe_index].quantity as u64).saturating_mul(multiplier as u64);
+                if remaining == 0
+                    || matched_inputs[recipe_index] >= required
+                    || !recipe_input_matches(&recipe.inputs[recipe_index], &record)
+                {
+                    continue;
+                }
+                let consumed = remaining.min(required.saturating_sub(matched_inputs[recipe_index]));
+                matched_inputs[recipe_index] =
+                    matched_inputs[recipe_index].saturating_add(consumed);
+                consumption_quantities[selected] = consumption_quantities[selected]
+                    .saturating_add(consumed.min(u32::MAX as u64) as u32);
+                remaining = remaining.saturating_sub(consumed);
+            }
+            let consumed = consumption_quantities[selected];
+            if consumed == 0 {
                 return Err(NicechunkSmeltingError::InputRecipeMismatch.into());
             }
+            consumed_input_units = consumed_input_units.saturating_add(consumed as u64);
+            input_volume_mm3 = input_volume_mm3
+                .saturating_add(proportional_consumed_volume_mm3(&record, consumed)? as u64);
         }
-        for matched in matched_inputs.iter().take(recipe.input_count as usize) {
-            if *matched != multiplier {
-                return Err(NicechunkSmeltingError::InputRecipeMismatch.into());
+        if !merge_recipe {
+            for (recipe_index, matched) in matched_inputs
+                .iter()
+                .enumerate()
+                .take(recipe.input_count as usize)
+            {
+                let required =
+                    (recipe.inputs[recipe_index].quantity as u64).saturating_mul(multiplier as u64);
+                if *matched != required {
+                    return Err(NicechunkSmeltingError::InputRecipeMismatch.into());
+                }
             }
         }
         let mut max_fuel_tier = 0_u8;
@@ -770,13 +825,76 @@ impl BackpackAccountView {
         if max_fuel_tier < recipe.min_heat_tier {
             return Err(NicechunkSmeltingError::FuelHeatTooLow.into());
         }
-        Ok(input_volume_mm3.max(1))
+        let fully_removed_inputs = indexes
+            .iter()
+            .filter(|index| {
+                Self::slot_at(data, **index)
+                    .map(|record| consumption_quantities[**index as usize] == record.quantity)
+                    .unwrap_or(false)
+            })
+            .count();
+        let fully_removed_fuels = fuel_indexes
+            .iter()
+            .filter(|index| {
+                Self::slot_at(data, **index)
+                    .map(|record| record.quantity == 1)
+                    .unwrap_or(false)
+            })
+            .count();
+        let remove_count = fully_removed_inputs.saturating_add(fully_removed_fuels);
+        if item_count
+            .saturating_sub(remove_count)
+            .saturating_add(recipe.output_count as usize)
+            > capacity
+        {
+            return Err(NicechunkSmeltingError::BackpackCapacityExceeded.into());
+        }
+        Ok(ValidatedRecipeInputs {
+            input_volume_mm3: input_volume_mm3.max(1),
+            consumed_input_units,
+            consumption_quantities,
+        })
     }
 
     fn slot_at(data: &[u8], index: u8) -> Result<BackpackSlotRecord, NicechunkSmeltingError> {
         let offset = BACKPACK_RECORDS_OFFSET + index as usize * BACKPACK_SLOT_RECORD_LEN;
         BackpackSlotRecord::unpack(&data[offset..offset + BACKPACK_SLOT_RECORD_LEN])
     }
+}
+
+fn recipe_is_material_merge(recipe: &RecipeRecord) -> bool {
+    if recipe.input_count != 1 || recipe.output_count != 1 || recipe.min_heat_tier != 0 {
+        return false;
+    }
+    let input = &recipe.inputs[0];
+    let output = &recipe.outputs[0];
+    input.kind == BACKPACK_SLOT_KIND_ITEM
+        && output.kind == BACKPACK_SLOT_KIND_ITEM
+        && input.category == BACKPACK_ITEM_CATEGORY_MATERIAL
+        && output.category == BACKPACK_ITEM_CATEGORY_MATERIAL
+        && input.item_code == output.item_code
+}
+
+fn proportional_consumed_volume_mm3(
+    record: &BackpackSlotRecord,
+    consumed_quantity: u32,
+) -> Result<u32, NicechunkSmeltingError> {
+    if consumed_quantity == 0 || consumed_quantity > record.quantity {
+        return Err(NicechunkSmeltingError::InputRecipeMismatch);
+    }
+    let total_volume = slot_volume_mm3(record);
+    if consumed_quantity == record.quantity {
+        return Ok(total_volume);
+    }
+    if total_volume <= 1 {
+        return Err(NicechunkSmeltingError::InputRecipeMismatch);
+    }
+    let proportional = (total_volume as u64)
+        .saturating_mul(consumed_quantity as u64)
+        .saturating_div(record.quantity as u64);
+    Ok(proportional
+        .max(1)
+        .min(total_volume.saturating_sub(1) as u64) as u32)
 }
 
 fn recipe_input_matches(expected: &BackpackSlotRecord, actual: &BackpackSlotRecord) -> bool {
@@ -801,14 +919,13 @@ fn fuel_heat_tier(slot: &BackpackSlotRecord) -> u8 {
         && slot.category == BACKPACK_ITEM_CATEGORY_MATERIAL
         && slot.item_code == 1001
     {
-        return 2;
+        return 3;
     }
     if slot.kind != BACKPACK_SLOT_KIND_BLOCK {
         return 0;
     }
     match packed_block_id(slot.resource.world_y) {
-        14 | 20 => 4,           // basalt / lava heat
-        47 => 3,                // coal
+        47 => 4,                // coal
         22 | 24 | 26 | 27 => 2, // wood-like fuels
         29 | 31 | 36 => 1,      // dry grass / dead bush / thorn
         _ => 0,
@@ -904,4 +1021,245 @@ fn read_i32(data: &[u8], offset: usize) -> i32 {
         data[offset + 2],
         data[offset + 3],
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn recipe_table_fixture(
+        program_id: &Pubkey,
+        table_id: u64,
+        authority: &Pubkey,
+    ) -> (Pubkey, Vec<u8>) {
+        let table_id_bytes = table_id.to_le_bytes();
+        let (recipe_table, bump) =
+            Pubkey::find_program_address(&[RECIPE_TABLE_SEED, &table_id_bytes], program_id);
+        let mut data = vec![0_u8; RecipeTable::LEN];
+        RecipeTable::pack_empty(
+            &mut data,
+            &RecipeTableInitArgs {
+                bump,
+                table_id,
+                authority,
+                created_slot: 1,
+                created_at: 1,
+            },
+        )
+        .unwrap();
+        (recipe_table, data)
+    }
+
+    fn material_output(recipe_table: &Pubkey) -> BackpackSlotRecord {
+        BackpackSlotRecord {
+            kind: BACKPACK_SLOT_KIND_ITEM,
+            category: BACKPACK_ITEM_CATEGORY_MATERIAL,
+            quantity: 1,
+            item_code: 1001,
+            item_id: 1001,
+            item_pda: *recipe_table,
+            volume_mm3: 1_000_000,
+            durability_current: 100,
+            durability_max: 100,
+            grade: 1,
+            item_level: 1,
+            quality_bps: 10_000,
+            ..BackpackSlotRecord::default()
+        }
+    }
+
+    fn block_slot(block_id: u16) -> BackpackSlotRecord {
+        BackpackSlotRecord {
+            kind: BACKPACK_SLOT_KIND_BLOCK,
+            quantity: 1,
+            resource: BackpackResourceRecord {
+                world_y: (block_id << BACKPACK_PACKED_Y_BITS) as i16,
+                ..BackpackResourceRecord::default()
+            },
+            ..BackpackSlotRecord::default()
+        }
+    }
+
+    fn material_slot(item_code: u16) -> BackpackSlotRecord {
+        BackpackSlotRecord {
+            kind: BACKPACK_SLOT_KIND_ITEM,
+            category: BACKPACK_ITEM_CATEGORY_MATERIAL,
+            quantity: 1,
+            item_code,
+            ..BackpackSlotRecord::default()
+        }
+    }
+
+    fn backpack_fixture(owner: &Pubkey, capacity: u8, slots: &[BackpackSlotRecord]) -> Vec<u8> {
+        let mut data = vec![0_u8; BACKPACK_LEN];
+        data[0..8].copy_from_slice(&BACKPACK_MAGIC);
+        data[8..10].copy_from_slice(&BACKPACK_VERSION.to_le_bytes());
+        data[11] = 1;
+        data[BACKPACK_OWNER_OFFSET..BACKPACK_OWNER_OFFSET + 32].copy_from_slice(owner.as_ref());
+        data[BACKPACK_CAPACITY_OFFSET] = capacity;
+        data[BACKPACK_ITEM_COUNT_OFFSET] = slots.len() as u8;
+        for (index, slot) in slots.iter().enumerate() {
+            let offset = BACKPACK_RECORDS_OFFSET + index * BACKPACK_SLOT_RECORD_LEN;
+            slot.pack(&mut data[offset..offset + BACKPACK_SLOT_RECORD_LEN])
+                .unwrap();
+        }
+        data
+    }
+
+    fn material_recipe(
+        input_code: u16,
+        input_quantity: u32,
+        output_code: u16,
+        min_heat_tier: u8,
+    ) -> RecipeRecord {
+        let mut input = material_slot(input_code);
+        input.quantity = input_quantity;
+        input.volume_mm3 = 250_000;
+        let output_pda = Pubkey::new_unique();
+        let mut output = material_output(&output_pda);
+        output.item_code = output_code;
+        output.item_id = output_code as u64;
+        RecipeRecord {
+            recipe_id: output_code as u64,
+            enabled: true,
+            min_heat_tier,
+            input_count: 1,
+            output_count: 1,
+            yield_bps: RECIPE_YIELD_BPS_DENOMINATOR,
+            inputs: [input; RECIPE_MAX_INPUTS],
+            outputs: [output; RECIPE_MAX_OUTPUTS],
+            updated_slot: 1,
+        }
+    }
+
+    #[test]
+    fn fuel_tiers_match_the_consumable_browser_rules() {
+        assert_eq!(fuel_heat_tier(&block_slot(29)), 1);
+        assert_eq!(fuel_heat_tier(&block_slot(22)), 2);
+        assert_eq!(fuel_heat_tier(&material_slot(1001)), 3);
+        assert_eq!(fuel_heat_tier(&block_slot(47)), 4);
+    }
+
+    #[test]
+    fn volcanic_recipe_inputs_are_not_backpack_fuels() {
+        assert_eq!(fuel_heat_tier(&block_slot(14)), 0);
+        assert_eq!(fuel_heat_tier(&block_slot(20)), 0);
+    }
+
+    #[test]
+    fn one_material_stack_satisfies_a_multi_unit_recipe() {
+        let owner = Pubkey::new_unique();
+        let recipe = material_recipe(1031, 2, 1032, 0);
+        let mut planks = material_slot(1031);
+        planks.quantity = 4;
+        planks.volume_mm3 = 950_000;
+        let backpack = backpack_fixture(&owner, 2, &[planks]);
+
+        let validated =
+            BackpackAccountView::validate_recipe_inputs(&backpack, &owner, &[0], &[], &recipe, 1)
+                .unwrap();
+
+        assert_eq!(validated.consumption_quantities[0], 2);
+        assert_eq!(validated.consumed_input_units, 2);
+        assert_eq!(validated.input_volume_mm3, 475_000);
+    }
+
+    #[test]
+    fn merge_recipe_consumes_complete_selected_stacks() {
+        let owner = Pubkey::new_unique();
+        let recipe = material_recipe(1031, 1, 1031, 0);
+        let mut first = material_slot(1031);
+        first.quantity = 3;
+        first.volume_mm3 = 300_000;
+        let mut second = material_slot(1031);
+        second.quantity = 5;
+        second.volume_mm3 = 500_000;
+        let backpack = backpack_fixture(&owner, 2, &[first, second]);
+
+        let validated = BackpackAccountView::validate_recipe_inputs(
+            &backpack,
+            &owner,
+            &[0, 1],
+            &[],
+            &recipe,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(validated.consumption_quantities[0], 3);
+        assert_eq!(validated.consumption_quantities[1], 5);
+        assert_eq!(validated.consumed_input_units, 8);
+        assert_eq!(validated.input_volume_mm3, 800_000);
+    }
+
+    #[test]
+    fn stacked_input_and_fuel_do_not_fake_a_free_backpack_slot() {
+        let owner = Pubkey::new_unique();
+        let recipe = material_recipe(1031, 1, 1032, 3);
+        let mut planks = material_slot(1031);
+        planks.quantity = 4;
+        planks.volume_mm3 = 950_000;
+        let mut charcoal = material_slot(1001);
+        charcoal.quantity = 4;
+        charcoal.volume_mm3 = 750_000;
+        let backpack = backpack_fixture(&owner, 2, &[planks, charcoal]);
+
+        let error =
+            BackpackAccountView::validate_recipe_inputs(&backpack, &owner, &[0], &[1], &recipe, 1)
+                .unwrap_err();
+
+        assert!(matches!(
+            error,
+            solana_program::program_error::ProgramError::Custom(code)
+                if code == NicechunkSmeltingError::BackpackCapacityExceeded as u32
+        ));
+    }
+
+    #[test]
+    fn recipe_table_identity_binds_stored_id_bump_pda_and_authority() {
+        let program_id = Pubkey::new_unique();
+        let authority = Pubkey::new_unique();
+        let (recipe_table, mut data) = recipe_table_fixture(&program_id, 225, &authority);
+
+        assert_eq!(
+            RecipeTable::validate_identity(&data, &program_id, &recipe_table, &authority).unwrap(),
+            225,
+        );
+        assert!(matches!(
+            RecipeTable::validate_identity(
+                &data,
+                &program_id,
+                &recipe_table,
+                &Pubkey::new_unique(),
+            ),
+            Err(NicechunkSmeltingError::UnauthorizedAuthority),
+        ));
+        data[RecipeTable::BUMP_OFFSET] ^= 1;
+        assert!(matches!(
+            RecipeTable::validate_identity(&data, &program_id, &recipe_table, &authority),
+            Err(NicechunkSmeltingError::InvalidRecipeTablePda),
+        ));
+    }
+
+    #[test]
+    fn smelting_outputs_must_be_materials_backed_by_the_recipe_table() {
+        let recipe_table = Pubkey::new_unique();
+        assert!(material_output(&recipe_table)
+            .validate_recipe_output(&recipe_table)
+            .is_ok());
+
+        let mut wrong_pda = material_output(&recipe_table);
+        wrong_pda.item_pda = Pubkey::new_unique();
+        assert!(matches!(
+            wrong_pda.validate_recipe_output(&recipe_table),
+            Err(NicechunkSmeltingError::InvalidRecipeOutput),
+        ));
+
+        let mut wrong_category = material_output(&recipe_table);
+        wrong_category.category = 2;
+        assert!(matches!(
+            wrong_category.validate_recipe_output(&recipe_table),
+            Err(NicechunkSmeltingError::InvalidRecipeOutput),
+        ));
+    }
 }
