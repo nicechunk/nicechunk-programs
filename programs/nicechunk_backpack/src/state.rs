@@ -7,6 +7,7 @@ pub const BACKPACK_VERSION: u16 = 4;
 pub const BACKPACK_SEED: &[u8] = b"backpack";
 pub const BACKPACK_DEFAULT_CAPACITY: u8 = 50;
 pub const BACKPACK_MAX_CAPACITY: u8 = 99;
+pub const BACKPACK_STACK_LIMIT: u32 = 99;
 pub const BACKPACK_HEADER_LEN: usize = 128;
 pub const BACKPACK_RESOURCE_RECORD_LEN: usize = 10;
 pub const BACKPACK_SLOT_RECORD_LEN: usize = 80;
@@ -598,6 +599,101 @@ impl BackpackAccount {
         Ok(())
     }
 
+    fn try_store_slot(
+        data: &mut [u8],
+        incoming: &BackpackSlotRecord,
+    ) -> Result<bool, solana_program::program_error::ProgramError> {
+        let mut packed = [0_u8; BACKPACK_SLOT_RECORD_LEN];
+        incoming.pack(&mut packed)?;
+
+        let item_count = data[Self::ITEM_COUNT_OFFSET];
+        let capacity = data[Self::CAPACITY_OFFSET];
+        if incoming.kind == BACKPACK_SLOT_KIND_BLOCK && incoming.quantity == 1 {
+            for index in 0..item_count {
+                let existing = Self::slot_at(data, index)?;
+                if let Some((merged, None)) = existing.merged_resource_stack(incoming)? {
+                    let offset = Self::RECORDS_OFFSET + index as usize * BACKPACK_SLOT_RECORD_LEN;
+                    merged.pack(&mut data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
+                    return Ok(true);
+                }
+            }
+        }
+        if item_count < capacity
+            && (incoming.kind != BACKPACK_SLOT_KIND_BLOCK || incoming.quantity == 1)
+        {
+            let offset = Self::RECORDS_OFFSET + item_count as usize * BACKPACK_SLOT_RECORD_LEN;
+            data[offset..offset + BACKPACK_SLOT_RECORD_LEN].copy_from_slice(&packed);
+            data[Self::ITEM_COUNT_OFFSET] = item_count.saturating_add(1);
+            return Ok(true);
+        }
+
+        let mut candidate = Vec::with_capacity(item_count as usize + 1);
+        for index in 0..item_count {
+            candidate.push(Self::slot_at(data, index)?);
+        }
+        Self::push_compacted_slot(&mut candidate, *incoming)?;
+        if candidate.len() <= capacity as usize {
+            Self::write_slots(data, item_count, &candidate)?;
+            return Ok(true);
+        }
+
+        // Compact fragmented resource stacks in a candidate buffer so a failed
+        // insert never mutates the account.
+        let mut compacted = Vec::with_capacity(item_count as usize + 1);
+        for index in 0..item_count {
+            Self::push_compacted_slot(&mut compacted, Self::slot_at(data, index)?)?;
+        }
+        Self::push_compacted_slot(&mut compacted, *incoming)?;
+        if compacted.len() > capacity as usize {
+            return Ok(false);
+        }
+
+        Self::write_slots(data, item_count, &compacted)?;
+        Ok(true)
+    }
+
+    fn write_slots(
+        data: &mut [u8],
+        previous_count: u8,
+        slots: &[BackpackSlotRecord],
+    ) -> ProgramResult {
+        for (index, slot) in slots.iter().enumerate() {
+            let offset = Self::RECORDS_OFFSET + index * BACKPACK_SLOT_RECORD_LEN;
+            slot.pack(&mut data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
+        }
+        for index in slots.len()..previous_count as usize {
+            let offset = Self::RECORDS_OFFSET + index * BACKPACK_SLOT_RECORD_LEN;
+            data[offset..offset + BACKPACK_SLOT_RECORD_LEN].fill(0);
+        }
+        data[Self::ITEM_COUNT_OFFSET] = slots.len() as u8;
+        Ok(())
+    }
+
+    fn push_compacted_slot(
+        slots: &mut Vec<BackpackSlotRecord>,
+        incoming: BackpackSlotRecord,
+    ) -> ProgramResult {
+        let mut remaining = Some(incoming);
+        for existing in slots.iter_mut() {
+            let Some(candidate) = remaining else {
+                break;
+            };
+            if let Some((merged, remainder)) = existing.merged_resource_stack(&candidate)? {
+                *existing = merged;
+                remaining = remainder;
+            }
+        }
+        if let Some(remainder) = remaining {
+            slots.push(remainder);
+        }
+        Ok(())
+    }
+
+    fn set_updated_slot(data: &mut [u8], updated_slot: u64) {
+        data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
+            .copy_from_slice(&updated_slot.to_le_bytes());
+    }
+
     pub fn validate_owner(data: &[u8], owner: &Pubkey) -> ProgramResult {
         Self::validate(data)?;
         if &data[Self::OWNER_OFFSET..Self::OWNER_OFFSET + 32] != owner.as_ref() {
@@ -635,21 +731,15 @@ impl BackpackAccount {
         updated_slot: u64,
     ) -> ProgramResult {
         Self::validate_owner(data, owner)?;
-        let capacity = data[Self::CAPACITY_OFFSET];
-        let item_count = data[Self::ITEM_COUNT_OFFSET];
-        if item_count >= capacity {
-            return Err(NicechunkBackpackError::BackpackFull.into());
-        }
-        let offset = Self::RECORDS_OFFSET + item_count as usize * BACKPACK_SLOT_RECORD_LEN;
         let mut slot = BackpackSlotRecord::from_block_resource_with_volume_and_metadata(
             *record, volume_mm3, metadata,
         );
         slot.set_mass_grams(mass_grams)?;
-        slot.pack(&mut data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
+        if !Self::try_store_slot(data, &slot)? {
+            return Err(NicechunkBackpackError::BackpackFull.into());
+        }
         Self::add_total_mass(data, mass_grams)?;
-        data[Self::ITEM_COUNT_OFFSET] = item_count.saturating_add(1);
-        data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
-            .copy_from_slice(&updated_slot.to_le_bytes());
+        Self::set_updated_slot(data, updated_slot);
         Ok(())
     }
 
@@ -669,30 +759,26 @@ impl BackpackAccount {
         {
             return Err(NicechunkBackpackError::InvalidInstruction.into());
         }
-        let capacity = data[Self::CAPACITY_OFFSET];
-        let mut item_count = data[Self::ITEM_COUNT_OFFSET];
-        if records.is_empty() || item_count >= capacity {
+        if records.is_empty() {
             return Ok(());
         }
 
+        let mut stored_any = false;
         for (index, record) in records.iter().enumerate() {
-            if item_count >= capacity {
-                break;
-            }
-            let offset = Self::RECORDS_OFFSET + item_count as usize * BACKPACK_SLOT_RECORD_LEN;
             let mut slot = BackpackSlotRecord::from_block_resource_with_volume_and_metadata(
                 *record,
                 volumes_mm3[index],
                 metadata[index],
             );
             slot.set_mass_grams(masses_grams[index])?;
-            slot.pack(&mut data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
-            Self::add_total_mass(data, masses_grams[index])?;
-            item_count = item_count.saturating_add(1);
+            if Self::try_store_slot(data, &slot)? {
+                Self::add_total_mass(data, masses_grams[index])?;
+                stored_any = true;
+            }
         }
-        data[Self::ITEM_COUNT_OFFSET] = item_count;
-        data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
-            .copy_from_slice(&updated_slot.to_le_bytes());
+        if stored_any {
+            Self::set_updated_slot(data, updated_slot);
+        }
         Ok(())
     }
 
@@ -712,17 +798,11 @@ impl BackpackAccount {
         {
             return Err(NicechunkBackpackError::InvalidInventoryItem.into());
         }
-        let capacity = data[Self::CAPACITY_OFFSET];
-        let item_count = data[Self::ITEM_COUNT_OFFSET];
-        if item_count >= capacity {
+        if !Self::try_store_slot(data, record)? {
             return Err(NicechunkBackpackError::BackpackFull.into());
         }
-        let offset = Self::RECORDS_OFFSET + item_count as usize * BACKPACK_SLOT_RECORD_LEN;
-        record.pack(&mut data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
         Self::add_total_mass(data, mass_grams)?;
-        data[Self::ITEM_COUNT_OFFSET] = item_count.saturating_add(1);
-        data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
-            .copy_from_slice(&updated_slot.to_le_bytes());
+        Self::set_updated_slot(data, updated_slot);
         Ok(())
     }
 
@@ -732,28 +812,7 @@ impl BackpackAccount {
         record: &BackpackSlotRecord,
         updated_slot: u64,
     ) -> ProgramResult {
-        Self::validate_owner(data, owner)?;
-        let mass_grams = record.mass_grams()?;
-        let mut packed = [0_u8; BACKPACK_SLOT_RECORD_LEN];
-        record.pack(&mut packed)?;
-
-        let mut capacity = data[Self::CAPACITY_OFFSET];
-        let item_count = data[Self::ITEM_COUNT_OFFSET];
-        if item_count >= capacity {
-            if capacity >= BACKPACK_MAX_CAPACITY {
-                return Err(NicechunkBackpackError::BackpackFull.into());
-            }
-            capacity = capacity.saturating_add(1);
-            data[Self::CAPACITY_OFFSET] = capacity;
-        }
-
-        let offset = Self::RECORDS_OFFSET + item_count as usize * BACKPACK_SLOT_RECORD_LEN;
-        data[offset..offset + BACKPACK_SLOT_RECORD_LEN].copy_from_slice(&packed);
-        Self::add_total_mass(data, mass_grams)?;
-        data[Self::ITEM_COUNT_OFFSET] = item_count.saturating_add(1);
-        data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
-            .copy_from_slice(&updated_slot.to_le_bytes());
-        Ok(())
+        Self::append_item(data, owner, record, updated_slot)
     }
 
     pub fn remove_resource_at(
@@ -1088,6 +1147,22 @@ fn proportional_consumed_volume_mm3(
         .min(total_volume_mm3.saturating_sub(1) as u64) as u32)
 }
 
+fn proportional_stack_value(
+    total: u32,
+    total_quantity: u32,
+    moved_quantity: u32,
+) -> Result<u32, NicechunkBackpackError> {
+    if total_quantity == 0 || moved_quantity == 0 || moved_quantity > total_quantity {
+        return Err(NicechunkBackpackError::InvalidInventoryItem);
+    }
+    if moved_quantity == total_quantity {
+        return Ok(total);
+    }
+    Ok(((total as u64)
+        .saturating_mul(moved_quantity as u64)
+        .saturating_div(total_quantity as u64)) as u32)
+}
+
 fn scale_nonzero_metadata(value: u32, numerator: u32, denominator: u32) -> u32 {
     (value as u64)
         .saturating_mul(numerator as u64)
@@ -1364,6 +1439,58 @@ impl BackpackSlotRecord {
         }
     }
 
+    fn merged_resource_stack(
+        &self,
+        incoming: &Self,
+    ) -> Result<Option<(Self, Option<Self>)>, NicechunkBackpackError> {
+        if self.kind != BACKPACK_SLOT_KIND_BLOCK
+            || incoming.kind != BACKPACK_SLOT_KIND_BLOCK
+            || self.category != incoming.category
+            || self.flags != incoming.flags
+            || self.metadata != incoming.metadata
+            || self.block_id()? != incoming.block_id()?
+            || self.quantity >= BACKPACK_STACK_LIMIT
+        {
+            return Ok(None);
+        }
+        let moved_quantity = incoming
+            .quantity
+            .min(BACKPACK_STACK_LIMIT.saturating_sub(self.quantity));
+        let moved_volume_mm3 =
+            proportional_stack_value(incoming.volume_mm3, incoming.quantity, moved_quantity)?;
+        let incoming_mass_grams = incoming.mass_grams()?;
+        let moved_mass_grams =
+            proportional_stack_value(incoming_mass_grams, incoming.quantity, moved_quantity)?;
+        let mut merged = *self;
+        merged.quantity = self
+            .quantity
+            .checked_add(moved_quantity)
+            .ok_or(NicechunkBackpackError::InvalidInventoryItem)?;
+        merged.volume_mm3 = self
+            .volume_mm3
+            .checked_add(moved_volume_mm3)
+            .ok_or(NicechunkBackpackError::InvalidInventoryItem)?;
+        let merged_mass_grams = self
+            .mass_grams()?
+            .checked_add(moved_mass_grams)
+            .ok_or(NicechunkBackpackError::BackpackMassOverflow)?;
+        merged
+            .set_mass_grams(merged_mass_grams)
+            .map_err(|_| NicechunkBackpackError::InvalidInventoryItem)?;
+
+        let remaining_quantity = incoming.quantity.saturating_sub(moved_quantity);
+        if remaining_quantity == 0 {
+            return Ok(Some((merged, None)));
+        }
+        let mut remainder = *incoming;
+        remainder.quantity = remaining_quantity;
+        remainder.volume_mm3 = incoming.volume_mm3.saturating_sub(moved_volume_mm3);
+        remainder
+            .set_mass_grams(incoming_mass_grams.saturating_sub(moved_mass_grams))
+            .map_err(|_| NicechunkBackpackError::InvalidInventoryItem)?;
+        Ok(Some((merged, Some(remainder))))
+    }
+
     pub fn unpack(data: &[u8]) -> Result<Self, NicechunkBackpackError> {
         if data.len() != BACKPACK_SLOT_RECORD_LEN {
             return Err(NicechunkBackpackError::InvalidInventoryItem);
@@ -1393,7 +1520,9 @@ impl BackpackSlotRecord {
             quality_bps: read_u16(data, 74),
             metadata: read_u32(data, 76),
         };
-        if record.quantity == 0 {
+        if record.quantity == 0
+            || (record.kind == BACKPACK_SLOT_KIND_BLOCK && record.quantity > BACKPACK_STACK_LIMIT)
+        {
             return Err(NicechunkBackpackError::InvalidInventoryItem);
         }
         if record.kind == BACKPACK_SLOT_KIND_ITEM
@@ -1414,7 +1543,9 @@ impl BackpackSlotRecord {
         if self.kind != BACKPACK_SLOT_KIND_BLOCK && self.kind != BACKPACK_SLOT_KIND_ITEM {
             return Err(NicechunkBackpackError::InvalidInventoryItem.into());
         }
-        if self.quantity == 0 {
+        if self.quantity == 0
+            || (self.kind == BACKPACK_SLOT_KIND_BLOCK && self.quantity > BACKPACK_STACK_LIMIT)
+        {
             return Err(NicechunkBackpackError::InvalidInventoryItem.into());
         }
         if self.kind == BACKPACK_SLOT_KIND_ITEM
@@ -2024,6 +2155,14 @@ mod tests {
         slot
     }
 
+    fn block_resource(block_id: u16, coordinate: i32) -> BackpackResourceRecord {
+        BackpackResourceRecord {
+            world_x: coordinate,
+            world_y: ((block_id << 9) | (coordinate as u16 & 0x01ff)) as i16,
+            world_z: coordinate.saturating_neg(),
+        }
+    }
+
     fn packed_slot(record: &BackpackSlotRecord) -> [u8; BACKPACK_SLOT_RECORD_LEN] {
         let mut data = [0_u8; BACKPACK_SLOT_RECORD_LEN];
         record.pack(&mut data).unwrap();
@@ -2062,23 +2201,21 @@ mod tests {
     }
 
     #[test]
-    fn issued_blueprint_expands_a_full_backpack_without_removing_items() {
+    fn issued_blueprint_respects_the_fixed_backpack_capacity() {
         let owner = Pubkey::new_unique();
         let mut data = empty_backpack(&owner, 1);
         BackpackAccount::append_item(&mut data, &owner, &material_slot(1_200, 1_200), 11).unwrap();
+        let before = data.clone();
 
-        BackpackAccount::append_issued_item(&mut data, &owner, &blueprint_slot(901), 12).unwrap();
+        let error =
+            BackpackAccount::append_issued_item(&mut data, &owner, &blueprint_slot(901), 12)
+                .unwrap_err();
 
-        assert_eq!(data[BackpackAccount::CAPACITY_OFFSET], 2);
-        assert_eq!(data[BackpackAccount::ITEM_COUNT_OFFSET], 2);
-        assert_eq!(
-            BackpackAccount::slot_at(&data, 0).unwrap().category,
-            BACKPACK_ITEM_CATEGORY_MATERIAL
-        );
-        let blueprint = BackpackAccount::slot_at(&data, 1).unwrap();
-        assert_eq!(blueprint.category, BACKPACK_ITEM_CATEGORY_BLUEPRINT);
-        assert_eq!(blueprint.item_code, BACKPACK_BLUEPRINT_ITEM_CODE);
-        assert_eq!(blueprint.item_id, 901);
+        assert!(matches!(
+            error,
+            ProgramError::Custom(code) if code == NicechunkBackpackError::BackpackFull as u32
+        ));
+        assert_eq!(data, before);
     }
 
     #[test]
@@ -2187,6 +2324,220 @@ mod tests {
         assert_eq!(slot.resource.world_z, record.world_z);
         assert_eq!(slot.volume_mm3, 1_000_000);
         assert_eq!(slot.metadata, 0x0001_0002);
+    }
+
+    #[test]
+    fn mined_resources_fill_a_stack_to_99_before_opening_another_slot() {
+        let owner = Pubkey::new_unique();
+        let mut data = empty_backpack(&owner, BACKPACK_DEFAULT_CAPACITY);
+
+        for coordinate in 0..100 {
+            BackpackAccount::append_resource_with_volume_and_metadata(
+                &mut data,
+                &owner,
+                &block_resource(3, coordinate),
+                1_000_000,
+                7,
+                2_600,
+                11 + coordinate as u64,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(data[BackpackAccount::ITEM_COUNT_OFFSET], 2);
+        let first = BackpackAccount::slot_at(&data, 0).unwrap();
+        let second = BackpackAccount::slot_at(&data, 1).unwrap();
+        assert_eq!(first.quantity, BACKPACK_STACK_LIMIT);
+        assert_eq!(first.volume_mm3, 99_000_000);
+        assert_eq!(first.mass_grams().unwrap(), 257_400);
+        assert_eq!(second.quantity, 1);
+        assert_eq!(second.volume_mm3, 1_000_000);
+        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 260_000);
+    }
+
+    #[test]
+    fn fifty_full_resource_stacks_hold_4950_items_and_reject_the_next() {
+        let owner = Pubkey::new_unique();
+        let mut data = empty_backpack(&owner, BACKPACK_DEFAULT_CAPACITY);
+
+        for coordinate in 0..(BACKPACK_DEFAULT_CAPACITY as u32 * BACKPACK_STACK_LIMIT) {
+            BackpackAccount::append_resource_with_volume_and_metadata(
+                &mut data,
+                &owner,
+                &block_resource(3, coordinate as i32),
+                1_000,
+                0,
+                3,
+                11 + coordinate as u64,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            data[BackpackAccount::ITEM_COUNT_OFFSET],
+            BACKPACK_DEFAULT_CAPACITY
+        );
+        for index in 0..BACKPACK_DEFAULT_CAPACITY {
+            assert_eq!(
+                BackpackAccount::slot_at(&data, index).unwrap().quantity,
+                BACKPACK_STACK_LIMIT
+            );
+        }
+        let before = data.clone();
+        let error = BackpackAccount::append_resource_with_volume_and_metadata(
+            &mut data,
+            &owner,
+            &block_resource(3, 9_999),
+            1_000,
+            0,
+            3,
+            20_000,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ProgramError::Custom(code) if code == NicechunkBackpackError::BackpackFull as u32
+        ));
+        assert_eq!(data, before);
+    }
+
+    #[test]
+    fn market_resource_stack_uses_headroom_across_full_backpack_slots() {
+        let owner = Pubkey::new_unique();
+        let mut data = empty_backpack(&owner, BACKPACK_DEFAULT_CAPACITY);
+        let mass_per_stack = 294_u32;
+        for index in 0..BACKPACK_DEFAULT_CAPACITY {
+            let mut slot = BackpackSlotRecord::from_block_resource_with_volume_and_metadata(
+                block_resource(3, index as i32),
+                98_000,
+                0,
+            );
+            slot.quantity = 98;
+            slot.set_mass_grams(mass_per_stack).unwrap();
+            let offset =
+                BackpackAccount::RECORDS_OFFSET + index as usize * BACKPACK_SLOT_RECORD_LEN;
+            slot.pack(&mut data[offset..offset + BACKPACK_SLOT_RECORD_LEN])
+                .unwrap();
+        }
+        data[BackpackAccount::ITEM_COUNT_OFFSET] = BACKPACK_DEFAULT_CAPACITY;
+        data[BackpackAccount::TOTAL_MASS_GRAMS_OFFSET
+            ..BackpackAccount::TOTAL_MASS_GRAMS_OFFSET + 8]
+            .copy_from_slice(
+                &(mass_per_stack as u64 * BACKPACK_DEFAULT_CAPACITY as u64).to_le_bytes(),
+            );
+
+        let mut incoming = BackpackSlotRecord::from_block_resource_with_volume_and_metadata(
+            block_resource(3, 500),
+            2_000,
+            0,
+        );
+        incoming.quantity = 2;
+        incoming.set_mass_grams(6).unwrap();
+        BackpackAccount::append_item(&mut data, &owner, &incoming, 100).unwrap();
+
+        assert_eq!(data[BackpackAccount::ITEM_COUNT_OFFSET], 50);
+        assert_eq!(BackpackAccount::slot_at(&data, 0).unwrap().quantity, 99);
+        assert_eq!(BackpackAccount::slot_at(&data, 1).unwrap().quantity, 99);
+        assert_eq!(BackpackAccount::slot_at(&data, 2).unwrap().quantity, 98);
+        assert_eq!(
+            BackpackAccount::total_mass_grams(&data).unwrap(),
+            mass_per_stack as u64 * BACKPACK_DEFAULT_CAPACITY as u64 + 6,
+        );
+    }
+
+    #[test]
+    fn material_quantity_is_not_limited_by_block_stack_capacity() {
+        let owner = Pubkey::new_unique();
+        let mut data = empty_backpack(&owner, 2);
+        let mut material = material_slot(1_200, 1_200);
+        material.quantity = 125;
+
+        BackpackAccount::append_item(&mut data, &owner, &material, 11).unwrap();
+
+        assert_eq!(BackpackAccount::slot_at(&data, 0).unwrap().quantity, 125);
+    }
+
+    #[test]
+    fn fragmented_resource_records_compact_before_a_new_type_is_added() {
+        let owner = Pubkey::new_unique();
+        let mut data = empty_backpack(&owner, 4);
+        for index in 0..4_u8 {
+            let mut slot = BackpackSlotRecord::from_block_resource_with_volume_and_metadata(
+                block_resource(3, index as i32),
+                1_000,
+                0,
+            );
+            slot.set_mass_grams(3).unwrap();
+            let offset =
+                BackpackAccount::RECORDS_OFFSET + index as usize * BACKPACK_SLOT_RECORD_LEN;
+            slot.pack(&mut data[offset..offset + BACKPACK_SLOT_RECORD_LEN])
+                .unwrap();
+        }
+        data[BackpackAccount::ITEM_COUNT_OFFSET] = 4;
+        data[BackpackAccount::TOTAL_MASS_GRAMS_OFFSET
+            ..BackpackAccount::TOTAL_MASS_GRAMS_OFFSET + 8]
+            .copy_from_slice(&12_u64.to_le_bytes());
+
+        BackpackAccount::append_resource_with_volume_and_metadata(
+            &mut data,
+            &owner,
+            &block_resource(4, 100),
+            2_000,
+            0,
+            5,
+            20,
+        )
+        .unwrap();
+
+        assert_eq!(data[BackpackAccount::ITEM_COUNT_OFFSET], 2);
+        let compacted = BackpackAccount::slot_at(&data, 0).unwrap();
+        assert_eq!(compacted.block_id().unwrap(), 3);
+        assert_eq!(compacted.quantity, 4);
+        assert_eq!(compacted.volume_mm3, 4_000);
+        assert_eq!(compacted.mass_grams().unwrap(), 12);
+        assert_eq!(
+            BackpackAccount::slot_at(&data, 1)
+                .unwrap()
+                .block_id()
+                .unwrap(),
+            4
+        );
+        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 17);
+    }
+
+    #[test]
+    fn lossy_batch_fills_existing_stack_without_exceeding_99() {
+        let owner = Pubkey::new_unique();
+        let mut data = empty_backpack(&owner, 1);
+        for coordinate in 0..98 {
+            BackpackAccount::append_resource_with_volume_and_metadata(
+                &mut data,
+                &owner,
+                &block_resource(3, coordinate),
+                1_000,
+                0,
+                3,
+                11 + coordinate as u64,
+            )
+            .unwrap();
+        }
+        let records = [block_resource(3, 100), block_resource(3, 101)];
+        BackpackAccount::append_resources_lossy_with_volumes_and_metadata(
+            &mut data,
+            &owner,
+            &records,
+            &[1_000, 1_000],
+            &[0, 0],
+            &[3, 3],
+            200,
+        )
+        .unwrap();
+
+        let slot = BackpackAccount::slot_at(&data, 0).unwrap();
+        assert_eq!(slot.quantity, BACKPACK_STACK_LIMIT);
+        assert_eq!(slot.volume_mm3, 99_000);
+        assert_eq!(slot.mass_grams().unwrap(), 297);
+        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 297);
     }
 
     #[test]

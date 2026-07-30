@@ -34,6 +34,7 @@ export const BACKPACK_MAGIC = "NCKBPK01";
 export const BACKPACK_VERSION = 4;
 export const BACKPACK_DEFAULT_CAPACITY = 50;
 export const BACKPACK_MAX_CAPACITY = 99;
+export const BACKPACK_STACK_LIMIT = 99;
 export const BACKPACK_HEADER_LEN = 128;
 export const BACKPACK_RESOURCE_RECORD_LEN = 10;
 export const BACKPACK_SLOT_RECORD_LEN = 80;
@@ -604,11 +605,19 @@ export function decodeBackpackSlotRecord(data: Buffer): BackpackSlotRecord {
   }
   const kind = data.readUInt8(0);
   const flags = data.readUInt16LE(2);
+  const quantity = data.readUInt32LE(4);
+  if (
+    (kind !== BACKPACK_SLOT_KIND_BLOCK && kind !== BACKPACK_SLOT_KIND_ITEM)
+    || quantity === 0
+    || (kind === BACKPACK_SLOT_KIND_BLOCK && quantity > BACKPACK_STACK_LIMIT)
+  ) {
+    throw new Error("Invalid Backpack slot kind or quantity.");
+  }
   return {
     kind,
     category: data.readUInt8(1),
     flags,
-    quantity: data.readUInt32LE(4),
+    quantity,
     resource: decodeBackpackResourceRecord(data.subarray(8, 18)),
     itemCode: data.readUInt16LE(18),
     itemId: data.readBigUInt64LE(20),
@@ -628,13 +637,21 @@ export function decodeBackpackSlotRecord(data: Buffer): BackpackSlotRecord {
 
 export function encodeBackpackSlotRecord(slot: BackpackSlotRecord): Buffer {
   const data = Buffer.alloc(BACKPACK_SLOT_RECORD_LEN);
+  const quantity = checkedUnsignedInteger(slot.quantity ?? 1, 0xffffffff, "Backpack slot quantity");
+  if (
+    (slot.kind !== BACKPACK_SLOT_KIND_BLOCK && slot.kind !== BACKPACK_SLOT_KIND_ITEM)
+    || quantity === 0
+    || (slot.kind === BACKPACK_SLOT_KIND_BLOCK && quantity > BACKPACK_STACK_LIMIT)
+  ) {
+    throw new Error("Invalid Backpack slot kind or quantity.");
+  }
   const massGramsValue = slot.massGrams;
   const hasMass = massGramsValue !== undefined;
   const flags = (slot.flags ?? 0) | (hasMass ? BACKPACK_ITEM_FLAG_MASS_VALID : 0);
   data.writeUInt8(slot.kind, 0);
   data.writeUInt8(slot.category, 1);
   data.writeUInt16LE(flags, 2);
-  data.writeUInt32LE(slot.quantity ?? 1, 4);
+  data.writeUInt32LE(quantity, 4);
   data.writeInt32LE(slot.resource?.worldX ?? 0, 8);
   data.writeInt16LE(slot.resource?.worldY ?? 0, 12);
   data.writeInt32LE(slot.resource?.worldZ ?? 0, 14);
