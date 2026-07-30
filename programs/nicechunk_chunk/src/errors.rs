@@ -72,6 +72,11 @@ pub enum NicechunkChunkError {
     InvalidBatchMine = 6377,
     BatchMineCrossChunk = 6378,
     InvalidRangeMine = 6379,
+    InvalidPlayerSkillsPda = 6380,
+    InvalidPlayerSkillsOwner = 6381,
+    InvalidPlayerSkillsData = 6382,
+    InvalidBackpackData = 6383,
+    InvalidMiningActionId = 6384,
 }
 
 impl From<NicechunkChunkError> for ProgramError {

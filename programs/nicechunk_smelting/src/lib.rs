@@ -31,16 +31,16 @@ use state::{
     RecipeTableInitArgs, DEFAULT_RESOURCE_VOLUME_MM3, DURABILITY_BPS_DENOMINATOR,
     PLAYER_PROGRESS_LEN, PLAYER_PROGRESS_SEED, RECIPE_TABLE_SEED, RECIPE_YIELD_BPS_DENOMINATOR,
     SMELTING_AUTHORITY_SEED, SMELTING_SKILL_BASE_OUTPUT_BPS, SMELTING_SKILL_MAX_OUTPUT_BPS,
-    SMELTING_XP_PER_INPUT,
+    SMELTING_XP_PER_ACTION,
 };
 
 const GLOBAL_CONFIG_SEED: &[u8] = b"global-config";
 
 declare_id!("7imEiNtpiN487HRwrftdLrMFs8TcAnjLE94vKsDgU6L7");
 
-const PLAYER_SKILLS_SEED: &[u8] = b"player-skills-v1";
-const PLAYER_SKILLS_MAGIC: [u8; 8] = *b"NCKSKL01";
-const PLAYER_SKILLS_VERSION: u16 = 1;
+const PLAYER_SKILLS_SEED: &[u8] = b"player-skills-v2";
+const PLAYER_SKILLS_MAGIC: [u8; 8] = *b"NCKSKL02";
+const PLAYER_SKILLS_VERSION: u16 = 2;
 const PLAYER_SKILLS_LEN: usize = 480;
 const PLAYER_SKILLS_OWNER_OFFSET: usize = 12;
 const PLAYER_SKILLS_GLOBAL_CONFIG_OFFSET: usize = 44;
@@ -433,7 +433,7 @@ fn execute_smelting(
             output_quantities[output_index],
         )?;
     }
-    let gained_xp = smelting_xp_for_recipe(&recipe, validated_inputs.consumed_input_units);
+    let gained_xp = smelting_xp_for_recipe(&recipe);
     if gained_xp > 0 {
         let mut progress_data = player_progress.try_borrow_mut_data()?;
         PlayerProgressState::add_smelting_xp(
@@ -690,11 +690,11 @@ fn smelting_output_quantity(
     checked_smelting_output_u32(quantity.max(1))
 }
 
-fn smelting_xp_for_recipe(recipe: &RecipeRecord, consumed_input_units: u64) -> u64 {
+fn smelting_xp_for_recipe(recipe: &RecipeRecord) -> u64 {
     if state::recipe_is_material_merge(recipe) {
         0
     } else {
-        consumed_input_units.saturating_mul(SMELTING_XP_PER_INPUT)
+        SMELTING_XP_PER_ACTION
     }
 }
 
@@ -1124,7 +1124,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(output, 8_400);
-        assert_eq!(smelting_xp_for_recipe(&recipe, 8), 0);
+        assert_eq!(smelting_xp_for_recipe(&recipe), 0);
     }
 
     #[test]
@@ -1147,7 +1147,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(output, 27_000);
-        assert_eq!(smelting_xp_for_recipe(&recipe, 8), 8);
+        assert_eq!(smelting_xp_for_recipe(&recipe), 1);
     }
 
     #[test]

@@ -18,6 +18,7 @@ export const PLAYER_PROFILE_SEED = "player-v7";
 export const PLAYER_APPEARANCE_SEED = "appearance-v1";
 export const PLAYER_EQUIPMENT_SEED = "player-equipment-v1";
 export const PLAYER_SESSION_SEED = "session";
+export const USERNAME_INDEX_SEED = "player-name-v1";
 export const PLAYER_PROFILE_LEN = 773;
 export const PLAYER_APPEARANCE_LEN = 9612;
 export const PLAYER_EQUIPMENT_HEADER_LEN = 128;
@@ -30,10 +31,13 @@ export const EQUIPMENT_TRANSFER_AUTHORITY_SEED = "equipment-transfer-v1";
 export const MATERIAL_PHYSICS_SEED = "material-physics-v2";
 export const PLAYER_SESSION_LEN = 184;
 export const PLAYER_PROFILE_MAGIC = "NCKPLY01";
+export const PLAYER_PROFILE_VERSION = 7;
 export const PLAYER_APPEARANCE_MAGIC = "NCKAPP01";
+export const PLAYER_APPEARANCE_VERSION = 1;
 export const PLAYER_EQUIPMENT_MAGIC = "NCKEQP01";
+export const PLAYER_EQUIPMENT_VERSION = 1;
 export const PLAYER_SESSION_MAGIC = "NCKSES01";
-export const PLAYER_NAME_MAX_CHARS = 100;
+export const PLAYER_NAME_MAX_CHARS = 32;
 export const PLAYER_NAME_MAX_BYTES = 300;
 export const APPEARANCE_TITLE_MAX_BYTES = 96;
 export const APPEARANCE_MODEL_CODE_MAX_BYTES = 2048;
@@ -221,28 +225,55 @@ export function derivePlayerSessionPda({
   );
 }
 
+export async function deriveUsernameIndexPda({
+  playerName,
+  programId = NICECHUNK_PLAYER_PROGRAM_ID,
+}: {
+  playerName: string;
+  programId?: PublicKey;
+}): Promise<[PublicKey, number]> {
+  const normalized = encodePlayerName(playerName).toString("utf8");
+  const canonical = normalized.replace(/[A-Z]/g, (character) => character.toLowerCase());
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new Error("WebCrypto SHA-256 is unavailable.");
+  const digest = Buffer.from(await subtle.digest("SHA-256", Buffer.from(canonical, "utf8")));
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from(USERNAME_INDEX_SEED), digest],
+    programId,
+  );
+}
+
 export function createInitializePlayerInstruction({
   payer,
   playerName = "",
+  usernameIndex = null,
   playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
   coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
 }: {
   payer: PublicKey;
   playerName?: string;
+  usernameIndex?: PublicKey | null;
   playerProgramId?: PublicKey;
   coreProgramId?: PublicKey;
 }): TransactionInstruction {
   const [playerProfile] = derivePlayerProfilePda(payer, playerProgramId);
   const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
   const nameBytes = encodePlayerName(playerName);
+  if (nameBytes.length && !usernameIndex) {
+    throw new Error("Username index PDA is required for non-empty player names.");
+  }
+  const keys = [
+    { pubkey: payer, isSigner: true, isWritable: true },
+    { pubkey: playerProfile, isSigner: false, isWritable: true },
+    { pubkey: globalConfig, isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+  ];
+  if (nameBytes.length && usernameIndex) {
+    keys.push({ pubkey: usernameIndex, isSigner: false, isWritable: true });
+  }
   return new TransactionInstruction({
     programId: playerProgramId,
-    keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
-      { pubkey: playerProfile, isSigner: false, isWritable: true },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
+    keys,
     data: Buffer.concat([Buffer.from([0]), nameBytes]),
   });
 }
@@ -250,24 +281,37 @@ export function createInitializePlayerInstruction({
 export function createSetPlayerNameInstruction({
   authority,
   playerName,
+  usernameIndex = null,
   playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
   coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
 }: {
   authority: PublicKey;
   playerName: string;
+  usernameIndex?: PublicKey | null;
   playerProgramId?: PublicKey;
   coreProgramId?: PublicKey;
 }): TransactionInstruction {
   const [playerProfile] = derivePlayerProfilePda(authority, playerProgramId);
   const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
+  const nameBytes = encodePlayerName(playerName);
+  if (nameBytes.length && !usernameIndex) {
+    throw new Error("Username index PDA is required for non-empty player names.");
+  }
+  const keys = [
+    { pubkey: authority, isSigner: true, isWritable: true },
+    { pubkey: playerProfile, isSigner: false, isWritable: true },
+    { pubkey: globalConfig, isSigner: false, isWritable: false },
+  ];
+  if (nameBytes.length && usernameIndex) {
+    keys.push(
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: usernameIndex, isSigner: false, isWritable: true },
+    );
+  }
   return new TransactionInstruction({
     programId: playerProgramId,
-    keys: [
-      { pubkey: authority, isSigner: true, isWritable: false },
-      { pubkey: playerProfile, isSigner: false, isWritable: true },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
-    ],
-    data: Buffer.concat([Buffer.from([7]), encodePlayerName(playerName)]),
+    keys,
+    data: Buffer.concat([Buffer.from([7]), nameBytes]),
   });
 }
 
@@ -277,6 +321,7 @@ export function createUpsertPlayerAppearanceInstruction({
   title = "",
   modelKind = 1,
   modelCode,
+  usernameIndex,
   playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
   coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
 }: {
@@ -285,6 +330,7 @@ export function createUpsertPlayerAppearanceInstruction({
   title?: string;
   modelKind?: number;
   modelCode: string;
+  usernameIndex: PublicKey;
   playerProgramId?: PublicKey;
   coreProgramId?: PublicKey;
 }): TransactionInstruction {
@@ -314,6 +360,7 @@ export function createUpsertPlayerAppearanceInstruction({
       { pubkey: appearance, isSigner: false, isWritable: true },
       { pubkey: globalConfig, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: usernameIndex, isSigner: false, isWritable: true },
     ],
     data: Buffer.concat([header, nameBytes, titleBytes, codeBytes]),
   });

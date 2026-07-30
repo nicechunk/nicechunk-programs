@@ -12,12 +12,12 @@ const env = typeof process !== "undefined" ? process.env : {};
 export const NICECHUNK_SKILLS_PROGRAM_ID = new PublicKey(
   env.NICECHUNK_SKILLS_PROGRAM_ID ?? "5gkdfmRJogdSdPrT8rvnEkPdn2N2fLBnQ6YDdegUcu3P",
 );
-export const PLAYER_SKILLS_SEED = "player-skills-v1";
-export const SKILL_RULE_TABLE_SEED = "skill-rules-v1";
-export const PLAYER_SKILLS_MAGIC = "NCKSKL01";
-export const SKILL_RULE_TABLE_MAGIC = "NCKXPR01";
-export const PLAYER_SKILLS_VERSION = 1;
-export const SKILL_RULE_TABLE_VERSION = 1;
+export const PLAYER_SKILLS_SEED = "player-skills-v2";
+export const SKILL_RULE_TABLE_SEED = "skill-rules-v2";
+export const PLAYER_SKILLS_MAGIC = "NCKSKL02";
+export const SKILL_RULE_TABLE_MAGIC = "NCKXPR02";
+export const PLAYER_SKILLS_VERSION = 2;
+export const SKILL_RULE_TABLE_VERSION = 2;
 export const PLAYER_SKILLS_LEN = 480;
 export const SKILL_RULE_TABLE_HEADER_LEN = 912;
 export const SKILL_SOURCE_RULE_LEN = 136;

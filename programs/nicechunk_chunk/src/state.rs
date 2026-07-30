@@ -30,28 +30,24 @@ pub const SURFACE_DECORATION_ROLL_DENOMINATOR: u32 = 10_000;
 pub const SURFACE_DECORATION_FLAG_MINEABLE: u8 = 1 << 1;
 pub const BACKPACK_PACKED_Y_BITS: i32 = 9;
 pub const BACKPACK_PACKED_Y_MASK: i32 = (1 << BACKPACK_PACKED_Y_BITS) - 1;
-pub const FOUNDATION_CHUNK_MAGIC: [u8; 8] = *b"NCKFCI01";
-pub const FOUNDATION_CHUNK_VERSION: u8 = 1;
-pub const FOUNDATION_CHUNK_SEED: &[u8] = b"foundation-chunk";
-pub const FOUNDATION_CHUNK_HEADER_LEN: usize = 52;
-pub const FOUNDATION_CHUNK_RECORD_LEN: usize = 52;
-pub const FOUNDATION_CHUNK_CAPACITY: u16 = 32;
-pub const FOUNDATION_CHUNK_LEN: usize =
-    FOUNDATION_CHUNK_HEADER_LEN + FOUNDATION_CHUNK_CAPACITY as usize * FOUNDATION_CHUNK_RECORD_LEN;
-pub const FOUNDATION_CHUNK_V2_MAGIC: [u8; 8] = *b"NCKFCI02";
-pub const FOUNDATION_CHUNK_V2_VERSION: u8 = 2;
-pub const FOUNDATION_CHUNK_V2_HEADER_LEN: usize = 56;
-pub const FOUNDATION_CHUNK_V2_RECORD_LEN: usize = 58;
-pub const FOUNDATION_CHUNK_V2_INITIAL_CAPACITY: u16 = 4;
-pub const FOUNDATION_CHUNK_V2_GROWTH: u16 = 4;
-pub const FOUNDATION_CHUNK_V2_MAX_CAPACITY: u16 = 64;
-pub const FOUNDATION_MIN_SIZE: u8 = 2;
-pub const FOUNDATION_MAX_SIZE: u8 = 16;
+pub const BACKPACK_MAGIC: [u8; 8] = *b"NCKBPK01";
+pub const BACKPACK_VERSION: u16 = 4;
+pub const BACKPACK_LEN: usize = 8_048;
+pub const BACKPACK_OWNER_OFFSET: usize = 20;
+pub const BACKPACK_LAST_MINE_ACTION_ID_OFFSET: usize = 106;
+pub const FOUNDATION_CHUNK_MAGIC: [u8; 8] = *b"NCKFCI02";
+pub const FOUNDATION_CHUNK_VERSION: u8 = 2;
+pub const FOUNDATION_CHUNK_SEED: &[u8] = b"foundation-chunk-v2";
+pub const FOUNDATION_CHUNK_HEADER_LEN: usize = 56;
+pub const FOUNDATION_CHUNK_RECORD_LEN: usize = 58;
+pub const FOUNDATION_CHUNK_INITIAL_CAPACITY: u16 = 4;
+pub const FOUNDATION_CHUNK_GROWTH: u16 = 4;
+pub const FOUNDATION_CHUNK_MAX_CAPACITY: u16 = 64;
 pub const GLOBAL_CONFIG_LEN: usize = 293;
 pub const GLOBAL_CONFIG_MAGIC: [u8; 8] = *b"NCKCFG01";
 pub const GLOBAL_CONFIG_DEVELOPMENT_WALLET_OFFSET: usize = 53;
-// These values are the current chunk.js canonical world. The legacy Core
-// account remains an identity anchor only and never supplies terrain values.
+// These values define the current chunk.js canonical world. GlobalConfig is
+// an identity anchor and never supplies terrain-generation values.
 pub const CANONICAL_WORLD_SEED: [u8; 32] = [
     110, 105, 99, 101, 99, 104, 117, 110, 107, 45, 109, 97, 105, 110, 110, 101, 116, 45, 48, 48,
     49, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -103,6 +99,7 @@ pub const BATCH_MINE_BASE_DROP_CHANCE_BPS: u16 = 3_500;
 pub const BATCH_MINE_DECORATION_DROP_CHANCE_BPS: u16 = 2_500;
 pub const BATCH_MINE_EXTRA_DROP_CHANCE_BPS: u16 = 5_000;
 pub const RANGE_MINE_MAX_BLOCKS: usize = 640;
+pub const RANGE_MINE_MAX_PALETTE_SIZE: usize = 8;
 pub const RANGE_MINE_MODE_DEBUG: u8 = 1;
 pub const RANGE_MINE_MODE_EXPLOSIVE: u8 = 2;
 pub const RANGE_MINE_BASE_DROP_CHANCE_BPS: u16 = 500;
@@ -112,17 +109,24 @@ pub const RANGE_MINE_MAX_REWARDS: usize = 16;
 
 pub const PLAYER_PROFILE_LEN: usize = 773;
 pub const PLAYER_PROFILE_MAGIC: [u8; 8] = *b"NCKPLY01";
+pub const PLAYER_PROFILE_VERSION: u16 = 7;
+pub const PLAYER_PROFILE_INITIALIZED_OFFSET: usize = 11;
 pub const PLAYER_PROFILE_OWNER_OFFSET: usize = 12;
 pub const PLAYER_PROFILE_GLOBAL_CONFIG_OFFSET: usize = 44;
+pub const PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT_OFFSET: usize = 102;
+pub const PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT: usize = 9;
 
 pub const PLAYER_SESSION_LEN: usize = 184;
 pub const PLAYER_SESSION_MAGIC: [u8; 8] = *b"NCKSES01";
+pub const PLAYER_SESSION_VERSION: u16 = 1;
+pub const PLAYER_SESSION_INITIALIZED_OFFSET: usize = 11;
 pub const PLAYER_SESSION_OWNER_OFFSET: usize = 12;
 pub const PLAYER_SESSION_AUTHORITY_OFFSET: usize = 44;
 pub const PLAYER_SESSION_PROFILE_OFFSET: usize = 76;
 pub const PLAYER_SESSION_GLOBAL_CONFIG_OFFSET: usize = 108;
 pub const PLAYER_SESSION_ALLOWED_ACTIONS_OFFSET: usize = 142;
 pub const PLAYER_SESSION_EXPIRES_AT_OFFSET: usize = 144;
+pub const SESSION_ACTION_BREAK_BLOCK: u8 = 1;
 pub const PLAYER_PROGRESS_MAGIC: [u8; 8] = *b"NCKPRG01";
 pub const PLAYER_PROGRESS_VERSION: u16 = 1;
 pub const PLAYER_PROGRESS_SEED: &[u8] = b"player-progress";
@@ -136,15 +140,9 @@ pub const PLAYER_PROGRESS_CREATED_AT_OFFSET: usize = 100;
 pub const PLAYER_PROGRESS_SMELTING_XP_OFFSET: usize = 108;
 pub const PLAYER_PROGRESS_EXPLORATION_XP_OFFSET: usize = 116;
 pub const PLAYER_PROGRESS_EXPLORED_CHUNK_COUNT_OFFSET: usize = 124;
-pub const PRECISION_GATHERING_XP_PER_BLOCK: u64 = 1;
+pub const PRECISION_GATHERING_XP_PER_ACTION: u64 = 1;
 pub const EXPLORATION_XP_PER_EXTRA_DROP: u64 = 1;
 pub const RESOURCE_BLOCK_VOLUME_MM3: u32 = 1_000_000;
-pub const PRECISION_GATHERING_TOTAL_XP_BY_LEVEL: [u64; 11] = [
-    0, 900, 3_481, 8_261, 15_663, 26_054, 39_764, 57_094, 78_323, 103_715, 133_517,
-];
-pub const EXPLORATION_TOTAL_XP_BY_LEVEL: [u64; 11] = [
-    0, 1_250, 4_961, 11_975, 22_994, 38_636, 59_462, 85_991, 118_707, 158_068, 204_510,
-];
 
 pub struct GlobalConfigView {
     pub development_wallet: Pubkey,
@@ -215,9 +213,45 @@ impl GeneratedBlockArgs {
 }
 
 pub fn generated_block_id_at(global_config: &GlobalConfigView, args: &GeneratedBlockArgs) -> u16 {
+    if let Some(block_id) = generated_guaranteed_deep_block_id(global_config, args) {
+        return block_id;
+    }
     let world_x = args.world_x(global_config);
     let world_z = args.world_z(global_config);
     let surface = generated_surface_height(global_config, world_x, world_z);
+
+    generated_block_id_at_surface(global_config, args, surface)
+}
+
+pub fn generated_guaranteed_deep_block_id(
+    global_config: &GlobalConfigView,
+    args: &GeneratedBlockArgs,
+) -> Option<u16> {
+    if args.y <= global_config.min_build_y {
+        return None;
+    }
+    let max_surface = global_config.min_build_y.saturating_add(8).max(
+        global_config
+            .max_terrain_height
+            .min(global_config.max_build_y.saturating_sub(1)),
+    );
+    let minimum_surface = global_config
+        .min_build_y
+        .saturating_add(8)
+        .max(global_config.sea_level.saturating_sub(28))
+        .min(max_surface);
+    let deepest_possible_coal = minimum_surface.saturating_sub(77);
+    let deep_stone_ceiling = global_config.min_build_y.saturating_add(40);
+    (args.y <= deepest_possible_coal.min(deep_stone_ceiling)).then_some(BLOCK_DEEP_STONE)
+}
+
+pub fn generated_block_id_at_surface(
+    global_config: &GlobalConfigView,
+    args: &GeneratedBlockArgs,
+    surface: i16,
+) -> u16 {
+    let world_x = args.world_x(global_config);
+    let world_z = args.world_z(global_config);
 
     if args.y <= global_config.min_build_y {
         return BLOCK_BEDROCK;
@@ -1264,7 +1298,13 @@ pub struct PlayerProfileView;
 
 impl PlayerProfileView {
     pub fn validate(data: &[u8], authority: &Pubkey, global_config: &Pubkey) -> ProgramResult {
-        if data.len() != PLAYER_PROFILE_LEN || data[0..8] != PLAYER_PROFILE_MAGIC {
+        if data.len() != PLAYER_PROFILE_LEN
+            || data[0..8] != PLAYER_PROFILE_MAGIC
+            || read_u16(data, 8) != PLAYER_PROFILE_VERSION
+            || data[PLAYER_PROFILE_INITIALIZED_OFFSET] != 1
+            || data[PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT_OFFSET] as usize
+                != PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT
+        {
             return Err(NicechunkChunkError::InvalidPlayerProfile.into());
         }
         if &data[PLAYER_PROFILE_OWNER_OFFSET..PLAYER_PROFILE_OWNER_OFFSET + 32]
@@ -1294,7 +1334,11 @@ impl PlayerSessionView {
         action: u8,
         now: i64,
     ) -> Result<Self, NicechunkChunkError> {
-        if data.len() != PLAYER_SESSION_LEN || data[0..8] != PLAYER_SESSION_MAGIC {
+        if data.len() != PLAYER_SESSION_LEN
+            || data[0..8] != PLAYER_SESSION_MAGIC
+            || read_u16(data, 8) != PLAYER_SESSION_VERSION
+            || data[PLAYER_SESSION_INITIALIZED_OFFSET] != 1
+        {
             return Err(NicechunkChunkError::InvalidPlayerSession);
         }
         if &data[PLAYER_SESSION_AUTHORITY_OFFSET..PLAYER_SESSION_AUTHORITY_OFFSET + 32]
@@ -1405,33 +1449,13 @@ impl PlayerProgressState {
         })
     }
 
-    pub fn precision_gathering_level_from_xp(xp: u64) -> u8 {
-        let mut level = 0_u8;
-        for (index, required_total) in PRECISION_GATHERING_TOTAL_XP_BY_LEVEL.iter().enumerate() {
-            if xp >= *required_total {
-                level = index as u8;
-            }
-        }
-        level.min(10)
+    pub fn precision_gathering_volume_mm3_from_level(level: u8) -> u32 {
+        let level = u32::from(level.min(10));
+        RESOURCE_BLOCK_VOLUME_MM3.saturating_mul(50 + level.saturating_mul(5)) / 100
     }
 
-    pub fn precision_gathering_volume_mm3_from_xp(xp: u64) -> u32 {
-        let level = Self::precision_gathering_level_from_xp(xp) as u32;
-        RESOURCE_BLOCK_VOLUME_MM3.saturating_mul(10 + level.saturating_mul(10)) / 100
-    }
-
-    pub fn exploration_level_from_xp(xp: u64) -> u8 {
-        let mut level = 0_u8;
-        for (index, required_total) in EXPLORATION_TOTAL_XP_BY_LEVEL.iter().enumerate() {
-            if xp >= *required_total {
-                level = index as u8;
-            }
-        }
-        level.min(10)
-    }
-
-    pub fn exploration_chance_bps(chance_bps: u16, exploration_xp: u64) -> u16 {
-        let level = Self::exploration_level_from_xp(exploration_xp) as u32;
+    pub fn exploration_chance_bps(chance_bps: u16, exploration_level: u8) -> u16 {
+        let level = u32::from(exploration_level.min(10));
         let weighted = (chance_bps as u32)
             .saturating_mul(100_u32.saturating_add(level.saturating_mul(10)))
             / 100;
@@ -1499,6 +1523,27 @@ pub struct MineBlockArgs {
     pub expected_block_id: u16,
 }
 
+#[derive(Clone, Copy)]
+pub struct RewardMineArgs {
+    pub action_id: u64,
+    pub block: MineBlockArgs,
+}
+
+impl RewardMineArgs {
+    pub const LEN: usize = 8 + MineBlockArgs::LEN;
+
+    pub fn unpack(data: &[u8]) -> Result<Self, NicechunkChunkError> {
+        if data.len() != Self::LEN {
+            return Err(NicechunkChunkError::InvalidInstruction);
+        }
+        let action_id = read_mining_action_id(data, 0)?;
+        Ok(Self {
+            action_id,
+            block: MineBlockArgs::unpack(&data[8..])?,
+        })
+    }
+}
+
 impl MineBlockArgs {
     pub const LEN: usize = 12;
 
@@ -1549,11 +1594,13 @@ impl MineBlockArgs {
 }
 
 pub struct BatchMineArgs {
+    pub action_id: u64,
     pub mode: u8,
     pub blocks: Vec<MineBlockArgs>,
 }
 
 pub struct RangeMineArgs {
+    pub action_id: u64,
     pub mode: u8,
     pub min_x: i32,
     pub min_z: i32,
@@ -1563,24 +1610,24 @@ pub struct RangeMineArgs {
 }
 
 impl RangeMineArgs {
-    const HEADER_LEN: usize = 15;
-    const BLOCK_ID_BITS: usize = 6;
+    const HEADER_LEN: usize = 23;
 
     pub fn unpack(data: &[u8]) -> Result<Self, NicechunkChunkError> {
         if data.len() < Self::HEADER_LEN {
             return Err(NicechunkChunkError::InvalidRangeMine);
         }
-        let mode = data[0];
+        let action_id = read_mining_action_id(data, 0)?;
+        let mode = data[8];
         if mode != RANGE_MINE_MODE_DEBUG || cfg!(feature = "mainnet") {
             return Err(NicechunkChunkError::InvalidRangeMine);
         }
 
-        let min_x = read_i32(data, 1);
-        let min_y = read_i16(data, 5);
-        let min_z = read_i32(data, 7);
-        let size_x = data[11] as usize;
-        let size_y = read_u16(data, 12) as usize;
-        let size_z = data[14] as usize;
+        let min_x = read_i32(data, 9);
+        let min_y = read_i16(data, 13);
+        let min_z = read_i32(data, 15);
+        let size_x = data[19] as usize;
+        let size_y = read_u16(data, 20) as usize;
+        let size_z = data[22] as usize;
         let volume = size_x
             .checked_mul(size_y)
             .and_then(|value| value.checked_mul(size_z))
@@ -1596,7 +1643,7 @@ impl RangeMineArgs {
         }
 
         let bitmap_len = volume.div_ceil(8);
-        if data.len() < Self::HEADER_LEN + bitmap_len {
+        if data.len() < Self::HEADER_LEN + bitmap_len + 2 {
             return Err(NicechunkChunkError::InvalidRangeMine);
         }
         let bitmap = &data[Self::HEADER_LEN..Self::HEADER_LEN + bitmap_len];
@@ -1611,27 +1658,58 @@ impl RangeMineArgs {
             return Err(NicechunkChunkError::InvalidRangeMine);
         }
 
-        let block_id_len = (selected_count * Self::BLOCK_ID_BITS).div_ceil(8);
-        let expected_len = Self::HEADER_LEN + bitmap_len + block_id_len;
+        let palette_offset = Self::HEADER_LEN + bitmap_len;
+        let palette_count = data[palette_offset] as usize;
+        if palette_count == 0
+            || palette_count > RANGE_MINE_MAX_PALETTE_SIZE
+            || palette_count > selected_count
+        {
+            return Err(NicechunkChunkError::InvalidRangeMine);
+        }
+        let palette_end = palette_offset + 1 + palette_count;
+        if data.len() < palette_end {
+            return Err(NicechunkChunkError::InvalidRangeMine);
+        }
+        let palette = &data[palette_offset + 1..palette_end];
+        if palette.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(NicechunkChunkError::InvalidRangeMine);
+        }
+        if palette.iter().any(|block_id| {
+            *block_id > 63
+                || matches!(
+                    u16::from(*block_id),
+                    BLOCK_AIR | BLOCK_WATER | BLOCK_BEDROCK
+                )
+        }) {
+            return Err(NicechunkChunkError::UnmineableBlock);
+        }
+
+        let palette_index_bits = palette_index_bits(palette_count);
+        let palette_index_len = (selected_count * palette_index_bits).div_ceil(8);
+        let expected_len = palette_end + palette_index_len;
         if data.len() != expected_len {
             return Err(NicechunkChunkError::InvalidRangeMine);
         }
-        let block_ids = &data[Self::HEADER_LEN + bitmap_len..];
-        if !unused_high_bits_are_zero(block_ids, selected_count * Self::BLOCK_ID_BITS) {
+        let palette_indexes = &data[palette_end..];
+        if !unused_high_bits_are_zero(palette_indexes, selected_count * palette_index_bits) {
             return Err(NicechunkChunkError::InvalidRangeMine);
         }
 
         let layer_area = size_x * size_z;
         let mut blocks = Vec::with_capacity(selected_count);
         let mut selected_index = 0;
+        let mut used_palette_mask = 0_u16;
         for volume_index in 0..volume {
             if !packed_bit(bitmap, volume_index) {
                 continue;
             }
-            let block_id = packed_six_bit_value(block_ids, selected_index);
-            if matches!(u16::from(block_id), BLOCK_AIR | BLOCK_WATER | BLOCK_BEDROCK) {
-                return Err(NicechunkChunkError::UnmineableBlock);
+            let palette_index =
+                packed_palette_index(palette_indexes, selected_index, palette_index_bits) as usize;
+            if palette_index >= palette_count {
+                return Err(NicechunkChunkError::InvalidRangeMine);
             }
+            used_palette_mask |= 1_u16 << palette_index;
+            let block_id = palette[palette_index];
             let y_offset = volume_index / layer_area;
             let within_layer = volume_index % layer_area;
             let z_offset = within_layer / size_x;
@@ -1654,7 +1732,11 @@ impl RangeMineArgs {
             });
             selected_index += 1;
         }
+        if used_palette_mask != (1_u16 << palette_count) - 1 {
+            return Err(NicechunkChunkError::InvalidRangeMine);
+        }
         Ok(Self {
+            action_id,
             mode,
             min_x,
             min_z,
@@ -1671,13 +1753,24 @@ fn packed_bit(data: &[u8], bit_index: usize) -> bool {
         .unwrap_or(false)
 }
 
-fn packed_six_bit_value(data: &[u8], value_index: usize) -> u8 {
-    let bit_index = value_index * RangeMineArgs::BLOCK_ID_BITS;
+fn palette_index_bits(palette_count: usize) -> usize {
+    if palette_count <= 1 {
+        0
+    } else {
+        usize::BITS as usize - (palette_count - 1).leading_zeros() as usize
+    }
+}
+
+fn packed_palette_index(data: &[u8], value_index: usize, bits_per_value: usize) -> u8 {
+    if bits_per_value == 0 {
+        return 0;
+    }
+    let bit_index = value_index * bits_per_value;
     let byte_index = bit_index / 8;
     let shift = bit_index % 8;
     let low = u16::from(data.get(byte_index).copied().unwrap_or_default());
     let high = u16::from(data.get(byte_index + 1).copied().unwrap_or_default());
-    (((low | (high << 8)) >> shift) & 0x3f) as u8
+    (((low | (high << 8)) >> shift) & ((1_u16 << bits_per_value) - 1)) as u8
 }
 
 fn unused_high_bits_are_zero(data: &[u8], used_bits: usize) -> bool {
@@ -1691,27 +1784,63 @@ fn unused_high_bits_are_zero(data: &[u8], used_bits: usize) -> bool {
 
 impl BatchMineArgs {
     pub fn unpack(data: &[u8]) -> Result<Self, NicechunkChunkError> {
-        if data.len() < 2 {
+        if data.len() < 10 {
             return Err(NicechunkChunkError::InvalidBatchMine);
         }
-        let mode = data[0];
-        let count = data[1] as usize;
+        let action_id = read_mining_action_id(data, 0)?;
+        let mode = data[8];
+        let count = data[9] as usize;
         if mode != BATCH_MINE_MODE_DEBUG
             || count == 0
             || count > BATCH_MINE_MAX_BLOCKS
-            || data.len() != 2 + count * MineBlockArgs::LEN
+            || data.len() != 10 + count * MineBlockArgs::LEN
         {
             return Err(NicechunkChunkError::InvalidBatchMine);
         }
         let mut blocks = Vec::with_capacity(count);
         for index in 0..count {
-            let offset = 2 + index * MineBlockArgs::LEN;
+            let offset = 10 + index * MineBlockArgs::LEN;
             blocks.push(MineBlockArgs::unpack(
                 &data[offset..offset + MineBlockArgs::LEN],
             )?);
         }
-        Ok(Self { mode, blocks })
+        Ok(Self {
+            action_id,
+            mode,
+            blocks,
+        })
     }
+}
+
+pub struct BackpackMiningState;
+
+impl BackpackMiningState {
+    pub fn is_new_action(
+        data: &[u8],
+        owner: &Pubkey,
+        action_id: u64,
+    ) -> Result<bool, NicechunkChunkError> {
+        if action_id == 0 {
+            return Err(NicechunkChunkError::InvalidMiningActionId);
+        }
+        if data.len() != BACKPACK_LEN
+            || data[0..8] != BACKPACK_MAGIC
+            || read_u16(data, 8) != BACKPACK_VERSION
+            || data[11] != 1
+            || &data[BACKPACK_OWNER_OFFSET..BACKPACK_OWNER_OFFSET + 32] != owner.as_ref()
+        {
+            return Err(NicechunkChunkError::InvalidBackpackData);
+        }
+        Ok(read_u64(data, BACKPACK_LAST_MINE_ACTION_ID_OFFSET) != action_id)
+    }
+}
+
+fn read_mining_action_id(data: &[u8], offset: usize) -> Result<u64, NicechunkChunkError> {
+    let action_id = read_u64(data, offset);
+    if action_id == 0 {
+        return Err(NicechunkChunkError::InvalidMiningActionId);
+    }
+    Ok(action_id)
 }
 
 pub fn batch_mine_reward_passes(
@@ -1765,244 +1894,13 @@ pub struct FoundationRecord {
     pub min_x: i32,
     pub min_z: i32,
     pub surface_y: i16,
-    pub width: u8,
-    pub depth: u8,
-}
-
-impl FoundationRecord {
-    pub fn pack(&self, dst: &mut [u8]) -> ProgramResult {
-        if dst.len() != FOUNDATION_CHUNK_RECORD_LEN {
-            return Err(NicechunkChunkError::InvalidFoundationChunkData.into());
-        }
-        dst.fill(0);
-        dst[0..32].copy_from_slice(self.owner.as_ref());
-        dst[32..40].copy_from_slice(&self.foundation_id.to_le_bytes());
-        dst[40..44].copy_from_slice(&self.min_x.to_le_bytes());
-        dst[44..48].copy_from_slice(&self.min_z.to_le_bytes());
-        dst[48..50].copy_from_slice(&self.surface_y.to_le_bytes());
-        dst[50] = self.width;
-        dst[51] = self.depth;
-        Ok(())
-    }
-
-    pub fn unpack(src: &[u8]) -> Result<Self, NicechunkChunkError> {
-        if src.len() != FOUNDATION_CHUNK_RECORD_LEN {
-            return Err(NicechunkChunkError::InvalidFoundationChunkData);
-        }
-        let record = Self {
-            owner: Pubkey::new_from_array(
-                src[0..32]
-                    .try_into()
-                    .map_err(|_| NicechunkChunkError::InvalidFoundationChunkData)?,
-            ),
-            foundation_id: read_u64(src, 32),
-            min_x: read_i32(src, 40),
-            min_z: read_i32(src, 44),
-            surface_y: read_i16(src, 48),
-            width: src[50],
-            depth: src[51],
-        };
-        if !(FOUNDATION_MIN_SIZE..=FOUNDATION_MAX_SIZE).contains(&record.width)
-            || !(FOUNDATION_MIN_SIZE..=FOUNDATION_MAX_SIZE).contains(&record.depth)
-        {
-            return Err(NicechunkChunkError::InvalidFoundationChunkData);
-        }
-        Ok(record)
-    }
-
-    pub fn overlaps(&self, other: &Self) -> bool {
-        self.min_x <= other.max_x()
-            && self.max_x() >= other.min_x
-            && self.min_z <= other.max_z()
-            && self.max_z() >= other.min_z
-    }
-
-    pub fn protects(&self, world_x: i32, world_y: i16, world_z: i32) -> bool {
-        world_y == self.surface_y.saturating_sub(1)
-            && world_x >= self.min_x
-            && world_x <= self.max_x()
-            && world_z >= self.min_z
-            && world_z <= self.max_z()
-    }
-
-    fn max_x(&self) -> i32 {
-        self.min_x.saturating_add(self.width as i32 - 1)
-    }
-
-    fn max_z(&self) -> i32 {
-        self.min_z.saturating_add(self.depth as i32 - 1)
-    }
-}
-
-pub struct FoundationChunkState;
-
-impl FoundationChunkState {
-    pub fn pack_empty(
-        dst: &mut [u8],
-        bump: u8,
-        global_config: &Pubkey,
-        chunk_x: i32,
-        chunk_z: i32,
-    ) -> ProgramResult {
-        if dst.len() != FOUNDATION_CHUNK_LEN {
-            return Err(NicechunkChunkError::InvalidFoundationChunkData.into());
-        }
-        dst.fill(0);
-        dst[0..8].copy_from_slice(&FOUNDATION_CHUNK_MAGIC);
-        dst[8] = FOUNDATION_CHUNK_VERSION;
-        dst[9] = bump;
-        dst[10..12].copy_from_slice(&0_u16.to_le_bytes());
-        dst[12..44].copy_from_slice(global_config.as_ref());
-        dst[44..48].copy_from_slice(&chunk_x.to_le_bytes());
-        dst[48..52].copy_from_slice(&chunk_z.to_le_bytes());
-        Ok(())
-    }
-
-    pub fn validate(
-        data: &[u8],
-        global_config: &Pubkey,
-        chunk_x: i32,
-        chunk_z: i32,
-    ) -> Result<u16, NicechunkChunkError> {
-        if data.len() != FOUNDATION_CHUNK_LEN
-            || data[0..8] != FOUNDATION_CHUNK_MAGIC
-            || data[8] != FOUNDATION_CHUNK_VERSION
-            || &data[12..44] != global_config.as_ref()
-            || read_i32(data, 44) != chunk_x
-            || read_i32(data, 48) != chunk_z
-        {
-            return Err(NicechunkChunkError::InvalidFoundationChunkData);
-        }
-        let count = read_u16(data, 10);
-        if count > FOUNDATION_CHUNK_CAPACITY {
-            return Err(NicechunkChunkError::InvalidFoundationChunkData);
-        }
-        Ok(count)
-    }
-
-    pub fn append(
-        data: &mut [u8],
-        global_config: &Pubkey,
-        chunk_x: i32,
-        chunk_z: i32,
-        record: &FoundationRecord,
-    ) -> ProgramResult {
-        let count = Self::validate(data, global_config, chunk_x, chunk_z)?;
-        if count >= FOUNDATION_CHUNK_CAPACITY {
-            return Err(NicechunkChunkError::FoundationChunkCapacityExceeded.into());
-        }
-        let offset = FOUNDATION_CHUNK_HEADER_LEN + count as usize * FOUNDATION_CHUNK_RECORD_LEN;
-        record.pack(&mut data[offset..offset + FOUNDATION_CHUNK_RECORD_LEN])?;
-        data[10..12].copy_from_slice(&count.saturating_add(1).to_le_bytes());
-        Ok(())
-    }
-
-    pub fn overlaps(
-        data: &[u8],
-        global_config: &Pubkey,
-        chunk_x: i32,
-        chunk_z: i32,
-        candidate: &FoundationRecord,
-    ) -> Result<bool, NicechunkChunkError> {
-        let count = Self::validate(data, global_config, chunk_x, chunk_z)?;
-        for index in 0..count as usize {
-            if Self::record_at(data, index)?.overlaps(candidate) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    pub fn protects(
-        data: &[u8],
-        global_config: &Pubkey,
-        chunk_x: i32,
-        chunk_z: i32,
-        world_x: i32,
-        world_y: i16,
-        world_z: i32,
-    ) -> Result<bool, NicechunkChunkError> {
-        if data.len() >= 8 && data[0..8] == FOUNDATION_CHUNK_V2_MAGIC {
-            return FoundationChunkV2State::protects(
-                data,
-                global_config,
-                chunk_x,
-                chunk_z,
-                world_x,
-                world_y,
-                world_z,
-            );
-        }
-        let count = Self::validate(data, global_config, chunk_x, chunk_z)?;
-        for index in 0..count as usize {
-            if Self::record_at(data, index)?.protects(world_x, world_y, world_z) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    pub fn protects_any(
-        data: &[u8],
-        global_config: &Pubkey,
-        chunk_x: i32,
-        chunk_z: i32,
-        blocks: &[MineBlockArgs],
-    ) -> Result<bool, NicechunkChunkError> {
-        if data.len() >= 8 && data[0..8] == FOUNDATION_CHUNK_V2_MAGIC {
-            return FoundationChunkV2State::protects_any(
-                data,
-                global_config,
-                chunk_x,
-                chunk_z,
-                blocks,
-            );
-        }
-        let count = Self::validate(data, global_config, chunk_x, chunk_z)?;
-        for index in 0..count as usize {
-            let record = Self::record_at(data, index)?;
-            if blocks
-                .iter()
-                .any(|block| record.protects(block.world_x, block.world_y, block.world_z))
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    fn record_at(data: &[u8], index: usize) -> Result<FoundationRecord, NicechunkChunkError> {
-        let offset = FOUNDATION_CHUNK_HEADER_LEN + index * FOUNDATION_CHUNK_RECORD_LEN;
-        FoundationRecord::unpack(&data[offset..offset + FOUNDATION_CHUNK_RECORD_LEN])
-    }
-
-    pub fn records(
-        data: &[u8],
-        global_config: &Pubkey,
-        chunk_x: i32,
-        chunk_z: i32,
-    ) -> Result<Vec<FoundationRecord>, NicechunkChunkError> {
-        let count = Self::validate(data, global_config, chunk_x, chunk_z)?;
-        (0..count as usize)
-            .map(|index| Self::record_at(data, index))
-            .collect()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FoundationRecordV2 {
-    pub owner: Pubkey,
-    pub foundation_id: u64,
-    pub min_x: i32,
-    pub min_z: i32,
-    pub surface_y: i16,
     pub width: u32,
     pub depth: u32,
 }
 
-impl FoundationRecordV2 {
+impl FoundationRecord {
     pub fn pack(&self, dst: &mut [u8]) -> ProgramResult {
-        if dst.len() != FOUNDATION_CHUNK_V2_RECORD_LEN
+        if dst.len() != FOUNDATION_CHUNK_RECORD_LEN
             || self.foundation_id == 0
             || self.width < 2
             || self.depth < 2
@@ -2023,7 +1921,7 @@ impl FoundationRecordV2 {
     }
 
     pub fn unpack(src: &[u8]) -> Result<Self, NicechunkChunkError> {
-        if src.len() != FOUNDATION_CHUNK_V2_RECORD_LEN {
+        if src.len() != FOUNDATION_CHUNK_RECORD_LEN {
             return Err(NicechunkChunkError::InvalidFoundationChunkData);
         }
         let record = Self {
@@ -2050,18 +1948,6 @@ impl FoundationRecordV2 {
         Ok(record)
     }
 
-    pub fn from_legacy(record: &FoundationRecord) -> Self {
-        Self {
-            owner: record.owner,
-            foundation_id: record.foundation_id,
-            min_x: record.min_x,
-            min_z: record.min_z,
-            surface_y: record.surface_y,
-            width: u32::from(record.width),
-            depth: u32::from(record.depth),
-        }
-    }
-
     pub fn max_x(&self) -> Option<i32> {
         checked_u32_axis_end(self.min_x, self.width)
     }
@@ -2084,36 +1970,16 @@ impl FoundationRecordV2 {
             && self.min_z <= other.max_z().unwrap_or(i32::MIN)
             && self.max_z().unwrap_or(i32::MAX) >= other.min_z
     }
-
-    pub fn supersedes_legacy_index(&self, legacy: &Self, chunk_size: i32) -> bool {
-        if chunk_size <= 0
-            || self.owner != legacy.owner
-            || self.foundation_id == legacy.foundation_id
-            || self.surface_y != legacy.surface_y
-            || !self.overlaps(legacy)
-        {
-            return false;
-        }
-        let (Some(self_max_x), Some(self_max_z), Some(legacy_max_x), Some(legacy_max_z)) =
-            (self.max_x(), self.max_z(), legacy.max_x(), legacy.max_z())
-        else {
-            return false;
-        };
-        self.min_x.div_euclid(chunk_size) == legacy.min_x.div_euclid(chunk_size)
-            && self_max_x.div_euclid(chunk_size) == legacy_max_x.div_euclid(chunk_size)
-            && self.min_z.div_euclid(chunk_size) == legacy.min_z.div_euclid(chunk_size)
-            && self_max_z.div_euclid(chunk_size) == legacy_max_z.div_euclid(chunk_size)
-    }
 }
 
-pub struct FoundationChunkV2State;
+pub struct FoundationChunkState;
 
-impl FoundationChunkV2State {
+impl FoundationChunkState {
     pub fn len(capacity: u16) -> Result<usize, NicechunkChunkError> {
-        if capacity == 0 || capacity > FOUNDATION_CHUNK_V2_MAX_CAPACITY {
+        if capacity == 0 || capacity > FOUNDATION_CHUNK_MAX_CAPACITY {
             return Err(NicechunkChunkError::InvalidFoundationChunkData);
         }
-        Ok(FOUNDATION_CHUNK_V2_HEADER_LEN + capacity as usize * FOUNDATION_CHUNK_V2_RECORD_LEN)
+        Ok(FOUNDATION_CHUNK_HEADER_LEN + capacity as usize * FOUNDATION_CHUNK_RECORD_LEN)
     }
 
     pub fn pack_empty(
@@ -2128,8 +1994,8 @@ impl FoundationChunkV2State {
             return Err(NicechunkChunkError::InvalidFoundationChunkData.into());
         }
         dst.fill(0);
-        dst[0..8].copy_from_slice(&FOUNDATION_CHUNK_V2_MAGIC);
-        dst[8] = FOUNDATION_CHUNK_V2_VERSION;
+        dst[0..8].copy_from_slice(&FOUNDATION_CHUNK_MAGIC);
+        dst[8] = FOUNDATION_CHUNK_VERSION;
         dst[9] = bump;
         dst[12..14].copy_from_slice(&capacity.to_le_bytes());
         dst[16..48].copy_from_slice(global_config.as_ref());
@@ -2144,9 +2010,9 @@ impl FoundationChunkV2State {
         chunk_x: i32,
         chunk_z: i32,
     ) -> Result<(u16, u16), NicechunkChunkError> {
-        if data.len() < FOUNDATION_CHUNK_V2_HEADER_LEN
-            || data[0..8] != FOUNDATION_CHUNK_V2_MAGIC
-            || data[8] != FOUNDATION_CHUNK_V2_VERSION
+        if data.len() < FOUNDATION_CHUNK_HEADER_LEN
+            || data[0..8] != FOUNDATION_CHUNK_MAGIC
+            || data[8] != FOUNDATION_CHUNK_VERSION
             || &data[16..48] != global_config.as_ref()
             || read_i32(data, 48) != chunk_x
             || read_i32(data, 52) != chunk_z
@@ -2166,7 +2032,7 @@ impl FoundationChunkV2State {
         global_config: &Pubkey,
         chunk_x: i32,
         chunk_z: i32,
-        record: &FoundationRecordV2,
+        record: &FoundationRecord,
     ) -> ProgramResult {
         let (count, capacity) = Self::validate(data, global_config, chunk_x, chunk_z)?;
         let mut existing_index = None;
@@ -2184,15 +2050,14 @@ impl FoundationChunkV2State {
             }
         }
         if let Some(index) = existing_index {
-            let offset = FOUNDATION_CHUNK_V2_HEADER_LEN + index * FOUNDATION_CHUNK_V2_RECORD_LEN;
-            return record.pack(&mut data[offset..offset + FOUNDATION_CHUNK_V2_RECORD_LEN]);
+            let offset = FOUNDATION_CHUNK_HEADER_LEN + index * FOUNDATION_CHUNK_RECORD_LEN;
+            return record.pack(&mut data[offset..offset + FOUNDATION_CHUNK_RECORD_LEN]);
         }
         if count >= capacity {
             return Err(NicechunkChunkError::FoundationChunkCapacityExceeded.into());
         }
-        let offset =
-            FOUNDATION_CHUNK_V2_HEADER_LEN + count as usize * FOUNDATION_CHUNK_V2_RECORD_LEN;
-        record.pack(&mut data[offset..offset + FOUNDATION_CHUNK_V2_RECORD_LEN])?;
+        let offset = FOUNDATION_CHUNK_HEADER_LEN + count as usize * FOUNDATION_CHUNK_RECORD_LEN;
+        record.pack(&mut data[offset..offset + FOUNDATION_CHUNK_RECORD_LEN])?;
         data[10..12].copy_from_slice(&count.saturating_add(1).to_le_bytes());
         Ok(())
     }
@@ -2243,13 +2108,12 @@ impl FoundationChunkV2State {
         let Some(index) = found else {
             return Ok(());
         };
-        let offset = FOUNDATION_CHUNK_V2_HEADER_LEN + index * FOUNDATION_CHUNK_V2_RECORD_LEN;
-        let used_end =
-            FOUNDATION_CHUNK_V2_HEADER_LEN + count as usize * FOUNDATION_CHUNK_V2_RECORD_LEN;
+        let offset = FOUNDATION_CHUNK_HEADER_LEN + index * FOUNDATION_CHUNK_RECORD_LEN;
+        let used_end = FOUNDATION_CHUNK_HEADER_LEN + count as usize * FOUNDATION_CHUNK_RECORD_LEN;
         if index + 1 < count as usize {
-            data.copy_within(offset + FOUNDATION_CHUNK_V2_RECORD_LEN..used_end, offset);
+            data.copy_within(offset + FOUNDATION_CHUNK_RECORD_LEN..used_end, offset);
         }
-        data[used_end - FOUNDATION_CHUNK_V2_RECORD_LEN..used_end].fill(0);
+        data[used_end - FOUNDATION_CHUNK_RECORD_LEN..used_end].fill(0);
         data[10..12].copy_from_slice(&count.saturating_sub(1).to_le_bytes());
         Ok(())
     }
@@ -2297,16 +2161,16 @@ impl FoundationChunkV2State {
         global_config: &Pubkey,
         chunk_x: i32,
         chunk_z: i32,
-    ) -> Result<Vec<FoundationRecordV2>, NicechunkChunkError> {
+    ) -> Result<Vec<FoundationRecord>, NicechunkChunkError> {
         let (count, _) = Self::validate(data, global_config, chunk_x, chunk_z)?;
         (0..count as usize)
             .map(|index| Self::record_at(data, index))
             .collect()
     }
 
-    fn record_at(data: &[u8], index: usize) -> Result<FoundationRecordV2, NicechunkChunkError> {
-        let offset = FOUNDATION_CHUNK_V2_HEADER_LEN + index * FOUNDATION_CHUNK_V2_RECORD_LEN;
-        FoundationRecordV2::unpack(&data[offset..offset + FOUNDATION_CHUNK_V2_RECORD_LEN])
+    fn record_at(data: &[u8], index: usize) -> Result<FoundationRecord, NicechunkChunkError> {
+        let offset = FOUNDATION_CHUNK_HEADER_LEN + index * FOUNDATION_CHUNK_RECORD_LEN;
+        FoundationRecord::unpack(&data[offset..offset + FOUNDATION_CHUNK_RECORD_LEN])
     }
 }
 
@@ -2577,10 +2441,33 @@ pub fn extra_drop_from_table(
     world_y: i16,
     world_z: i32,
     source_block_id: u16,
-    exploration_xp: u64,
+    exploration_level: u8,
+) -> Result<Option<ResourceExtraDrop>, NicechunkChunkError> {
+    let surface = generated_surface_height(global_config, world_x, world_z);
+    extra_drop_from_table_at_surface(
+        global_config,
+        data,
+        world_x,
+        world_y,
+        world_z,
+        surface,
+        source_block_id,
+        exploration_level,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn extra_drop_from_table_at_surface(
+    global_config: &GlobalConfigView,
+    data: &[u8],
+    world_x: i32,
+    world_y: i16,
+    world_z: i32,
+    surface: i16,
+    source_block_id: u16,
+    exploration_level: u8,
 ) -> Result<Option<ResourceExtraDrop>, NicechunkChunkError> {
     let rule_count = ResourceDropTableState::validate_header(data)?;
-    let surface = generated_surface_height(global_config, world_x, world_z);
     let altitude = world_y.saturating_sub(global_config.sea_level);
     let depth = surface.saturating_sub(world_y);
     for index in 0..rule_count {
@@ -2602,7 +2489,7 @@ pub fn extra_drop_from_table(
             700_u32.saturating_add(rule.salt as u32),
         ) % RESOURCE_DROP_CHANCE_DENOMINATOR;
         let chance_bps =
-            PlayerProgressState::exploration_chance_bps(rule.chance_bps, exploration_xp);
+            PlayerProgressState::exploration_chance_bps(rule.chance_bps, exploration_level);
         if roll < chance_bps as u32 {
             let span = rule.max_volume_mm3.saturating_sub(rule.min_volume_mm3);
             let volume_mm3 = if span == 0 {
@@ -2872,8 +2759,18 @@ pub fn surface_decoration_from_table(
     world_x: i32,
     world_z: i32,
 ) -> Result<Option<SurfaceDecorationMatch>, NicechunkChunkError> {
-    let (count, _) = SurfaceDecorationTableState::validate_header(data)?;
     let surface_y = generated_surface_height(global_config, world_x, world_z);
+    surface_decoration_from_table_at_surface(global_config, data, world_x, world_z, surface_y)
+}
+
+pub fn surface_decoration_from_table_at_surface(
+    global_config: &GlobalConfigView,
+    data: &[u8],
+    world_x: i32,
+    world_z: i32,
+    surface_y: i16,
+) -> Result<Option<SurfaceDecorationMatch>, NicechunkChunkError> {
+    let (count, _) = SurfaceDecorationTableState::validate_header(data)?;
     if generated_water_level(global_config, world_x, world_z, surface_y)
         .map(|water_y| water_y > surface_y)
         .unwrap_or(false)
@@ -3041,6 +2938,84 @@ mod tests {
         }
     }
 
+    fn test_player_profile(owner: &Pubkey, global_config: &Pubkey) -> Vec<u8> {
+        let mut data = vec![0_u8; PLAYER_PROFILE_LEN];
+        data[0..8].copy_from_slice(&PLAYER_PROFILE_MAGIC);
+        data[8..10].copy_from_slice(&PLAYER_PROFILE_VERSION.to_le_bytes());
+        data[PLAYER_PROFILE_INITIALIZED_OFFSET] = 1;
+        data[PLAYER_PROFILE_OWNER_OFFSET..PLAYER_PROFILE_OWNER_OFFSET + 32]
+            .copy_from_slice(owner.as_ref());
+        data[PLAYER_PROFILE_GLOBAL_CONFIG_OFFSET..PLAYER_PROFILE_GLOBAL_CONFIG_OFFSET + 32]
+            .copy_from_slice(global_config.as_ref());
+        data[PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT_OFFSET] =
+            PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT as u8;
+        data
+    }
+
+    fn test_player_session(
+        owner: &Pubkey,
+        authority: &Pubkey,
+        profile: &Pubkey,
+        global_config: &Pubkey,
+    ) -> Vec<u8> {
+        let mut data = vec![0_u8; PLAYER_SESSION_LEN];
+        data[0..8].copy_from_slice(&PLAYER_SESSION_MAGIC);
+        data[8..10].copy_from_slice(&PLAYER_SESSION_VERSION.to_le_bytes());
+        data[PLAYER_SESSION_INITIALIZED_OFFSET] = 1;
+        data[PLAYER_SESSION_OWNER_OFFSET..PLAYER_SESSION_OWNER_OFFSET + 32]
+            .copy_from_slice(owner.as_ref());
+        data[PLAYER_SESSION_AUTHORITY_OFFSET..PLAYER_SESSION_AUTHORITY_OFFSET + 32]
+            .copy_from_slice(authority.as_ref());
+        data[PLAYER_SESSION_PROFILE_OFFSET..PLAYER_SESSION_PROFILE_OFFSET + 32]
+            .copy_from_slice(profile.as_ref());
+        data[PLAYER_SESSION_GLOBAL_CONFIG_OFFSET..PLAYER_SESSION_GLOBAL_CONFIG_OFFSET + 32]
+            .copy_from_slice(global_config.as_ref());
+        data[PLAYER_SESSION_ALLOWED_ACTIONS_OFFSET..PLAYER_SESSION_ALLOWED_ACTIONS_OFFSET + 2]
+            .copy_from_slice(&(1_u16 << SESSION_ACTION_BREAK_BLOCK).to_le_bytes());
+        data[PLAYER_SESSION_EXPIRES_AT_OFFSET..PLAYER_SESSION_EXPIRES_AT_OFFSET + 8]
+            .copy_from_slice(&200_i64.to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn player_views_reject_retired_or_uninitialized_layouts() {
+        let owner = Pubkey::new_unique();
+        let authority = Pubkey::new_unique();
+        let profile = Pubkey::new_unique();
+        let global_config = Pubkey::new_unique();
+        let profile_data = test_player_profile(&owner, &global_config);
+        PlayerProfileView::validate(&profile_data, &owner, &global_config).unwrap();
+
+        let mut retired_profile = profile_data.clone();
+        retired_profile[8..10].copy_from_slice(&(PLAYER_PROFILE_VERSION - 1).to_le_bytes());
+        assert!(PlayerProfileView::validate(&retired_profile, &owner, &global_config).is_err());
+        let mut wrong_slot_count = profile_data;
+        wrong_slot_count[PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT_OFFSET] = 0;
+        assert!(PlayerProfileView::validate(&wrong_slot_count, &owner, &global_config).is_err());
+
+        let session_data = test_player_session(&owner, &authority, &profile, &global_config);
+        PlayerSessionView::validate(
+            &session_data,
+            &authority,
+            &profile,
+            &global_config,
+            SESSION_ACTION_BREAK_BLOCK,
+            100,
+        )
+        .unwrap();
+        let mut uninitialized_session = session_data;
+        uninitialized_session[PLAYER_SESSION_INITIALIZED_OFFSET] = 0;
+        assert!(PlayerSessionView::validate(
+            &uninitialized_session,
+            &authority,
+            &profile,
+            &global_config,
+            SESSION_ACTION_BREAK_BLOCK,
+            100,
+        )
+        .is_err());
+    }
+
     #[test]
     fn generated_surface_height_is_stable() {
         let config = test_global_config_view();
@@ -3052,7 +3027,59 @@ mod tests {
     }
 
     #[test]
+    fn guaranteed_deep_shortcut_matches_full_world_generation() {
+        let config = test_global_config_view();
+        let samples = [(-4096, -4096), (-1, 1), (0, 0), (8192, -2048)];
+        let y_values = [
+            config.min_build_y + 1,
+            config.min_build_y + 5,
+            config.min_build_y + 12,
+            config.sea_level - 105,
+        ];
+        for (world_x, world_z) in samples {
+            let surface = generated_surface_height(&config, world_x, world_z);
+            for y in y_values {
+                let args = GeneratedBlockArgs {
+                    chunk_x: world_x.div_euclid(i32::from(config.chunk_size)),
+                    chunk_z: world_z.div_euclid(i32::from(config.chunk_size)),
+                    local_x: world_x.rem_euclid(i32::from(config.chunk_size)) as u8,
+                    y,
+                    local_z: world_z.rem_euclid(i32::from(config.chunk_size)) as u8,
+                };
+                assert_eq!(
+                    generated_guaranteed_deep_block_id(&config, &args),
+                    Some(BLOCK_DEEP_STONE)
+                );
+                assert_eq!(
+                    generated_block_id_at_surface(&config, &args, surface),
+                    BLOCK_DEEP_STONE
+                );
+            }
+        }
+
+        let boundary = GeneratedBlockArgs {
+            chunk_x: 0,
+            chunk_z: 0,
+            local_x: 0,
+            y: config.sea_level - 104,
+            local_z: 0,
+        };
+        assert_eq!(generated_guaranteed_deep_block_id(&config, &boundary), None);
+        assert_eq!(
+            generated_guaranteed_deep_block_id(
+                &config,
+                &GeneratedBlockArgs {
+                    y: config.min_build_y,
+                    ..boundary
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn batch_mine_args_require_debug_mode_and_compact_same_shape_records() {
+        let action_id = 42_u64;
         let blocks = [
             MineBlockArgs {
                 world_x: 7,
@@ -3067,7 +3094,9 @@ mod tests {
                 expected_block_id: BLOCK_DIRT,
             },
         ];
-        let mut payload = vec![BATCH_MINE_MODE_DEBUG, blocks.len() as u8];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&action_id.to_le_bytes());
+        payload.extend_from_slice(&[BATCH_MINE_MODE_DEBUG, blocks.len() as u8]);
         for block in blocks {
             payload.extend_from_slice(&block.world_x.to_le_bytes());
             payload.extend_from_slice(&block.world_y.to_le_bytes());
@@ -3075,12 +3104,13 @@ mod tests {
             payload.extend_from_slice(&block.expected_block_id.to_le_bytes());
         }
         let decoded = BatchMineArgs::unpack(&payload).unwrap();
+        assert_eq!(decoded.action_id, action_id);
         assert_eq!(decoded.mode, BATCH_MINE_MODE_DEBUG);
         assert_eq!(decoded.blocks.len(), 2);
         assert_eq!(decoded.blocks[1].world_x, 8);
         assert_eq!(decoded.blocks[1].expected_block_id, BLOCK_DIRT);
 
-        payload[0] = 0;
+        payload[8] = 0;
         assert!(matches!(
             BatchMineArgs::unpack(&payload),
             Err(NicechunkChunkError::InvalidBatchMine)
@@ -3093,11 +3123,13 @@ mod tests {
 
     #[test]
     fn range_mine_args_decode_a_canonical_640_block_bitmap() {
+        let action_id = 99_u64;
         let size_x = 16_u8;
         let size_y = 5_u16;
         let size_z = 8_u8;
         let count = usize::from(size_x) * usize::from(size_y) * usize::from(size_z);
-        let mut payload = Vec::with_capacity(15 + count.div_ceil(8) + (count * 6).div_ceil(8));
+        let mut payload = Vec::with_capacity(23 + count.div_ceil(8) + 2);
+        payload.extend_from_slice(&action_id.to_le_bytes());
         payload.push(RANGE_MINE_MODE_DEBUG);
         payload.extend_from_slice(&32_i32.to_le_bytes());
         payload.extend_from_slice(&100_i16.to_le_bytes());
@@ -3106,20 +3138,11 @@ mod tests {
         payload.extend_from_slice(&size_y.to_le_bytes());
         payload.push(size_z);
         payload.extend(std::iter::repeat(0xff).take(count.div_ceil(8)));
-        let mut block_ids = vec![0_u8; (count * 6).div_ceil(8)];
-        for index in 0..count {
-            let bit_index = index * 6;
-            let byte_index = bit_index / 8;
-            let shift = bit_index % 8;
-            let packed = u16::from(BLOCK_STONE) << shift;
-            block_ids[byte_index] |= packed as u8;
-            if byte_index + 1 < block_ids.len() {
-                block_ids[byte_index + 1] |= (packed >> 8) as u8;
-            }
-        }
-        payload.extend_from_slice(&block_ids);
+        payload.push(1);
+        payload.push(BLOCK_STONE as u8);
 
         let decoded = RangeMineArgs::unpack(&payload).unwrap();
+        assert_eq!(decoded.action_id, action_id);
         assert_eq!(decoded.mode, RANGE_MINE_MODE_DEBUG);
         assert_eq!(decoded.blocks.len(), RANGE_MINE_MAX_BLOCKS);
         assert_eq!(decoded.blocks[0].world_x, 32);
@@ -3135,25 +3158,109 @@ mod tests {
     }
 
     #[test]
+    fn range_mine_args_decode_palette_indexes_and_reject_noncanonical_palettes() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&99_u64.to_le_bytes());
+        payload.push(RANGE_MINE_MODE_DEBUG);
+        payload.extend_from_slice(&0_i32.to_le_bytes());
+        payload.extend_from_slice(&80_i16.to_le_bytes());
+        payload.extend_from_slice(&0_i32.to_le_bytes());
+        payload.push(4);
+        payload.extend_from_slice(&1_u16.to_le_bytes());
+        payload.push(1);
+        payload.push(0x0f);
+        payload.push(2);
+        payload.extend_from_slice(&[BLOCK_DIRT as u8, BLOCK_STONE as u8]);
+        payload.push(0b0110);
+
+        let decoded = RangeMineArgs::unpack(&payload).unwrap();
+        assert_eq!(decoded.blocks.len(), 4);
+        assert_eq!(decoded.blocks[0].expected_block_id, BLOCK_DIRT);
+        assert_eq!(decoded.blocks[1].expected_block_id, BLOCK_STONE);
+        assert_eq!(decoded.blocks[2].expected_block_id, BLOCK_STONE);
+        assert_eq!(decoded.blocks[3].expected_block_id, BLOCK_DIRT);
+
+        let mut unsorted = payload.clone();
+        unsorted[25..27].copy_from_slice(&[BLOCK_STONE as u8, BLOCK_DIRT as u8]);
+        assert!(matches!(
+            RangeMineArgs::unpack(&unsorted),
+            Err(NicechunkChunkError::InvalidRangeMine)
+        ));
+
+        let mut unused_palette_entry = payload;
+        *unused_palette_entry.last_mut().unwrap() = 0;
+        assert!(matches!(
+            RangeMineArgs::unpack(&unused_palette_entry),
+            Err(NicechunkChunkError::InvalidRangeMine)
+        ));
+    }
+
+    #[test]
     fn range_mine_args_reject_oversized_or_noncanonical_payloads() {
-        let mut oversized = vec![0_u8; 15];
-        oversized[0] = RANGE_MINE_MODE_DEBUG;
-        oversized[11] = 16;
-        oversized[12..14].copy_from_slice(&3_u16.to_le_bytes());
-        oversized[14] = 16;
+        let mut oversized = vec![0_u8; 23];
+        oversized[0..8].copy_from_slice(&1_u64.to_le_bytes());
+        oversized[8] = RANGE_MINE_MODE_DEBUG;
+        oversized[19] = 16;
+        oversized[20..22].copy_from_slice(&3_u16.to_le_bytes());
+        oversized[22] = 16;
         assert!(matches!(
             RangeMineArgs::unpack(&oversized),
             Err(NicechunkChunkError::InvalidRangeMine)
         ));
 
-        let mut empty = vec![0_u8; 16];
-        empty[0] = RANGE_MINE_MODE_DEBUG;
-        empty[11] = 1;
-        empty[12..14].copy_from_slice(&1_u16.to_le_bytes());
-        empty[14] = 1;
+        let mut empty = vec![0_u8; 24];
+        empty[0..8].copy_from_slice(&1_u64.to_le_bytes());
+        empty[8] = RANGE_MINE_MODE_DEBUG;
+        empty[19] = 1;
+        empty[20..22].copy_from_slice(&1_u16.to_le_bytes());
+        empty[22] = 1;
         assert!(matches!(
             RangeMineArgs::unpack(&empty),
             Err(NicechunkChunkError::InvalidRangeMine)
+        ));
+    }
+
+    #[test]
+    fn reward_mine_args_require_a_nonzero_action_id() {
+        let mut payload = Vec::with_capacity(RewardMineArgs::LEN);
+        payload.extend_from_slice(&77_u64.to_le_bytes());
+        payload.extend_from_slice(&7_i32.to_le_bytes());
+        payload.extend_from_slice(&98_i16.to_le_bytes());
+        payload.extend_from_slice(&(-4_i32).to_le_bytes());
+        payload.extend_from_slice(&BLOCK_GRASS.to_le_bytes());
+
+        let decoded = RewardMineArgs::unpack(&payload).unwrap();
+        assert_eq!(decoded.action_id, 77);
+        assert_eq!(decoded.block.world_x, 7);
+        assert_eq!(decoded.block.expected_block_id, BLOCK_GRASS);
+
+        payload[0..8].fill(0);
+        assert!(matches!(
+            RewardMineArgs::unpack(&payload),
+            Err(NicechunkChunkError::InvalidMiningActionId)
+        ));
+    }
+
+    #[test]
+    fn backpack_mining_state_identifies_only_a_new_action() {
+        let owner = Pubkey::new_unique();
+        let mut data = vec![0_u8; BACKPACK_LEN];
+        data[0..8].copy_from_slice(&BACKPACK_MAGIC);
+        data[8..10].copy_from_slice(&BACKPACK_VERSION.to_le_bytes());
+        data[11] = 1;
+        data[BACKPACK_OWNER_OFFSET..BACKPACK_OWNER_OFFSET + 32].copy_from_slice(owner.as_ref());
+        data[BACKPACK_LAST_MINE_ACTION_ID_OFFSET..BACKPACK_LAST_MINE_ACTION_ID_OFFSET + 8]
+            .copy_from_slice(&12_u64.to_le_bytes());
+
+        assert!(!BackpackMiningState::is_new_action(&data, &owner, 12).unwrap());
+        assert!(BackpackMiningState::is_new_action(&data, &owner, 13).unwrap());
+        assert!(matches!(
+            BackpackMiningState::is_new_action(&data, &owner, 0),
+            Err(NicechunkChunkError::InvalidMiningActionId)
+        ));
+        assert!(matches!(
+            BackpackMiningState::is_new_action(&data, &Pubkey::new_unique(), 13),
+            Err(NicechunkChunkError::InvalidBackpackData)
         ));
     }
 
@@ -3180,6 +3287,26 @@ mod tests {
     }
 
     #[test]
+    fn precision_gathering_recovers_fifty_percent_then_five_percent_per_level() {
+        assert_eq!(
+            PlayerProgressState::precision_gathering_volume_mm3_from_level(0),
+            500_000
+        );
+        assert_eq!(
+            PlayerProgressState::precision_gathering_volume_mm3_from_level(1),
+            550_000
+        );
+        assert_eq!(
+            PlayerProgressState::precision_gathering_volume_mm3_from_level(10),
+            RESOURCE_BLOCK_VOLUME_MM3
+        );
+        assert_eq!(
+            PlayerProgressState::precision_gathering_volume_mm3_from_level(u8::MAX),
+            RESOURCE_BLOCK_VOLUME_MM3
+        );
+    }
+
+    #[test]
     fn range_mine_drop_gate_is_deterministic_and_respects_probability_bounds() {
         let config = test_global_config_view();
         let block = MineBlockArgs {
@@ -3202,10 +3329,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_core_terrain_bytes_cannot_override_chunk_js_world() {
-        let mut legacy = vec![0xff_u8; GLOBAL_CONFIG_LEN];
-        legacy[0..8].copy_from_slice(&GLOBAL_CONFIG_MAGIC);
-        let config = GlobalConfigView::unpack(&legacy).unwrap();
+    fn global_config_terrain_bytes_cannot_override_chunk_js_world() {
+        let mut account = vec![0xff_u8; GLOBAL_CONFIG_LEN];
+        account[0..8].copy_from_slice(&GLOBAL_CONFIG_MAGIC);
+        let config = GlobalConfigView::unpack(&account).unwrap();
         assert_eq!(config.development_wallet.as_ref(), &[0xff; 32]);
         assert_eq!(config.world_seed, CANONICAL_WORLD_SEED);
         assert_eq!(config.chunk_size, CANONICAL_CHUNK_SIZE);
@@ -3533,126 +3660,9 @@ mod tests {
     }
 
     #[test]
-    fn foundation_chunk_index_handles_negative_boundaries_and_protection() {
+    fn foundation_chunk_supports_large_footprints_and_only_protects_the_base_layer() {
         let global_config = Pubkey::new_unique();
-        let owner = Pubkey::new_unique();
         let record = FoundationRecord {
-            owner,
-            foundation_id: 42,
-            min_x: -1,
-            min_z: 15,
-            surface_y: 101,
-            width: 16,
-            depth: 2,
-        };
-        let mut data = vec![0_u8; FOUNDATION_CHUNK_LEN];
-        FoundationChunkState::pack_empty(&mut data, 199, &global_config, -1, 0).unwrap();
-        FoundationChunkState::append(&mut data, &global_config, -1, 0, &record).unwrap();
-        assert!(
-            FoundationChunkState::protects(&data, &global_config, -1, 0, -1, 100, 15,).unwrap()
-        );
-        assert!(
-            !FoundationChunkState::protects(&data, &global_config, -1, 0, -1, 99, 15,).unwrap()
-        );
-        assert!(
-            !FoundationChunkState::protects(&data, &global_config, -1, 0, -2, 100, 15,).unwrap()
-        );
-
-        let overlap = FoundationRecord {
-            owner,
-            foundation_id: 43,
-            min_x: 14,
-            min_z: 16,
-            surface_y: 200,
-            width: 2,
-            depth: 2,
-        };
-        assert!(FoundationChunkState::overlaps(&data, &global_config, -1, 0, &overlap,).unwrap());
-    }
-
-    #[test]
-    fn foundation_chunk_v1_records_migrate_to_v2_without_losing_protection() {
-        let owner = Pubkey::new_unique();
-        let global_config = Pubkey::new_unique();
-        let legacy = FoundationRecord {
-            owner,
-            foundation_id: 77,
-            min_x: 32,
-            min_z: -17,
-            surface_y: 109,
-            width: 12,
-            depth: 8,
-        };
-        let mut v1 = vec![0_u8; FOUNDATION_CHUNK_LEN];
-        FoundationChunkState::pack_empty(&mut v1, 211, &global_config, 2, -2).unwrap();
-        FoundationChunkState::append(&mut v1, &global_config, 2, -2, &legacy).unwrap();
-
-        let records = FoundationChunkState::records(&v1, &global_config, 2, -2).unwrap();
-        let mut v2 = vec![0_u8; FoundationChunkV2State::len(4).unwrap()];
-        FoundationChunkV2State::pack_empty(&mut v2, 211, &global_config, 2, -2, 4).unwrap();
-        for record in &records {
-            FoundationChunkV2State::append(
-                &mut v2,
-                &global_config,
-                2,
-                -2,
-                &FoundationRecordV2::from_legacy(record),
-            )
-            .unwrap();
-        }
-
-        assert_eq!(
-            FoundationChunkV2State::records(&v2, &global_config, 2, -2).unwrap(),
-            vec![FoundationRecordV2::from_legacy(&legacy)]
-        );
-        assert!(FoundationChunkState::protects(&v2, &global_config, 2, -2, 32, 108, -17).unwrap());
-    }
-
-    #[test]
-    fn blueprint_id_can_supersede_its_same_owner_v1_index_during_upgrade() {
-        let owner = Pubkey::new_unique();
-        let legacy = FoundationRecordV2 {
-            owner,
-            foundation_id: 7_482_402_287_136_659_184,
-            min_x: 747,
-            min_z: 780,
-            surface_y: 136,
-            width: 16,
-            depth: 16,
-        };
-        let blueprint = FoundationRecordV2 {
-            owner,
-            foundation_id: 12_065_219_072_965_175_186,
-            min_x: 748,
-            min_z: 781,
-            surface_y: 136,
-            width: 12,
-            depth: 8,
-        };
-
-        assert!(blueprint.supersedes_legacy_index(&legacy, 16));
-        assert!(!FoundationRecordV2 {
-            owner: Pubkey::new_unique(),
-            ..blueprint
-        }
-        .supersedes_legacy_index(&legacy, 16));
-        assert!(!FoundationRecordV2 {
-            foundation_id: legacy.foundation_id,
-            ..blueprint
-        }
-        .supersedes_legacy_index(&legacy, 16));
-        assert!(!FoundationRecordV2 {
-            min_x: 752,
-            width: 12,
-            ..blueprint
-        }
-        .supersedes_legacy_index(&legacy, 16));
-    }
-
-    #[test]
-    fn foundation_chunk_v2_supports_large_footprints_and_only_protects_the_base_layer() {
-        let global_config = Pubkey::new_unique();
-        let record = FoundationRecordV2 {
             owner: Pubkey::new_unique(),
             foundation_id: 901,
             min_x: -300,
@@ -3661,29 +3671,29 @@ mod tests {
             width: 1_024,
             depth: 513,
         };
-        let mut data = vec![0_u8; FoundationChunkV2State::len(4).unwrap()];
-        FoundationChunkV2State::pack_empty(&mut data, 9, &global_config, -19, 43, 4).unwrap();
-        FoundationChunkV2State::append(&mut data, &global_config, -19, 43, &record).unwrap();
+        let mut data = vec![0_u8; FoundationChunkState::len(4).unwrap()];
+        FoundationChunkState::pack_empty(&mut data, 9, &global_config, -19, 43, 4).unwrap();
+        FoundationChunkState::append(&mut data, &global_config, -19, 43, &record).unwrap();
 
         assert!(
-            FoundationChunkV2State::protects(&data, &global_config, -19, 43, 723, 139, 1_212,)
+            FoundationChunkState::protects(&data, &global_config, -19, 43, 723, 139, 1_212,)
                 .unwrap()
         );
         assert!(
-            !FoundationChunkV2State::protects(&data, &global_config, -19, 43, 723, 140, 1_212,)
+            !FoundationChunkState::protects(&data, &global_config, -19, 43, 723, 140, 1_212,)
                 .unwrap()
         );
         assert!(
-            !FoundationChunkV2State::protects(&data, &global_config, -19, 43, 724, 139, 1_212,)
+            !FoundationChunkState::protects(&data, &global_config, -19, 43, 724, 139, 1_212,)
                 .unwrap()
         );
     }
 
     #[test]
-    fn foundation_chunk_v2_registration_is_idempotent_and_rejects_overlap() {
+    fn foundation_chunk_registration_is_idempotent_and_rejects_overlap() {
         let global_config = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
-        let original = FoundationRecordV2 {
+        let original = FoundationRecord {
             owner,
             foundation_id: 10,
             min_x: 0,
@@ -3692,27 +3702,27 @@ mod tests {
             width: 32,
             depth: 32,
         };
-        let mut data = vec![0_u8; FoundationChunkV2State::len(4).unwrap()];
-        FoundationChunkV2State::pack_empty(&mut data, 17, &global_config, 0, 0, 4).unwrap();
-        FoundationChunkV2State::append(&mut data, &global_config, 0, 0, &original).unwrap();
-        FoundationChunkV2State::append(&mut data, &global_config, 0, 0, &original).unwrap();
+        let mut data = vec![0_u8; FoundationChunkState::len(4).unwrap()];
+        FoundationChunkState::pack_empty(&mut data, 17, &global_config, 0, 0, 4).unwrap();
+        FoundationChunkState::append(&mut data, &global_config, 0, 0, &original).unwrap();
+        FoundationChunkState::append(&mut data, &global_config, 0, 0, &original).unwrap();
         assert_eq!(
-            FoundationChunkV2State::validate(&data, &global_config, 0, 0).unwrap(),
+            FoundationChunkState::validate(&data, &global_config, 0, 0).unwrap(),
             (1, 4)
         );
 
-        let resized = FoundationRecordV2 {
+        let resized = FoundationRecord {
             width: 16,
             depth: 16,
             ..original
         };
-        FoundationChunkV2State::append(&mut data, &global_config, 0, 0, &resized).unwrap();
+        FoundationChunkState::append(&mut data, &global_config, 0, 0, &resized).unwrap();
         assert_eq!(
-            FoundationChunkV2State::records(&data, &global_config, 0, 0).unwrap(),
+            FoundationChunkState::records(&data, &global_config, 0, 0).unwrap(),
             vec![resized]
         );
 
-        let overlap = FoundationRecordV2 {
+        let overlap = FoundationRecord {
             foundation_id: 11,
             min_x: 15,
             min_z: 15,
@@ -3721,11 +3731,11 @@ mod tests {
             ..original
         };
         assert_eq!(
-            FoundationChunkV2State::append(&mut data, &global_config, 0, 0, &overlap).unwrap_err(),
+            FoundationChunkState::append(&mut data, &global_config, 0, 0, &overlap).unwrap_err(),
             NicechunkChunkError::FoundationOverlap.into()
         );
 
-        let adjacent = FoundationRecordV2 {
+        let adjacent = FoundationRecord {
             foundation_id: 12,
             min_x: 16,
             min_z: 0,
@@ -3733,12 +3743,12 @@ mod tests {
             depth: 2,
             ..original
         };
-        FoundationChunkV2State::append(&mut data, &global_config, 0, 0, &adjacent).unwrap();
+        FoundationChunkState::append(&mut data, &global_config, 0, 0, &adjacent).unwrap();
         assert_eq!(
-            FoundationChunkV2State::validate(&data, &global_config, 0, 0).unwrap(),
+            FoundationChunkState::validate(&data, &global_config, 0, 0).unwrap(),
             (2, 4)
         );
-        FoundationChunkV2State::remove(
+        FoundationChunkState::remove(
             &mut data,
             &global_config,
             0,
@@ -3747,7 +3757,7 @@ mod tests {
             original.foundation_id,
         )
         .unwrap();
-        FoundationChunkV2State::remove(
+        FoundationChunkState::remove(
             &mut data,
             &global_config,
             0,
@@ -3757,7 +3767,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            FoundationChunkV2State::records(&data, &global_config, 0, 0).unwrap(),
+            FoundationChunkState::records(&data, &global_config, 0, 0).unwrap(),
             vec![adjacent]
         );
     }

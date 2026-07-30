@@ -15,6 +15,8 @@ pub const NICECHUNK_CIVILIZATION_PROGRAM_ID: Pubkey =
     pubkey!("3MRG4UjxTK1rMq7TGM4bX1GrD8C36bQtt1RdTmJD7Jah");
 pub const NICECHUNK_BUILDING_PROGRAM_ID: Pubkey =
     pubkey!("39UMTUWXQkuomkFNbDPF5NGZnJmG6pDkJHVSkZyqVwWx");
+pub const NICECHUNK_SKILLS_PROGRAM_ID: Pubkey =
+    pubkey!("5gkdfmRJogdSdPrT8rvnEkPdn2N2fLBnQ6YDdegUcu3P");
 
 #[cfg(feature = "unified-game")]
 pub const NICECHUNK_BACKPACK_PROGRAM_ID: Pubkey =

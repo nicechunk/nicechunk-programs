@@ -12,9 +12,9 @@ pub const BURDEN_RULE_RECORD_INDEX: usize = 31;
 pub const BURDEN_RULE_MAGIC: [u8; 8] = *b"NCKBRD01";
 pub const BURDEN_RULE_VERSION: u16 = 2;
 
-pub const RULE_TABLE_MAGIC: [u8; 8] = *b"NCKXPR01";
-pub const RULE_TABLE_VERSION: u16 = 1;
-pub const RULE_TABLE_SEED: &[u8] = b"skill-rules-v1";
+pub const RULE_TABLE_MAGIC: [u8; 8] = *b"NCKXPR02";
+pub const RULE_TABLE_VERSION: u16 = 2;
+pub const RULE_TABLE_SEED: &[u8] = b"skill-rules-v2";
 pub const RULE_TABLE_HEADER_LEN: usize = 912;
 pub const RULE_TABLE_RULES_OFFSET: usize = RULE_TABLE_HEADER_LEN;
 pub const RULE_RECORD_LEN: usize = 136;
@@ -33,9 +33,9 @@ pub const RULE_TABLE_MINING_XP_OFFSET: usize = 908;
 pub const RULE_TABLE_MINING_SKILL_INDEX_OFFSET: usize = 910;
 pub const RULE_TABLE_MINING_ENABLED_OFFSET: usize = 911;
 
-pub const PLAYER_SKILLS_MAGIC: [u8; 8] = *b"NCKSKL01";
-pub const PLAYER_SKILLS_VERSION: u16 = 1;
-pub const PLAYER_SKILLS_SEED: &[u8] = b"player-skills-v1";
+pub const PLAYER_SKILLS_MAGIC: [u8; 8] = *b"NCKSKL02";
+pub const PLAYER_SKILLS_VERSION: u16 = 2;
+pub const PLAYER_SKILLS_SEED: &[u8] = b"player-skills-v2";
 pub const PLAYER_SKILLS_LEN: usize = 480;
 pub const PLAYER_SKILLS_OWNER_OFFSET: usize = 12;
 pub const PLAYER_SKILLS_GLOBAL_CONFIG_OFFSET: usize = 44;
@@ -988,20 +988,22 @@ mod tests {
             coordinate,
         )
         .unwrap();
-        PlayerSkillsState::record_mining_coordinate(
-            data,
-            owner,
-            global_config,
-            coordinate,
-            MiningTravelRule {
-                enabled: false,
-                minimum_distance: 0,
-                skill_index: 0,
-                xp_award: 0,
-            },
-            mine_sequence,
-        )
-        .unwrap();
+        if result.changed {
+            PlayerSkillsState::record_mining_coordinate(
+                data,
+                owner,
+                global_config,
+                coordinate,
+                MiningTravelRule {
+                    enabled: false,
+                    minimum_distance: 0,
+                    skill_index: 0,
+                    xp_award: 0,
+                },
+                mine_sequence,
+            )
+            .unwrap();
+        }
         result
     }
 
@@ -1249,28 +1251,24 @@ mod tests {
             2,
             MiningCoordinate { x: 31, y: 0, z: 0 },
         );
-        let paid = PlayerSkillsState::apply_burden_mining_action(
+        let paid = settle_burden_mine(
             &mut data,
             &owner,
             &global_config,
-            burden_rule(),
             40_000,
             3,
             MiningCoordinate { x: 32, y: 0, z: 0 },
-        )
-        .unwrap();
+        );
         assert_eq!(paid.applied_delta, 2);
         let before_duplicate = data.clone();
-        let duplicate = PlayerSkillsState::apply_burden_mining_action(
+        let duplicate = settle_burden_mine(
             &mut data,
             &owner,
             &global_config,
-            burden_rule(),
             400_000,
             3,
             MiningCoordinate { x: 320, y: 0, z: 0 },
-        )
-        .unwrap();
+        );
         assert!(!duplicate.changed);
         assert_eq!(data, before_duplicate);
         assert_eq!(read_u64(&data, PLAYER_SKILLS_XP_OFFSET + 8), 2);

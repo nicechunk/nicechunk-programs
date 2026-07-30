@@ -21,6 +21,7 @@ import {
   deriveCivilizationAdapterAuthorityPda,
   NICECHUNK_CIVILIZATION_PROGRAM_ID,
 } from "./nicechunk-civilization.ts";
+import { derivePlayerSkillsPda } from "./nicechunk-skills.ts";
 
 const env = typeof process !== "undefined" ? process.env : {};
 
@@ -35,8 +36,7 @@ export const CHUNK_BROKEN_SEED = "chunk-broken";
 export const RESOURCE_DROP_TABLE_SEED = "resource-drops-v2";
 export const SURFACE_DECORATION_TABLE_SEED = "surface-decor-v1";
 export const PLAYER_PROGRESS_SEED = "player-progress";
-export const FOUNDATION_SEED = "foundation";
-export const FOUNDATION_CHUNK_SEED = "foundation-chunk";
+export const FOUNDATION_CHUNK_SEED = "foundation-chunk-v2";
 export const CHUNK_BROKEN_MAGIC = "NCBK";
 export const CHUNK_BROKEN_HEADER_LEN = 16;
 export const CHUNK_BROKEN_RECORD_LEN = 3;
@@ -51,34 +51,14 @@ export const SURFACE_DECORATION_RULE_MAX_COUNT = 128;
 export const SURFACE_DECORATION_TABLE_LEN =
   SURFACE_DECORATION_TABLE_HEADER_LEN + SURFACE_DECORATION_RULE_MAX_COUNT * SURFACE_DECORATION_RULE_LEN;
 export const SURFACE_DECORATION_ROLL_DENOMINATOR = 10_000;
-export const FOUNDATION_MAGIC = "NCKFND01";
-export const FOUNDATION_VERSION = 1;
-export const FOUNDATION_LEN = 112;
-export const FOUNDATION_CHUNK_MAGIC = "NCKFCI01";
-export const FOUNDATION_CHUNK_VERSION = 1;
-export const FOUNDATION_CHUNK_HEADER_LEN = 52;
-export const FOUNDATION_CHUNK_RECORD_LEN = 52;
-export const FOUNDATION_CHUNK_CAPACITY = 32;
-export const FOUNDATION_CHUNK_LEN =
-  FOUNDATION_CHUNK_HEADER_LEN + FOUNDATION_CHUNK_CAPACITY * FOUNDATION_CHUNK_RECORD_LEN;
+export const FOUNDATION_CHUNK_MAGIC = "NCKFCI02";
+export const FOUNDATION_CHUNK_VERSION = 2;
+export const FOUNDATION_CHUNK_HEADER_LEN = 56;
+export const FOUNDATION_CHUNK_RECORD_LEN = 58;
+export const FOUNDATION_CHUNK_INITIAL_CAPACITY = 4;
+export const FOUNDATION_CHUNK_GROWTH = 4;
+export const FOUNDATION_CHUNK_MAX_CAPACITY = 64;
 export const FOUNDATION_MIN_SIZE = 2;
-export const FOUNDATION_MAX_SIZE = 16;
-export const FOUNDATION_MAX_CHUNKS = 4;
-export const BUILD_SITE_SEED = "build-site-v1";
-export const BUILDING_MANIFEST_SEED = "building-v2";
-export const BUILDING_SHARD_SEED = "building-data-v1";
-export const BUILD_SITE_MAGIC = "NCKSITE1";
-export const BUILD_SITE_VERSION = 1;
-export const BUILD_SITE_LEN = 136;
-export const BUILDING_MANIFEST_MAGIC = "NCKBLD02";
-export const BUILDING_MANIFEST_VERSION = 2;
-export const BUILDING_MANIFEST_LEN = 160;
-export const BUILDING_SHARD_MAGIC = "NCKBDT01";
-export const BUILDING_SHARD_VERSION = 1;
-export const BUILDING_SHARD_HEADER_LEN = 64;
-export const BUILDING_SHARD_PAYLOAD_LEN = 8192;
-export const BUILDING_MAX_PAYLOAD_LEN = 65535;
-export const BUILDING_MAX_WRITE_LEN = 700;
 export const VERIFY_GENERATED_BLOCK_INSPECT_ONLY = 0xffff;
 export const BLOCK_AIR = 0;
 export const BLOCK_GRASS = 1;
@@ -110,6 +90,7 @@ export const BATCH_MINE_MAX_BLOCKS = 2;
 export const BATCH_MINE_MODE_DEBUG = 1;
 export const RANGE_MINE_MAX_BLOCKS = 640;
 export const RANGE_MINE_MODE_DEBUG = 1;
+export const RANGE_MINE_MAX_PALETTE_SIZE = 8;
 const TREE_MAX_LEAF_RADIUS = 2;
 const MAX_WATER_LEVEL_ABOVE_SEA = 6;
 
@@ -145,7 +126,9 @@ export interface MineBlockInput {
   expectedBlockId?: number;
 }
 
-export interface FoundationInput {
+export interface DecodedFoundationRecord {
+  owner: PublicKey;
+  foundationId: bigint;
   minX: number;
   minZ: number;
   surfaceY: number;
@@ -153,44 +136,26 @@ export interface FoundationInput {
   depth: number;
 }
 
-export interface DecodedBuildSite extends FoundationInput {
-  magic: string;
-  version: number;
-  bump: number;
-  status: number;
-  owner: PublicKey;
-  globalConfig: PublicKey;
-  foundationId: bigint;
-  activeRevision: number;
-  pendingRevision: number;
-  createdSlot: bigint;
-  updatedSlot: bigint;
-}
-
-export interface DecodedFoundationRecord extends FoundationInput {
-  owner: PublicKey;
-  foundationId: bigint;
-}
-
-export interface DecodedFoundationState extends DecodedFoundationRecord {
-  magic: string;
-  version: number;
-  bump: number;
-  status: number;
-  chunkCount: number;
-  globalConfig: PublicKey;
-  createdSlot: bigint;
-}
-
 export interface DecodedFoundationChunkState {
   magic: string;
   version: number;
   bump: number;
   count: number;
+  capacity: number;
   globalConfig: PublicKey;
   chunkX: number;
   chunkZ: number;
   records: DecodedFoundationRecord[];
+}
+
+export function foundationChunkAccountLength(capacity: number): number {
+  const normalized = Number(capacity);
+  if (!Number.isInteger(normalized)
+    || normalized < 1
+    || normalized > FOUNDATION_CHUNK_MAX_CAPACITY) {
+    throw new Error(`FoundationChunk capacity must be in 1..${FOUNDATION_CHUNK_MAX_CAPACITY}`);
+  }
+  return FOUNDATION_CHUNK_HEADER_LEN + normalized * FOUNDATION_CHUNK_RECORD_LEN;
 }
 
 export interface ResourceDropRuleInput {
@@ -299,25 +264,6 @@ export function deriveChunkBrokenPda({
   );
 }
 
-export function deriveFoundationPda({
-  globalConfig,
-  owner,
-  foundationId,
-  programId = NICECHUNK_CHUNK_PROGRAM_ID,
-}: {
-  globalConfig: PublicKey;
-  owner: PublicKey;
-  foundationId: bigint | number | string;
-  programId?: PublicKey;
-}): [PublicKey, number] {
-  const foundationIdBytes = Buffer.alloc(8);
-  foundationIdBytes.writeBigUInt64LE(normalizeFoundationId(foundationId));
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from(FOUNDATION_SEED), globalConfig.toBuffer(), owner.toBuffer(), foundationIdBytes],
-    programId,
-  );
-}
-
 export function deriveFoundationChunkPda({
   globalConfig,
   chunkX,
@@ -335,73 +281,6 @@ export function deriveFoundationChunkPda({
   chunkZBytes.writeInt32LE(requireI32(chunkZ, "chunkZ"), 0);
   return PublicKey.findProgramAddressSync(
     [Buffer.from(FOUNDATION_CHUNK_SEED), globalConfig.toBuffer(), chunkXBytes, chunkZBytes],
-    programId,
-  );
-}
-
-export function deriveBuildSitePda({
-  globalConfig,
-  foundationId,
-  programId = NICECHUNK_CHUNK_PROGRAM_ID,
-}: {
-  globalConfig: PublicKey;
-  foundationId: bigint | number | string;
-  programId?: PublicKey;
-}): [PublicKey, number] {
-  const foundationIdBytes = Buffer.alloc(8);
-  foundationIdBytes.writeBigUInt64LE(normalizeFoundationId(foundationId));
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from(BUILD_SITE_SEED), globalConfig.toBuffer(), foundationIdBytes],
-    programId,
-  );
-}
-
-export function deriveBuildingManifestPda({
-  globalConfig,
-  foundationId,
-  revision,
-  programId = NICECHUNK_CHUNK_PROGRAM_ID,
-}: {
-  globalConfig: PublicKey;
-  foundationId: bigint | number | string;
-  revision: number;
-  programId?: PublicKey;
-}): [PublicKey, number] {
-  const foundationIdBytes = Buffer.alloc(8);
-  const revisionBytes = Buffer.alloc(4);
-  foundationIdBytes.writeBigUInt64LE(normalizeFoundationId(foundationId));
-  revisionBytes.writeUInt32LE(requireU32(revision, "revision"));
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from(BUILDING_MANIFEST_SEED), globalConfig.toBuffer(), foundationIdBytes, revisionBytes],
-    programId,
-  );
-}
-
-export function deriveBuildingShardPda({
-  globalConfig,
-  foundationId,
-  revision,
-  shardIndex,
-  programId = NICECHUNK_CHUNK_PROGRAM_ID,
-}: {
-  globalConfig: PublicKey;
-  foundationId: bigint | number | string;
-  revision: number;
-  shardIndex: number;
-  programId?: PublicKey;
-}): [PublicKey, number] {
-  const foundationIdBytes = Buffer.alloc(8);
-  const revisionBytes = Buffer.alloc(4);
-  foundationIdBytes.writeBigUInt64LE(normalizeFoundationId(foundationId));
-  revisionBytes.writeUInt32LE(requireU32(revision, "revision"));
-  return PublicKey.findProgramAddressSync(
-    [
-      Buffer.from(BUILDING_SHARD_SEED),
-      globalConfig.toBuffer(),
-      foundationIdBytes,
-      revisionBytes,
-      Buffer.from([clampInt(shardIndex, 0, 255)]),
-    ],
     programId,
   );
 }
@@ -517,6 +396,7 @@ export function createMineBlockWithRewardsInstruction({
   owner,
   block,
   backpack,
+  actionId,
   sessionAuthority = payer,
   chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
   playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
@@ -527,6 +407,7 @@ export function createMineBlockWithRewardsInstruction({
   owner: PublicKey;
   block: MineBlockInput;
   backpack: PublicKey;
+  actionId: bigint | number | string;
   sessionAuthority?: PublicKey;
   chunkProgramId?: PublicKey;
   playerProgramId?: PublicKey;
@@ -562,14 +443,17 @@ export function createMineBlockWithRewardsInstruction({
   const [playerProgress] = derivePlayerProgressPda({ globalConfig, owner, programId: chunkProgramId });
   const [materialPhysics] = deriveMaterialPhysicsPda({
     globalConfig,
-    programId: NICECHUNK_BACKPACK_PROGRAM_ID,
+    backpackProgramId: NICECHUNK_BACKPACK_PROGRAM_ID,
   });
-  const data = Buffer.alloc(13);
+  const [playerSkills] = derivePlayerSkillsPda({ owner, globalConfig });
+  const normalizedActionId = normalizeMiningActionId(actionId);
+  const data = Buffer.alloc(21);
   data.writeUInt8(8, 0);
-  data.writeInt32LE(block.worldX, 1);
-  data.writeInt16LE(block.worldY, 5);
-  data.writeInt32LE(block.worldZ, 7);
-  data.writeUInt16LE(block.expectedBlockId, 11);
+  data.writeBigUInt64LE(normalizedActionId, 1);
+  data.writeInt32LE(block.worldX, 9);
+  data.writeInt16LE(block.worldY, 13);
+  data.writeInt32LE(block.worldZ, 15);
+  data.writeUInt16LE(block.expectedBlockId, 19);
 
   return new TransactionInstruction({
     programId: chunkProgramId,
@@ -586,6 +470,7 @@ export function createMineBlockWithRewardsInstruction({
       { pubkey: NICECHUNK_BACKPACK_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: backpack, isSigner: false, isWritable: true },
       { pubkey: materialPhysics, isSigner: false, isWritable: false },
+      { pubkey: playerSkills, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     data: chunkInstructionData(chunkProgramId, data),
@@ -597,6 +482,7 @@ export function createBatchMineWithRewardsInstruction({
   owner,
   blocks,
   backpack,
+  actionId,
   mode = BATCH_MINE_MODE_DEBUG,
   sessionAuthority = payer,
   chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
@@ -608,6 +494,7 @@ export function createBatchMineWithRewardsInstruction({
   owner: PublicKey;
   blocks: MineBlockInput[];
   backpack: PublicKey;
+  actionId: bigint | number | string;
   mode?: number;
   sessionAuthority?: PublicKey;
   chunkProgramId?: PublicKey;
@@ -652,14 +539,17 @@ export function createBatchMineWithRewardsInstruction({
   const [surfaceDecorationTable] = deriveSurfaceDecorationTablePda({ globalConfig, programId: chunkProgramId });
   const [materialPhysics] = deriveMaterialPhysicsPda({
     globalConfig,
-    programId: NICECHUNK_BACKPACK_PROGRAM_ID,
+    backpackProgramId: NICECHUNK_BACKPACK_PROGRAM_ID,
   });
-  const data = Buffer.alloc(3 + blocks.length * 12);
+  const [playerSkills] = derivePlayerSkillsPda({ owner, globalConfig });
+  const normalizedActionId = normalizeMiningActionId(actionId);
+  const data = Buffer.alloc(11 + blocks.length * 12);
   data.writeUInt8(20, 0);
-  data.writeUInt8(mode, 1);
-  data.writeUInt8(blocks.length, 2);
+  data.writeBigUInt64LE(normalizedActionId, 1);
+  data.writeUInt8(mode, 9);
+  data.writeUInt8(blocks.length, 10);
   blocks.forEach((block, index) => {
-    const offset = 3 + index * 12;
+    const offset = 11 + index * 12;
     data.writeInt32LE(block.worldX, offset);
     data.writeInt16LE(block.worldY, offset + 4);
     data.writeInt32LE(block.worldZ, offset + 6);
@@ -681,6 +571,7 @@ export function createBatchMineWithRewardsInstruction({
       { pubkey: NICECHUNK_BACKPACK_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: backpack, isSigner: false, isWritable: true },
       { pubkey: materialPhysics, isSigner: false, isWritable: false },
+      { pubkey: playerSkills, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     data: chunkInstructionData(chunkProgramId, data),
@@ -692,6 +583,7 @@ export function createRangeMineWithRewardsInstruction({
   owner,
   blocks,
   backpack,
+  actionId,
   mode = RANGE_MINE_MODE_DEBUG,
   sessionAuthority = payer,
   chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
@@ -703,6 +595,7 @@ export function createRangeMineWithRewardsInstruction({
   owner: PublicKey;
   blocks: MineBlockInput[];
   backpack: PublicKey;
+  actionId: bigint | number | string;
   mode?: number;
   sessionAuthority?: PublicKey;
   chunkProgramId?: PublicKey;
@@ -713,7 +606,7 @@ export function createRangeMineWithRewardsInstruction({
   if (!owner) throw new Error("owner is required for range mining");
   if (!backpack) throw new Error("backpack is required for range mining");
   if (mode !== RANGE_MINE_MODE_DEBUG) throw new Error("unsupported range mining mode");
-  const data = encodeRangeMineInstructionData(blocks, mode);
+  const data = encodeRangeMineInstructionData(blocks, actionId, mode);
   const firstChunkX = Math.floor(blocks[0].worldX / chunkSize);
   const firstChunkZ = Math.floor(blocks[0].worldZ / chunkSize);
   for (const block of blocks) {
@@ -742,8 +635,9 @@ export function createRangeMineWithRewardsInstruction({
   const [surfaceDecorationTable] = deriveSurfaceDecorationTablePda({ globalConfig, programId: chunkProgramId });
   const [materialPhysics] = deriveMaterialPhysicsPda({
     globalConfig,
-    programId: NICECHUNK_BACKPACK_PROGRAM_ID,
+    backpackProgramId: NICECHUNK_BACKPACK_PROGRAM_ID,
   });
+  const [playerSkills] = derivePlayerSkillsPda({ owner, globalConfig });
 
   return new TransactionInstruction({
     programId: chunkProgramId,
@@ -760,6 +654,7 @@ export function createRangeMineWithRewardsInstruction({
       { pubkey: NICECHUNK_BACKPACK_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: backpack, isSigner: false, isWritable: true },
       { pubkey: materialPhysics, isSigner: false, isWritable: false },
+      { pubkey: playerSkills, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     data: chunkInstructionData(chunkProgramId, data),
@@ -768,6 +663,7 @@ export function createRangeMineWithRewardsInstruction({
 
 export function encodeRangeMineInstructionData(
   sourceBlocks: MineBlockInput[],
+  actionId: bigint | number | string,
   mode = RANGE_MINE_MODE_DEBUG,
 ): Buffer {
   if (mode !== RANGE_MINE_MODE_DEBUG) throw new Error("unsupported range mining mode");
@@ -818,374 +714,64 @@ export function encodeRangeMineInstructionData(
       }
     }
   }
-  const packedIds = Buffer.alloc(Math.ceil(blockIds.length * 6 / 8));
+  const palette = [...new Set(blockIds)].sort((left, right) => left - right);
+  if (palette.length < 1 || palette.length > RANGE_MINE_MAX_PALETTE_SIZE) {
+    throw new Error(`range mining requires 1-${RANGE_MINE_MAX_PALETTE_SIZE} block types`);
+  }
+  const paletteIndexes = new Map(palette.map((blockId, index) => [blockId, index]));
+  const paletteIndexBits = rangePaletteIndexBits(palette.length);
+  const packedIndexes = Buffer.alloc(Math.ceil(blockIds.length * paletteIndexBits / 8));
   blockIds.forEach((blockId, index) => {
-    const bitIndex = index * 6;
+    if (paletteIndexBits === 0) return;
+    const bitIndex = index * paletteIndexBits;
     const byteIndex = bitIndex >> 3;
     const shift = bitIndex & 7;
-    const packed = blockId << shift;
-    packedIds[byteIndex] |= packed & 0xff;
-    if (byteIndex + 1 < packedIds.length) packedIds[byteIndex + 1] |= (packed >> 8) & 0xff;
+    const packed = (paletteIndexes.get(blockId) ?? 0) << shift;
+    packedIndexes[byteIndex] |= packed & 0xff;
+    if (byteIndex + 1 < packedIndexes.length) packedIndexes[byteIndex + 1] |= (packed >> 8) & 0xff;
   });
-  const data = Buffer.alloc(16 + bitmap.length + packedIds.length);
+  const paletteOffset = 24 + bitmap.length;
+  const packedIndexesOffset = paletteOffset + 1 + palette.length;
+  const data = Buffer.alloc(packedIndexesOffset + packedIndexes.length);
+  const normalizedActionId = normalizeMiningActionId(actionId);
   data.writeUInt8(21, 0);
-  data.writeUInt8(mode, 1);
-  data.writeInt32LE(minX, 2);
-  data.writeInt16LE(minY, 6);
-  data.writeInt32LE(minZ, 8);
-  data.writeUInt8(sizeX, 12);
-  data.writeUInt16LE(sizeY, 13);
-  data.writeUInt8(sizeZ, 15);
-  bitmap.copy(data, 16);
-  packedIds.copy(data, 16 + bitmap.length);
+  data.writeBigUInt64LE(normalizedActionId, 1);
+  data.writeUInt8(mode, 9);
+  data.writeInt32LE(minX, 10);
+  data.writeInt16LE(minY, 14);
+  data.writeInt32LE(minZ, 16);
+  data.writeUInt8(sizeX, 20);
+  data.writeUInt16LE(sizeY, 21);
+  data.writeUInt8(sizeZ, 23);
+  bitmap.copy(data, 24);
+  data.writeUInt8(palette.length, paletteOffset);
+  Buffer.from(palette).copy(data, paletteOffset + 1);
+  packedIndexes.copy(data, packedIndexesOffset);
   return data;
+}
+
+function rangePaletteIndexBits(paletteSize: number): number {
+  if (paletteSize <= 1) return 0;
+  return Math.ceil(Math.log2(paletteSize));
+}
+
+function normalizeMiningActionId(value: bigint | number | string): bigint {
+  let actionId: bigint;
+  try {
+    actionId = BigInt(value);
+  } catch {
+    throw new Error("actionId must be a nonzero unsigned 64-bit integer");
+  }
+  if (actionId < 1n || actionId > 0xffff_ffff_ffff_ffffn) {
+    throw new Error("actionId must be a nonzero unsigned 64-bit integer");
+  }
+  return actionId;
 }
 
 function requiredInteger(value: unknown, label: string): number {
   const number = Number(value);
   if (!Number.isInteger(number)) throw new Error(`${label} must be an integer`);
   return number;
-}
-
-export function createBuildSiteInstruction({
-  payer,
-  owner,
-  foundationId,
-  foundation,
-  sessionAuthority = payer,
-  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
-  playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
-  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
-}: {
-  payer: PublicKey;
-  owner: PublicKey;
-  foundationId: bigint | number | string;
-  foundation: FoundationInput;
-  sessionAuthority?: PublicKey;
-  chunkProgramId?: PublicKey;
-  playerProgramId?: PublicKey;
-  coreProgramId?: PublicKey;
-}): TransactionInstruction {
-  const normalized = normalizeBuildSiteInput(foundation);
-  const normalizedFoundationId = normalizeFoundationId(foundationId);
-  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
-  const [playerProfile] = derivePlayerProfilePda(owner, playerProgramId);
-  const [playerSession] = derivePlayerSessionPda({ owner, sessionAuthority, programId: playerProgramId });
-  const [buildSite] = deriveBuildSitePda({ globalConfig, foundationId: normalizedFoundationId, programId: chunkProgramId });
-  const data = Buffer.alloc(27);
-  data.writeUInt8(15, 0);
-  data.writeBigUInt64LE(normalizedFoundationId, 1);
-  data.writeInt32LE(normalized.minX, 9);
-  data.writeInt16LE(normalized.surfaceY, 13);
-  data.writeInt32LE(normalized.minZ, 15);
-  data.writeUInt32LE(normalized.width, 19);
-  data.writeUInt32LE(normalized.depth, 23);
-  return new TransactionInstruction({
-    programId: chunkProgramId,
-    keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
-      { pubkey: playerProfile, isSigner: false, isWritable: false },
-      { pubkey: playerSession, isSigner: false, isWritable: false },
-      { pubkey: buildSite, isSigner: false, isWritable: true },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
-    data: chunkInstructionData(chunkProgramId, data),
-  });
-}
-
-export function createBeginBuildingInstruction({
-  payer,
-  owner,
-  foundationId,
-  revision,
-  quarterTurns,
-  payloadLen,
-  expectedHash,
-  sessionAuthority = payer,
-  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
-  playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
-  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
-}: {
-  payer: PublicKey;
-  owner: PublicKey;
-  foundationId: bigint | number | string;
-  revision: number;
-  quarterTurns: number;
-  payloadLen: number;
-  expectedHash: Buffer | Uint8Array;
-  sessionAuthority?: PublicKey;
-  chunkProgramId?: PublicKey;
-  playerProgramId?: PublicKey;
-  coreProgramId?: PublicKey;
-}): TransactionInstruction {
-  const id = normalizeFoundationId(foundationId);
-  const safeRevision = requireU32(revision, "revision");
-  const safePayloadLen = clampInt(payloadLen, 1, BUILDING_MAX_PAYLOAD_LEN);
-  const hash = Buffer.from(expectedHash);
-  if (hash.length !== 32) throw new Error("expectedHash must contain 32 bytes");
-  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
-  const [playerProfile] = derivePlayerProfilePda(owner, playerProgramId);
-  const [playerSession] = derivePlayerSessionPda({ owner, sessionAuthority, programId: playerProgramId });
-  const [buildSite] = deriveBuildSitePda({ globalConfig, foundationId: id, programId: chunkProgramId });
-  const [manifest] = deriveBuildingManifestPda({ globalConfig, foundationId: id, revision: safeRevision, programId: chunkProgramId });
-  const data = Buffer.alloc(50);
-  data.writeUInt8(16, 0);
-  data.writeBigUInt64LE(id, 1);
-  data.writeUInt32LE(safeRevision, 9);
-  data.writeUInt8(clampInt(quarterTurns, 0, 3), 13);
-  data.writeUInt32LE(safePayloadLen, 14);
-  hash.copy(data, 18);
-  return new TransactionInstruction({
-    programId: chunkProgramId,
-    keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
-      { pubkey: playerProfile, isSigner: false, isWritable: false },
-      { pubkey: playerSession, isSigner: false, isWritable: false },
-      { pubkey: buildSite, isSigner: false, isWritable: true },
-      { pubkey: manifest, isSigner: false, isWritable: true },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
-    data: chunkInstructionData(chunkProgramId, data),
-  });
-}
-
-export function createWriteBuildingShardInstruction({
-  payer,
-  owner,
-  foundationId,
-  revision,
-  shardIndex,
-  offset,
-  bytes,
-  sessionAuthority = payer,
-  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
-  playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
-  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
-}: {
-  payer: PublicKey;
-  owner: PublicKey;
-  foundationId: bigint | number | string;
-  revision: number;
-  shardIndex: number;
-  offset: number;
-  bytes: Buffer | Uint8Array;
-  sessionAuthority?: PublicKey;
-  chunkProgramId?: PublicKey;
-  playerProgramId?: PublicKey;
-  coreProgramId?: PublicKey;
-}): TransactionInstruction {
-  const id = normalizeFoundationId(foundationId);
-  const safeRevision = requireU32(revision, "revision");
-  const safeShardIndex = clampInt(shardIndex, 0, 255);
-  const safeOffset = clampInt(offset, 0, 0xffff);
-  const payload = Buffer.from(bytes);
-  if (!payload.length || payload.length > BUILDING_MAX_WRITE_LEN) throw new Error("Invalid building write length");
-  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
-  const [playerProfile] = derivePlayerProfilePda(owner, playerProgramId);
-  const [playerSession] = derivePlayerSessionPda({ owner, sessionAuthority, programId: playerProgramId });
-  const [buildSite] = deriveBuildSitePda({ globalConfig, foundationId: id, programId: chunkProgramId });
-  const [manifest] = deriveBuildingManifestPda({ globalConfig, foundationId: id, revision: safeRevision, programId: chunkProgramId });
-  const [shard] = deriveBuildingShardPda({ globalConfig, foundationId: id, revision: safeRevision, shardIndex: safeShardIndex, programId: chunkProgramId });
-  const data = Buffer.alloc(16 + payload.length);
-  data.writeUInt8(17, 0);
-  data.writeBigUInt64LE(id, 1);
-  data.writeUInt32LE(safeRevision, 9);
-  data.writeUInt8(safeShardIndex, 13);
-  data.writeUInt16LE(safeOffset, 14);
-  payload.copy(data, 16);
-  return new TransactionInstruction({
-    programId: chunkProgramId,
-    keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
-      { pubkey: playerProfile, isSigner: false, isWritable: false },
-      { pubkey: playerSession, isSigner: false, isWritable: false },
-      { pubkey: buildSite, isSigner: false, isWritable: false },
-      { pubkey: manifest, isSigner: false, isWritable: true },
-      { pubkey: shard, isSigner: false, isWritable: true },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
-    data: chunkInstructionData(chunkProgramId, data),
-  });
-}
-
-export function createFinalizeBuildingInstruction({
-  payer,
-  owner,
-  foundationId,
-  revision,
-  shardCount,
-  sessionAuthority = payer,
-  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
-  playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
-  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
-}: {
-  payer: PublicKey;
-  owner: PublicKey;
-  foundationId: bigint | number | string;
-  revision: number;
-  shardCount: number;
-  sessionAuthority?: PublicKey;
-  chunkProgramId?: PublicKey;
-  playerProgramId?: PublicKey;
-  coreProgramId?: PublicKey;
-}): TransactionInstruction {
-  const id = normalizeFoundationId(foundationId);
-  const safeRevision = requireU32(revision, "revision");
-  const safeShardCount = clampInt(shardCount, 1, Math.ceil(BUILDING_MAX_PAYLOAD_LEN / BUILDING_SHARD_PAYLOAD_LEN));
-  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
-  const [playerProfile] = derivePlayerProfilePda(owner, playerProgramId);
-  const [playerSession] = derivePlayerSessionPda({ owner, sessionAuthority, programId: playerProgramId });
-  const [buildSite] = deriveBuildSitePda({ globalConfig, foundationId: id, programId: chunkProgramId });
-  const [manifest] = deriveBuildingManifestPda({ globalConfig, foundationId: id, revision: safeRevision, programId: chunkProgramId });
-  const data = Buffer.alloc(13);
-  data.writeUInt8(18, 0);
-  data.writeBigUInt64LE(id, 1);
-  data.writeUInt32LE(safeRevision, 9);
-  return new TransactionInstruction({
-    programId: chunkProgramId,
-    keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
-      { pubkey: playerProfile, isSigner: false, isWritable: false },
-      { pubkey: playerSession, isSigner: false, isWritable: false },
-      { pubkey: buildSite, isSigner: false, isWritable: true },
-      { pubkey: manifest, isSigner: false, isWritable: true },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      ...Array.from({ length: safeShardCount }, (_unused, index) => ({
-        pubkey: deriveBuildingShardPda({ globalConfig, foundationId: id, revision: safeRevision, shardIndex: index, programId: chunkProgramId })[0],
-        isSigner: false,
-        isWritable: false,
-      })),
-    ],
-    data: chunkInstructionData(chunkProgramId, data),
-  });
-}
-
-export function createCancelBuildingUploadInstruction({
-  payer,
-  owner,
-  foundationId,
-  revision,
-  shardCount,
-  sessionAuthority = payer,
-  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
-  playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
-  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
-}: {
-  payer: PublicKey;
-  owner: PublicKey;
-  foundationId: bigint | number | string;
-  revision: number;
-  shardCount: number;
-  sessionAuthority?: PublicKey;
-  chunkProgramId?: PublicKey;
-  playerProgramId?: PublicKey;
-  coreProgramId?: PublicKey;
-}): TransactionInstruction {
-  const id = normalizeFoundationId(foundationId);
-  const safeRevision = requireU32(revision, "revision");
-  const safeShardCount = clampInt(shardCount, 1, Math.ceil(BUILDING_MAX_PAYLOAD_LEN / BUILDING_SHARD_PAYLOAD_LEN));
-  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
-  const [playerProfile] = derivePlayerProfilePda(owner, playerProgramId);
-  const [playerSession] = derivePlayerSessionPda({ owner, sessionAuthority, programId: playerProgramId });
-  const [buildSite] = deriveBuildSitePda({ globalConfig, foundationId: id, programId: chunkProgramId });
-  const [manifest] = deriveBuildingManifestPda({ globalConfig, foundationId: id, revision: safeRevision, programId: chunkProgramId });
-  const data = Buffer.alloc(13);
-  data.writeUInt8(19, 0);
-  data.writeBigUInt64LE(id, 1);
-  data.writeUInt32LE(safeRevision, 9);
-  return new TransactionInstruction({
-    programId: chunkProgramId,
-    keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
-      { pubkey: playerProfile, isSigner: false, isWritable: false },
-      { pubkey: playerSession, isSigner: false, isWritable: false },
-      { pubkey: buildSite, isSigner: false, isWritable: true },
-      { pubkey: manifest, isSigner: false, isWritable: true },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      ...Array.from({ length: safeShardCount }, (_unused, index) => ({
-        pubkey: deriveBuildingShardPda({ globalConfig, foundationId: id, revision: safeRevision, shardIndex: index, programId: chunkProgramId })[0],
-        isSigner: false,
-        isWritable: true,
-      })),
-    ],
-    data: chunkInstructionData(chunkProgramId, data),
-  });
-}
-
-export function createFoundationInstruction({
-  payer,
-  owner,
-  foundationId,
-  foundation,
-  sessionAuthority = payer,
-  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
-  playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
-  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
-  chunkSize = CANONICAL_CHUNK_WORLD_CONFIG.chunkSize,
-}: {
-  payer: PublicKey;
-  owner: PublicKey;
-  foundationId: bigint | number | string;
-  foundation: FoundationInput;
-  sessionAuthority?: PublicKey;
-  chunkProgramId?: PublicKey;
-  playerProgramId?: PublicKey;
-  coreProgramId?: PublicKey;
-  chunkSize?: number;
-}): TransactionInstruction {
-  const normalized = normalizeFoundationInput(foundation);
-  const normalizedFoundationId = normalizeFoundationId(foundationId);
-  const safeChunkSize = requirePositiveInt(chunkSize, "chunkSize");
-  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
-  const [playerProfile] = derivePlayerProfilePda(owner, playerProgramId);
-  const [playerSession] = derivePlayerSessionPda({
-    owner,
-    sessionAuthority,
-    programId: playerProgramId,
-  });
-  const [foundationPda] = deriveFoundationPda({
-    globalConfig,
-    owner,
-    foundationId: normalizedFoundationId,
-    programId: chunkProgramId,
-  });
-  const chunks = foundationChunks(normalized, safeChunkSize);
-  const data = Buffer.alloc(21);
-  data.writeUInt8(14, 0);
-  data.writeBigUInt64LE(normalizedFoundationId, 1);
-  data.writeInt32LE(normalized.minX, 9);
-  data.writeInt16LE(normalized.surfaceY, 13);
-  data.writeInt32LE(normalized.minZ, 15);
-  data.writeUInt8(normalized.width, 19);
-  data.writeUInt8(normalized.depth, 20);
-
-  return new TransactionInstruction({
-    programId: chunkProgramId,
-    keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
-      { pubkey: playerProfile, isSigner: false, isWritable: false },
-      { pubkey: playerSession, isSigner: false, isWritable: false },
-      { pubkey: foundationPda, isSigner: false, isWritable: true },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      ...chunks.map(({ chunkX, chunkZ }) => ({
-        pubkey: deriveFoundationChunkPda({
-          globalConfig,
-          chunkX,
-          chunkZ,
-          programId: chunkProgramId,
-        })[0],
-        isSigner: false,
-        isWritable: true,
-      })),
-    ],
-    data: chunkInstructionData(chunkProgramId, data),
-  });
 }
 
 export function createInitializeResourceDropTableInstruction({
@@ -2141,76 +1727,12 @@ export function decodeChunkBrokenState({
   };
 }
 
-export function decodeFoundationState(dataValue: Buffer | Uint8Array): DecodedFoundationState {
-  const data = Buffer.from(dataValue);
-  if (data.length !== FOUNDATION_LEN) {
-    throw new Error(`Invalid FoundationState length: ${data.length}`);
-  }
-  const magic = data.subarray(0, 8).toString("utf8");
-  const version = data.readUInt8(8);
-  if (magic !== FOUNDATION_MAGIC || version !== FOUNDATION_VERSION) {
-    throw new Error(`Invalid FoundationState header: ${magic} v${version}`);
-  }
-  const width = data.readUInt8(94);
-  const depth = data.readUInt8(95);
-  validateFoundationSize(width, depth);
-  return {
-    magic,
-    version,
-    bump: data.readUInt8(9),
-    status: data.readUInt8(10),
-    chunkCount: data.readUInt8(11),
-    owner: new PublicKey(data.subarray(12, 44)),
-    globalConfig: new PublicKey(data.subarray(44, 76)),
-    foundationId: data.readBigUInt64LE(76),
-    minX: data.readInt32LE(84),
-    minZ: data.readInt32LE(88),
-    surfaceY: data.readInt16LE(92),
-    width,
-    depth,
-    createdSlot: data.readBigUInt64LE(96),
-  };
-}
-
-export function decodeBuildSite(dataValue: Buffer | Uint8Array): DecodedBuildSite {
-  const data = Buffer.from(dataValue);
-  if (data.length !== BUILD_SITE_LEN) throw new Error(`Invalid BuildSite length: ${data.length}`);
-  const magic = data.subarray(0, 8).toString("utf8");
-  const version = data.readUInt8(8);
-  if (magic !== BUILD_SITE_MAGIC || version !== BUILD_SITE_VERSION || data.readUInt8(10) !== 1) {
-    throw new Error("Invalid BuildSite account");
-  }
-  const width = data.readUInt32LE(100);
-  const depth = data.readUInt32LE(104);
-  const minX = data.readInt32LE(88);
-  const minZ = data.readInt32LE(92);
-  normalizeBuildSiteInput({ minX, minZ, surfaceY: data.readInt16LE(96), width, depth });
-  return {
-    magic,
-    version,
-    bump: data.readUInt8(9),
-    status: data.readUInt8(10),
-    owner: new PublicKey(data.subarray(16, 48)),
-    globalConfig: new PublicKey(data.subarray(48, 80)),
-    foundationId: data.readBigUInt64LE(80),
-    minX,
-    minZ,
-    surfaceY: data.readInt16LE(96),
-    width,
-    depth,
-    activeRevision: data.readUInt32LE(116),
-    pendingRevision: data.readUInt32LE(120),
-    createdSlot: data.readBigUInt64LE(108),
-    updatedSlot: data.readBigUInt64LE(124),
-  };
-}
-
 export function decodeFoundationChunkState(
   dataValue: Buffer | Uint8Array,
   expected: { globalConfig?: PublicKey; chunkX?: number; chunkZ?: number } = {},
 ): DecodedFoundationChunkState {
   const data = Buffer.from(dataValue);
-  if (data.length !== FOUNDATION_CHUNK_LEN) {
+  if (data.length < FOUNDATION_CHUNK_HEADER_LEN) {
     throw new Error(`Invalid FoundationChunkState length: ${data.length}`);
   }
   const magic = data.subarray(0, 8).toString("utf8");
@@ -2219,12 +1741,19 @@ export function decodeFoundationChunkState(
     throw new Error(`Invalid FoundationChunkState header: ${magic} v${version}`);
   }
   const count = data.readUInt16LE(10);
-  if (count > FOUNDATION_CHUNK_CAPACITY) {
-    throw new Error(`Invalid FoundationChunkState count: ${count}`);
+  const capacity = data.readUInt16LE(12);
+  let expectedLength: number;
+  try {
+    expectedLength = foundationChunkAccountLength(capacity);
+  } catch {
+    throw new Error(`Invalid FoundationChunkState capacity: ${capacity}`);
   }
-  const globalConfig = new PublicKey(data.subarray(12, 44));
-  const chunkX = data.readInt32LE(44);
-  const chunkZ = data.readInt32LE(48);
+  if (data.length !== expectedLength || count > capacity) {
+    throw new Error(`Invalid FoundationChunkState size or count: ${data.length}/${count}/${capacity}`);
+  }
+  const globalConfig = new PublicKey(data.subarray(16, 48));
+  const chunkX = data.readInt32LE(48);
+  const chunkZ = data.readInt32LE(52);
   if (expected.globalConfig && !globalConfig.equals(expected.globalConfig)) {
     throw new Error("FoundationChunkState global config does not match the requested PDA");
   }
@@ -2237,14 +1766,27 @@ export function decodeFoundationChunkState(
   const records: DecodedFoundationRecord[] = [];
   for (let index = 0; index < count; index += 1) {
     const offset = FOUNDATION_CHUNK_HEADER_LEN + index * FOUNDATION_CHUNK_RECORD_LEN;
-    const width = data.readUInt8(offset + 50);
-    const depth = data.readUInt8(offset + 51);
-    validateFoundationSize(width, depth);
+    const foundationId = data.readBigUInt64LE(offset + 32);
+    const minX = data.readInt32LE(offset + 40);
+    const minZ = data.readInt32LE(offset + 44);
+    const width = data.readUInt32LE(offset + 50);
+    const depth = data.readUInt32LE(offset + 54);
+    const maxX = BigInt(minX) + BigInt(width) - 1n;
+    const maxZ = BigInt(minZ) + BigInt(depth) - 1n;
+    if (foundationId === 0n
+      || width < FOUNDATION_MIN_SIZE
+      || depth < FOUNDATION_MIN_SIZE
+      || maxX < -0x8000_0000n
+      || maxX > 0x7fff_ffffn
+      || maxZ < -0x8000_0000n
+      || maxZ > 0x7fff_ffffn) {
+      throw new Error(`Invalid FoundationChunkState record at index ${index}`);
+    }
     records.push({
       owner: new PublicKey(data.subarray(offset, offset + 32)),
-      foundationId: data.readBigUInt64LE(offset + 32),
-      minX: data.readInt32LE(offset + 40),
-      minZ: data.readInt32LE(offset + 44),
+      foundationId,
+      minX,
+      minZ,
       surfaceY: data.readInt16LE(offset + 48),
       width,
       depth,
@@ -2255,80 +1797,12 @@ export function decodeFoundationChunkState(
     version,
     bump: data.readUInt8(9),
     count,
+    capacity,
     globalConfig,
     chunkX,
     chunkZ,
     records,
   };
-}
-
-function normalizeFoundationInput(input: FoundationInput): FoundationInput {
-  const minX = requireI32(input?.minX, "minX");
-  const minZ = requireI32(input?.minZ, "minZ");
-  const surfaceY = requireI16(input?.surfaceY, "surfaceY");
-  const width = requirePositiveInt(input?.width, "width");
-  const depth = requirePositiveInt(input?.depth, "depth");
-  validateFoundationSize(width, depth);
-  requireI32(minX + width - 1, "maxX");
-  requireI32(minZ + depth - 1, "maxZ");
-  if (surfaceY <= CANONICAL_CHUNK_WORLD_CONFIG.minBuildY || surfaceY > CANONICAL_CHUNK_WORLD_CONFIG.maxBuildY) {
-    throw new Error(`surfaceY must be in ${CANONICAL_CHUNK_WORLD_CONFIG.minBuildY + 1}..${CANONICAL_CHUNK_WORLD_CONFIG.maxBuildY}`);
-  }
-  return { minX, minZ, surfaceY, width, depth };
-}
-
-function normalizeBuildSiteInput(input: FoundationInput): FoundationInput {
-  const minX = requireI32(input?.minX, "minX");
-  const minZ = requireI32(input?.minZ, "minZ");
-  const surfaceY = requireI16(input?.surfaceY, "surfaceY");
-  const width = requireU32(input?.width, "width");
-  const depth = requireU32(input?.depth, "depth");
-  if (width < FOUNDATION_MIN_SIZE || depth < FOUNDATION_MIN_SIZE) {
-    throw new Error(`Foundation dimensions must be at least ${FOUNDATION_MIN_SIZE}`);
-  }
-  requireI32(minX + width - 1, "maxX");
-  requireI32(minZ + depth - 1, "maxZ");
-  if (surfaceY <= CANONICAL_CHUNK_WORLD_CONFIG.minBuildY || surfaceY > CANONICAL_CHUNK_WORLD_CONFIG.maxBuildY) {
-    throw new Error(`surfaceY must be in ${CANONICAL_CHUNK_WORLD_CONFIG.minBuildY + 1}..${CANONICAL_CHUNK_WORLD_CONFIG.maxBuildY}`);
-  }
-  return { minX, minZ, surfaceY, width, depth };
-}
-
-function foundationChunks(foundation: FoundationInput, chunkSize: number): Array<{ chunkX: number; chunkZ: number }> {
-  const minChunkX = Math.floor(foundation.minX / chunkSize);
-  const maxChunkX = Math.floor((foundation.minX + foundation.width - 1) / chunkSize);
-  const minChunkZ = Math.floor(foundation.minZ / chunkSize);
-  const maxChunkZ = Math.floor((foundation.minZ + foundation.depth - 1) / chunkSize);
-  const chunks: Array<{ chunkX: number; chunkZ: number }> = [];
-  for (let chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ += 1) {
-    for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
-      chunks.push({ chunkX, chunkZ });
-    }
-  }
-  if (!chunks.length || chunks.length > FOUNDATION_MAX_CHUNKS) {
-    throw new Error(`Foundation must span 1-${FOUNDATION_MAX_CHUNKS} chunks`);
-  }
-  return chunks;
-}
-
-function normalizeFoundationId(value: bigint | number | string): bigint {
-  let id: bigint;
-  try {
-    id = BigInt(value);
-  } catch {
-    throw new Error("foundationId must be an unsigned 64-bit integer");
-  }
-  if (id < 0n || id > 0xffff_ffff_ffff_ffffn) {
-    throw new Error("foundationId must be an unsigned 64-bit integer");
-  }
-  return id;
-}
-
-function validateFoundationSize(width: number, depth: number): void {
-  if (width < FOUNDATION_MIN_SIZE || width > FOUNDATION_MAX_SIZE
-    || depth < FOUNDATION_MIN_SIZE || depth > FOUNDATION_MAX_SIZE) {
-    throw new Error(`Foundation dimensions must be in ${FOUNDATION_MIN_SIZE}..${FOUNDATION_MAX_SIZE}`);
-  }
 }
 
 function requireI32(value: number, name: string): number {
@@ -2351,14 +1825,6 @@ function requireI16(value: number, name: string): number {
   const normalized = Number(value);
   if (!Number.isInteger(normalized) || normalized < -0x8000 || normalized > 0x7fff) {
     throw new Error(`${name} must be a signed 16-bit integer`);
-  }
-  return normalized;
-}
-
-function requirePositiveInt(value: number, name: string): number {
-  const normalized = Number(value);
-  if (!Number.isSafeInteger(normalized) || normalized <= 0) {
-    throw new Error(`${name} must be a positive integer`);
   }
   return normalized;
 }

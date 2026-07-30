@@ -48,8 +48,8 @@ describe("nicechunk skills SDK", () => {
     const owner = PublicKey.unique();
     const globalConfig = PublicKey.unique();
     const data = Buffer.alloc(PLAYER_SKILLS_LEN);
-    data.write("NCKSKL01", 0, "utf8");
-    data.writeUInt16LE(1, 8);
+    data.write("NCKSKL02", 0, "utf8");
+    data.writeUInt16LE(2, 8);
     data.writeUInt8(1, 11);
     owner.toBuffer().copy(data, 12);
     globalConfig.toBuffer().copy(data, 44);
@@ -119,8 +119,8 @@ describe("nicechunk skills SDK", () => {
 
     const globalConfig = PublicKey.unique();
     const table = Buffer.alloc(SKILL_RULE_TABLE_LEN);
-    table.write("NCKXPR01", 0, "utf8");
-    table.writeUInt16LE(1, 8);
+    table.write("NCKXPR02", 0, "utf8");
+    table.writeUInt16LE(2, 8);
     table.writeUInt8(1, 11);
     authority.toBuffer().copy(table, 12);
     globalConfig.toBuffer().copy(table, 44);

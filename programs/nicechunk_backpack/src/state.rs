@@ -1688,35 +1688,27 @@ fn calculate_forge_outcome(materials: &[BackpackSlotRecord], forging_level: u8) 
         material_item_level_from_durability(total_effective_durability, total_volume);
     let item_level = material_level.max(1);
     let item_level_grade = 1_u8.saturating_add((item_level.saturating_sub(1) / 10).min(9));
-    let skill_grade = 1_u8.saturating_add(forging_level.min(9));
-    let skill_cap = 3_u8.saturating_add(forging_level.min(7)).min(10);
-    let blended_grade =
-        ((material_grade as u16 * 2 + item_level_grade as u16 + skill_grade as u16 + 2) / 4) as u8;
+    let blended_grade = ((material_grade as u16 * 3 + item_level_grade as u16 + 2) / 4) as u8;
     let grade = blended_grade
         .max(1)
         .min(10)
-        .min(skill_cap)
         .min(material_grade.saturating_add(1).min(10))
         .min(weak_grade_cap);
 
-    let skill_factor = 90_u64
-        .saturating_add(grade as u64 * 5)
-        .saturating_add(forging_level.min(10) as u64 * 3);
+    let material_factor = 90_u64.saturating_add(grade as u64 * 5);
     let level_factor = 100_u64.saturating_add(item_level as u64 / 2);
-    let candidate = total_effective_durability
-        .saturating_mul(skill_factor)
+    let base_candidate = total_effective_durability
+        .saturating_mul(material_factor)
         .saturating_mul(level_factor)
         / 10_000;
-    let material_cap = total_raw_durability
-        .saturating_mul(105_u64.saturating_add(forging_level.min(10) as u64))
-        / 100;
-    let durability_max = candidate
+    let base_material_cap = total_raw_durability.saturating_mul(105) / 100;
+    let base_durability = base_candidate.max(1).min(base_material_cap.max(1));
+    let durability_bonus_percent = 100_u64.saturating_add(forging_level.min(10) as u64 * 5);
+    let durability_max = base_durability
+        .saturating_mul(durability_bonus_percent)
+        .saturating_div(100)
         .max(1)
-        .min(material_cap.max(1))
         .min(u32::MAX as u64) as u32;
-    let gained_xp = (grade as u64)
-        .saturating_mul(grade as u64)
-        .saturating_mul(25);
 
     ForgeOutcome {
         grade,
@@ -1725,7 +1717,7 @@ fn calculate_forge_outcome(materials: &[BackpackSlotRecord], forging_level: u8) 
         quality_bps,
         volume_mm3: total_volume.max(1).min(u32::MAX as u64) as u32,
         mass_grams: 0,
-        gained_xp,
+        gained_xp: 1,
     }
 }
 
@@ -2174,7 +2166,11 @@ mod tests {
         data
     }
 
-    fn forge_single_material(durability_current: u32, durability_max: u32) -> ForgeOutcome {
+    fn forge_single_material_at_level(
+        durability_current: u32,
+        durability_max: u32,
+        forging_level: u8,
+    ) -> ForgeOutcome {
         let owner = Pubkey::new_unique();
         let mut data = empty_backpack(&owner, 4);
         let material = material_slot(durability_current, durability_max);
@@ -2186,10 +2182,14 @@ mod tests {
             901,
             0x7a1d_c0de,
             &Pubkey::new_unique(),
-            3,
+            forging_level,
             12,
         )
         .unwrap()
+    }
+
+    fn forge_single_material(durability_current: u32, durability_max: u32) -> ForgeOutcome {
+        forge_single_material_at_level(durability_current, durability_max, 3)
     }
 
     #[test]
@@ -2586,13 +2586,21 @@ mod tests {
     }
 
     #[test]
-    fn forging_xp_depends_only_on_final_grade() {
+    fn every_completed_forging_action_grants_one_xp() {
         let outcome = forge_single_material(1_200, 1_200);
 
-        assert_eq!(
-            outcome.gained_xp,
-            outcome.grade as u64 * outcome.grade as u64 * 25
-        );
+        assert_eq!(outcome.gained_xp, 1);
+    }
+
+    #[test]
+    fn forging_skill_adds_five_percent_durability_per_level() {
+        let base = forge_single_material_at_level(8_000, 8_000, 0);
+        let level_one = forge_single_material_at_level(8_000, 8_000, 1);
+        let maximum = forge_single_material_at_level(8_000, 8_000, 10);
+
+        assert_eq!(level_one.durability_max, base.durability_max * 105 / 100);
+        assert_eq!(maximum.durability_max, base.durability_max * 150 / 100);
+        assert_eq!(maximum.grade, base.grade);
     }
 
     #[test]

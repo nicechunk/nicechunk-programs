@@ -406,12 +406,13 @@ fn sync_player_skills(
             current_counter,
         )?;
     }
+    let mut new_mining_action = false;
     if let Some(coordinate) = mining_coordinate {
         if let Some(rule) = RuleTableState::burden_mining_rule(&rule_table_data)? {
             if let Some((pre_mine_mass_grams, mine_sequence)) =
                 burden_snapshot_from_sources(source_accounts, owner.key, global_config.key)?
             {
-                PlayerSkillsState::apply_burden_mining_action(
+                new_mining_action = PlayerSkillsState::apply_burden_mining_action(
                     &mut player_skills_data,
                     owner.key,
                     global_config.key,
@@ -419,11 +420,13 @@ fn sync_player_skills(
                     pre_mine_mass_grams,
                     mine_sequence,
                     coordinate,
-                )?;
+                )?
+                .changed;
             }
         }
     }
-    if let Some(coordinate) = mining_coordinate {
+    if new_mining_action {
+        let coordinate = mining_coordinate.ok_or(NicechunkSkillsError::InvalidMiningProof)?;
         let rule = RuleTableState::mining_travel_rule(&rule_table_data)?;
         PlayerSkillsState::record_mining_coordinate(
             &mut player_skills_data,
@@ -495,10 +498,10 @@ fn mining_instruction_matches(
     }
     let (progress_index, global_config_index, coordinate_offset, required_data_len) =
         match instruction.data[0] {
-            CHUNK_MINE_WITH_REWARDS_TAG => (3, 6, 1, 13),
-            CHUNK_FELL_TREE_WITH_REWARDS_TAG => (3, 4, 1, 13),
-            CHUNK_BATCH_MINE_WITH_REWARDS_TAG => (3, 6, 3, 15),
-            CHUNK_RANGE_MINE_WITH_REWARDS_TAG => (3, 6, 2, 16),
+            CHUNK_MINE_WITH_REWARDS_TAG => (3, 6, 9, 21),
+            CHUNK_FELL_TREE_WITH_REWARDS_TAG => (3, 4, 9, 21),
+            CHUNK_BATCH_MINE_WITH_REWARDS_TAG => (3, 6, 11, 23),
+            CHUNK_RANGE_MINE_WITH_REWARDS_TAG => (3, 6, 10, 24),
             _ => return false,
         };
     if instruction.data.len() < required_data_len {
@@ -589,6 +592,9 @@ fn validate_and_read_source(
     global_config: &Pubkey,
     owner: &Pubkey,
 ) -> Result<u64, solana_program::program_error::ProgramError> {
+    if source.owner == &system_program::ID && source.data_len() == 0 {
+        return Ok(0);
+    }
     require_key_eq(
         source.owner,
         &rule.source_program,
@@ -852,29 +858,29 @@ mod tests {
                 CHUNK_MINE_WITH_REWARDS_TAG,
                 6_usize,
                 14_usize,
-                1_usize,
-                13_usize,
+                9_usize,
+                21_usize,
             ),
             (
                 CHUNK_FELL_TREE_WITH_REWARDS_TAG,
                 4_usize,
                 11_usize,
-                1_usize,
-                13_usize,
+                9_usize,
+                21_usize,
             ),
             (
                 CHUNK_BATCH_MINE_WITH_REWARDS_TAG,
                 6_usize,
                 14_usize,
-                3_usize,
-                15_usize,
+                11_usize,
+                23_usize,
             ),
             (
                 CHUNK_RANGE_MINE_WITH_REWARDS_TAG,
                 6_usize,
                 14_usize,
-                2_usize,
-                16_usize,
+                10_usize,
+                24_usize,
             ),
         ] {
             let mut data = vec![0_u8; data_len];
@@ -907,11 +913,12 @@ mod tests {
     fn mining_proof_rejects_untrusted_coordinate_and_program() {
         let player_progress = Pubkey::new_unique();
         let global_config = Pubkey::new_unique();
-        let mut data = vec![0_u8; 13];
+        let mut data = vec![0_u8; 21];
         data[0] = CHUNK_MINE_WITH_REWARDS_TAG;
-        data[1..5].copy_from_slice(&10_i32.to_le_bytes());
-        data[5..7].copy_from_slice(&20_i16.to_le_bytes());
-        data[7..11].copy_from_slice(&30_i32.to_le_bytes());
+        data[1..9].copy_from_slice(&7_u64.to_le_bytes());
+        data[9..13].copy_from_slice(&10_i32.to_le_bytes());
+        data[13..15].copy_from_slice(&20_i16.to_le_bytes());
+        data[15..19].copy_from_slice(&30_i32.to_le_bytes());
         let mut accounts = vec![AccountMeta::new_readonly(Pubkey::new_unique(), false); 12];
         accounts[3].pubkey = player_progress;
         accounts[6].pubkey = global_config;
