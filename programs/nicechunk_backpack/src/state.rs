@@ -2768,6 +2768,10 @@ mod tests {
                 .unwrap(),
             625
         );
+        assert_eq!(
+            physics.item_rule(1015).unwrap().mass_grams(18_600).unwrap(),
+            153
+        );
     }
 
     #[test]
@@ -2982,6 +2986,11 @@ mod tests {
             MaterialPhysicsRule {
                 key: MATERIAL_PHYSICS_ITEM_KEY_MASK | 1010,
                 density_kg_m3: 2_500,
+                standard_volume_mm3: 250_000,
+            },
+            MaterialPhysicsRule {
+                key: MATERIAL_PHYSICS_ITEM_KEY_MASK | 1015,
+                density_kg_m3: 8_200,
                 standard_volume_mm3: 250_000,
             },
         ];

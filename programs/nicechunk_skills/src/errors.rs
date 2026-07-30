@@ -36,7 +36,7 @@ pub enum NicechunkSkillsError {
     InvalidMiningTravelRule = 7630,
     InvalidBurdenMiningRule = 7631,
     InvalidBackpackSource = 7632,
-    BackpackMassMigrationRequired = 7633,
+    InvalidBackpackMassState = 7633,
 }
 
 impl From<NicechunkSkillsError> for ProgramError {

@@ -2532,7 +2532,18 @@ fn append_backpack_block_resources_lossy<'a>(
     action_id: u64,
 ) -> ProgramResult {
     if rewards.is_empty() {
-        return Ok(());
+        return record_backpack_mining_action(
+            program_id,
+            backpack_program,
+            chunk_broken,
+            global_config,
+            player_profile,
+            backpack,
+            chunk_x,
+            chunk_z,
+            chunk_bump,
+            action_id,
+        );
     }
     let mut data = Vec::with_capacity(10 + rewards.len() * 18);
     data.push(6);
@@ -2581,6 +2592,64 @@ fn append_backpack_block_resources_lossy<'a>(
             player_profile.clone(),
             backpack.clone(),
             material_physics.clone(),
+        ],
+        &[seeds],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_backpack_mining_action<'a>(
+    program_id: &Pubkey,
+    backpack_program: &AccountInfo<'a>,
+    chunk_broken: &AccountInfo<'a>,
+    global_config: &AccountInfo<'a>,
+    player_profile: &AccountInfo<'a>,
+    backpack: &AccountInfo<'a>,
+    chunk_x: i32,
+    chunk_z: i32,
+    chunk_bump: u8,
+    action_id: u64,
+) -> ProgramResult {
+    let mut data = [0_u8; 17];
+    data[0] = 13;
+    data[1..9].copy_from_slice(&action_id.to_le_bytes());
+    data[9..13].copy_from_slice(&chunk_x.to_le_bytes());
+    data[13..17].copy_from_slice(&chunk_z.to_le_bytes());
+    let data = backpack_cpi_data(&data);
+    let ix = Instruction {
+        program_id: *backpack_program.key,
+        accounts: vec![
+            AccountMeta::new_readonly(*chunk_broken.key, true),
+            AccountMeta::new_readonly(*global_config.key, false),
+            AccountMeta::new_readonly(*player_profile.key, false),
+            AccountMeta::new(*backpack.key, false),
+        ],
+        data,
+    };
+    let chunk_x_bytes = chunk_x.to_le_bytes();
+    let chunk_z_bytes = chunk_z.to_le_bytes();
+    let seeds = &[
+        CHUNK_BROKEN_SEED,
+        global_config.key.as_ref(),
+        &chunk_x_bytes,
+        &chunk_z_bytes,
+        &[chunk_bump],
+    ];
+    let expected = Pubkey::create_program_address(seeds, program_id)
+        .map_err(|_| NicechunkChunkError::InvalidChunkBrokenPda)?;
+    require_key_eq(
+        chunk_broken.key,
+        &expected,
+        NicechunkChunkError::InvalidChunkBrokenPda,
+    )?;
+    invoke_signed(
+        &ix,
+        &[
+            chunk_broken.clone(),
+            global_config.clone(),
+            player_profile.clone(),
+            backpack.clone(),
+            backpack_program.clone(),
         ],
         &[seeds],
     )

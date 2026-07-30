@@ -66,6 +66,7 @@ describe("MaterialPhysics PDA", () => {
     assert.equal(materialPhysicsMassGrams(findRule("block", 3), 1_000_000), 2600);
     assert.equal(materialPhysicsMassGrams(findRule("block", 49), 100_000), 14);
     assert.equal(materialPhysicsMassGrams(findRule("item", 1010), 250_000), 625);
+    assert.equal(materialPhysicsMassGrams(findRule("item", 1015), 18_600), 153);
   });
 
   it("encodes the treasury instruction and decodes the resulting table layout", () => {

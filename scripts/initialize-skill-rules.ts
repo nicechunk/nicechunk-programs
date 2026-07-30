@@ -33,7 +33,7 @@ const PLAYER_PROGRAM_ID = new PublicKey("CHZHsBCGn58ih2WrPfKSYhvCEjMPGhArTiYCH7A
 
 const SKILL_THRESHOLDS: Record<PlayerSkillId, readonly number[]> = {
   precisionGathering: [900, 3_481, 8_261, 15_663, 26_054, 39_764, 57_094, 78_323, 103_715, 133_517],
-  burden: [1_300, 5_187, 12_563, 24_183, 40_715, 62_766, 90_898, 125_638, 167_483, 216_908],
+  burden: [10_000, 20_000, 30_000, 40_000, 50_000, 60_000, 70_000, 80_000, 90_000, 100_000],
   smelting: [1_200, 4_738, 11_398, 21_831, 36_608, 56_246, 81_223, 111_984, 148_950, 192_519],
   forging: [1_400, 5_644, 13_763, 26_628, 45_014, 69_627, 101_125, 140_126, 187_215, 242_950],
   craftsmanship: [1_800, 7_488, 18_638, 36_614, 62_649, 97_886, 143_399, 200_206, 269_280, 351_556],
@@ -187,6 +187,18 @@ async function main(): Promise<void> {
     })], "initialize rule table");
   }
 
+  await submit(connection, authority, [createSetBurdenMiningRuleInstruction({
+    authority: authority.publicKey,
+    rule: {
+      skill: "burden",
+      massStepGrams: 20_000,
+      chunkSizeBlocks: 16,
+      maxDistanceChunks: 5,
+    },
+    globalConfig,
+    programId,
+  })], "set burden mining rule");
+
   for (const skillId of PLAYER_SKILL_IDS) {
     await submit(connection, authority, [createSetSkillThresholdsInstruction({
       authority: authority.publicKey,
@@ -217,17 +229,6 @@ async function main(): Promise<void> {
     globalConfig,
     programId,
   })], "set mining travel rule");
-
-  await submit(connection, authority, [createSetBurdenMiningRuleInstruction({
-    authority: authority.publicKey,
-    rule: {
-      skill: "burden",
-      maxEffectiveMassGrams: 100_000,
-      workPerXp: 100_000,
-    },
-    globalConfig,
-    programId,
-  })], "set burden mining rule");
 
   if (!authority.publicKey.equals(treasury)) {
     await submit(connection, authority, [createSetSkillRuleTableAuthorityInstruction({

@@ -6,11 +6,11 @@ pub const SKILL_COUNT: usize = 10;
 pub const LEVEL_COUNT: usize = 10;
 pub const MAX_SOURCE_RULES: usize = 32;
 pub const MAX_GENERIC_SOURCE_RULES: usize = 30;
-pub const BURDEN_WORK_CURSOR_INDEX: usize = 30;
+pub const BURDEN_XP_CURSOR_INDEX: usize = 30;
 pub const BURDEN_SEQUENCE_CURSOR_INDEX: usize = 31;
 pub const BURDEN_RULE_RECORD_INDEX: usize = 31;
 pub const BURDEN_RULE_MAGIC: [u8; 8] = *b"NCKBRD01";
-pub const BURDEN_RULE_VERSION: u16 = 1;
+pub const BURDEN_RULE_VERSION: u16 = 2;
 
 pub const RULE_TABLE_MAGIC: [u8; 8] = *b"NCKXPR01";
 pub const RULE_TABLE_VERSION: u16 = 1;
@@ -210,16 +210,18 @@ pub struct MiningTravelRule {
 pub struct BurdenMiningRule {
     pub enabled: bool,
     pub skill_index: u8,
-    pub max_effective_mass_grams: u64,
-    pub work_per_xp: u64,
+    pub mass_step_grams: u64,
+    pub chunk_size_blocks: u16,
+    pub max_distance_chunks: u8,
 }
 
 impl BurdenMiningRule {
     pub fn validate(&self) -> Result<(), NicechunkSkillsError> {
         if self.enabled
             && (self.skill_index as usize >= SKILL_COUNT
-                || self.max_effective_mass_grams == 0
-                || self.work_per_xp == 0)
+                || self.mass_step_grams == 0
+                || self.chunk_size_blocks == 0
+                || self.max_distance_chunks == 0)
         {
             return Err(NicechunkSkillsError::InvalidBurdenMiningRule);
         }
@@ -236,8 +238,9 @@ impl BurdenMiningRule {
         dst[8..10].copy_from_slice(&BURDEN_RULE_VERSION.to_le_bytes());
         dst[10] = u8::from(self.enabled);
         dst[11] = self.skill_index;
-        dst[12..20].copy_from_slice(&self.max_effective_mass_grams.to_le_bytes());
-        dst[20..28].copy_from_slice(&self.work_per_xp.to_le_bytes());
+        dst[12..20].copy_from_slice(&self.mass_step_grams.to_le_bytes());
+        dst[20..22].copy_from_slice(&self.chunk_size_blocks.to_le_bytes());
+        dst[22] = self.max_distance_chunks;
         Ok(())
     }
 
@@ -251,8 +254,9 @@ impl BurdenMiningRule {
         let rule = Self {
             enabled: data[10] != 0,
             skill_index: data[11],
-            max_effective_mass_grams: read_u64(data, 12),
-            work_per_xp: read_u64(data, 20),
+            mass_step_grams: read_u64(data, 12),
+            chunk_size_blocks: read_u16(data, 20),
+            max_distance_chunks: data[22],
         };
         rule.validate()?;
         Ok(rule)
@@ -676,6 +680,7 @@ impl PlayerSkillsState {
         rule: BurdenMiningRule,
         pre_mine_mass_grams: u64,
         mine_sequence: u64,
+        coordinate: MiningCoordinate,
     ) -> Result<CounterApplyResult, NicechunkSkillsError> {
         let state = Self::validate(data, owner, global_config)?;
         rule.validate()?;
@@ -687,7 +692,7 @@ impl PlayerSkillsState {
         }
 
         let sequence_bit = 1_u32 << BURDEN_SEQUENCE_CURSOR_INDEX;
-        let work_bit = 1_u32 << BURDEN_WORK_CURSOR_INDEX;
+        let xp_bit = 1_u32 << BURDEN_XP_CURSOR_INDEX;
         let sequence_initialized = state.cursor_mask & sequence_bit != 0;
         let sequence_offset = PLAYER_SKILLS_CURSORS_OFFSET + BURDEN_SEQUENCE_CURSOR_INDEX * 8;
         let previous_sequence = read_u64(data, sequence_offset);
@@ -701,20 +706,34 @@ impl PlayerSkillsState {
             });
         }
 
-        let work_offset = PLAYER_SKILLS_CURSORS_OFFSET + BURDEN_WORK_CURSOR_INDEX * 8;
-        let previous_work = if state.cursor_mask & work_bit != 0 {
-            read_u64(data, work_offset)
+        let xp_cursor_offset = PLAYER_SKILLS_CURSORS_OFFSET + BURDEN_XP_CURSOR_INDEX * 8;
+        let previous_awarded_xp = if state.cursor_mask & xp_bit != 0 {
+            read_u64(data, xp_cursor_offset)
         } else {
             0
         };
-        let effective_mass = pre_mine_mass_grams.min(rule.max_effective_mass_grams);
-        let next_work = previous_work
-            .checked_add(effective_mass)
+        let has_previous =
+            data[PLAYER_SKILLS_MINING_FLAGS_OFFSET] & PLAYER_SKILLS_FLAG_HAS_LAST_MINE != 0;
+        let distance_chunks = if has_previous {
+            burden_chunk_distance(
+                MiningCoordinate {
+                    x: read_i32(data, PLAYER_SKILLS_LAST_MINE_X_OFFSET),
+                    y: read_i32(data, PLAYER_SKILLS_LAST_MINE_Y_OFFSET),
+                    z: read_i32(data, PLAYER_SKILLS_LAST_MINE_Z_OFFSET),
+                },
+                coordinate,
+                rule.chunk_size_blocks,
+            )
+            .min(rule.max_distance_chunks as u64)
+        } else {
+            0
+        };
+        let mass_points = pre_mine_mass_grams / rule.mass_step_grams;
+        let gained_xp = mass_points
+            .checked_mul(distance_chunks)
             .ok_or(NicechunkSkillsError::ArithmeticOverflow)?;
-        let previous_xp_units = previous_work / rule.work_per_xp;
-        let next_xp_units = next_work / rule.work_per_xp;
-        let gained_xp = next_xp_units
-            .checked_sub(previous_xp_units)
+        let next_awarded_xp = previous_awarded_xp
+            .checked_add(gained_xp)
             .ok_or(NicechunkSkillsError::ArithmeticOverflow)?;
         if gained_xp > 0 {
             let xp_offset = PLAYER_SKILLS_XP_OFFSET + rule.skill_index as usize * 8;
@@ -723,14 +742,15 @@ impl PlayerSkillsState {
                 .ok_or(NicechunkSkillsError::ArithmeticOverflow)?;
             data[xp_offset..xp_offset + 8].copy_from_slice(&next_xp.to_le_bytes());
         }
-        let next_mask = state.cursor_mask | work_bit | sequence_bit;
+        let next_mask = state.cursor_mask | xp_bit | sequence_bit;
         data[PLAYER_SKILLS_CURSOR_MASK_OFFSET..PLAYER_SKILLS_CURSOR_MASK_OFFSET + 4]
             .copy_from_slice(&next_mask.to_le_bytes());
-        data[work_offset..work_offset + 8].copy_from_slice(&next_work.to_le_bytes());
+        data[xp_cursor_offset..xp_cursor_offset + 8]
+            .copy_from_slice(&next_awarded_xp.to_le_bytes());
         data[sequence_offset..sequence_offset + 8].copy_from_slice(&mine_sequence.to_le_bytes());
         Ok(CounterApplyResult {
             changed: true,
-            applied_delta: effective_mass,
+            applied_delta: gained_xp,
         })
     }
 
@@ -815,6 +835,21 @@ impl PlayerSkillsState {
             .copy_from_slice(&updated_slot.to_le_bytes());
         Ok(())
     }
+}
+
+fn burden_chunk_distance(
+    previous: MiningCoordinate,
+    current: MiningCoordinate,
+    chunk_size_blocks: u16,
+) -> u64 {
+    let chunk_size = i32::from(chunk_size_blocks);
+    let previous_chunk_x = i64::from(previous.x.div_euclid(chunk_size));
+    let previous_chunk_z = i64::from(previous.z.div_euclid(chunk_size));
+    let current_chunk_x = i64::from(current.x.div_euclid(chunk_size));
+    let current_chunk_z = i64::from(current.z.div_euclid(chunk_size));
+    let distance_x = (current_chunk_x - previous_chunk_x).unsigned_abs();
+    let distance_z = (current_chunk_z - previous_chunk_z).unsigned_abs();
+    distance_x.max(distance_z)
 }
 
 fn validate_thresholds(thresholds: &[u64; LEVEL_COUNT]) -> ProgramResult {
@@ -925,6 +960,51 @@ mod tests {
         data
     }
 
+    fn burden_rule() -> BurdenMiningRule {
+        BurdenMiningRule {
+            enabled: true,
+            skill_index: 1,
+            mass_step_grams: 20_000,
+            chunk_size_blocks: 16,
+            max_distance_chunks: 5,
+        }
+    }
+
+    fn settle_burden_mine(
+        data: &mut [u8],
+        owner: &Pubkey,
+        global_config: &Pubkey,
+        pre_mine_mass_grams: u64,
+        mine_sequence: u64,
+        coordinate: MiningCoordinate,
+    ) -> CounterApplyResult {
+        let result = PlayerSkillsState::apply_burden_mining_action(
+            data,
+            owner,
+            global_config,
+            burden_rule(),
+            pre_mine_mass_grams,
+            mine_sequence,
+            coordinate,
+        )
+        .unwrap();
+        PlayerSkillsState::record_mining_coordinate(
+            data,
+            owner,
+            global_config,
+            coordinate,
+            MiningTravelRule {
+                enabled: false,
+                minimum_distance: 0,
+                skill_index: 0,
+                xp_award: 0,
+            },
+            mine_sequence,
+        )
+        .unwrap();
+        result
+    }
+
     #[test]
     fn layouts_match_declared_lengths() {
         assert_eq!(
@@ -1006,12 +1086,7 @@ mod tests {
         let authority = Pubkey::new_unique();
         let mut table = vec![0_u8; RULE_TABLE_LEN];
         RuleTableState::pack_empty(&mut table, 1, &authority, &global_config, 2, 3).unwrap();
-        let rule = BurdenMiningRule {
-            enabled: true,
-            skill_index: 1,
-            max_effective_mass_grams: 100_000,
-            work_per_xp: 100_000,
-        };
+        let rule = burden_rule();
         RuleTableState::set_burden_mining_rule(&mut table, &global_config, &authority, &rule, 4)
             .unwrap();
 
@@ -1024,7 +1099,7 @@ mod tests {
             &mut table,
             &global_config,
             &authority,
-            BURDEN_WORK_CURSOR_INDEX,
+            BURDEN_XP_CURSOR_INDEX,
             &sample_rule(true),
             5,
         )
@@ -1032,114 +1107,179 @@ mod tests {
     }
 
     #[test]
-    fn burden_xp_accumulates_verified_pre_mine_mass_and_caps_each_action() {
+    fn burden_awards_six_xp_for_forty_kilograms_across_three_chunks() {
         let owner = Pubkey::new_unique();
         let global_config = Pubkey::new_unique();
-        let rule = BurdenMiningRule {
-            enabled: true,
-            skill_index: 1,
-            max_effective_mass_grams: 100_000,
-            work_per_xp: 100_000,
-        };
         let mut data = vec![0_u8; PLAYER_SKILLS_LEN];
         PlayerSkillsState::pack_empty(&mut data, 1, &owner, &global_config, 2, 3).unwrap();
 
-        for sequence in 1..=4 {
-            PlayerSkillsState::apply_burden_mining_action(
-                &mut data,
-                &owner,
-                &global_config,
-                rule,
-                25_000,
-                sequence,
-            )
-            .unwrap();
-        }
-        assert_eq!(read_u64(&data, PLAYER_SKILLS_XP_OFFSET + 8), 1);
+        let first = settle_burden_mine(
+            &mut data,
+            &owner,
+            &global_config,
+            40_000,
+            1,
+            MiningCoordinate { x: 0, y: 90, z: 0 },
+        );
+        assert_eq!(first.applied_delta, 0);
+        let second = settle_burden_mine(
+            &mut data,
+            &owner,
+            &global_config,
+            40_000,
+            2,
+            MiningCoordinate {
+                x: 48,
+                y: -50,
+                z: 0,
+            },
+        );
+
+        assert_eq!(second.applied_delta, 6);
+        assert_eq!(read_u64(&data, PLAYER_SKILLS_XP_OFFSET + 8), 6);
         assert_eq!(
             read_u64(
                 &data,
-                PLAYER_SKILLS_CURSORS_OFFSET + BURDEN_WORK_CURSOR_INDEX * 8,
+                PLAYER_SKILLS_CURSORS_OFFSET + BURDEN_XP_CURSOR_INDEX * 8,
             ),
-            100_000
+            6
         );
-
-        PlayerSkillsState::apply_burden_mining_action(
-            &mut data,
-            &owner,
-            &global_config,
-            rule,
-            50_000,
-            5,
-        )
-        .unwrap();
-        PlayerSkillsState::apply_burden_mining_action(
-            &mut data,
-            &owner,
-            &global_config,
-            rule,
-            50_000,
-            6,
-        )
-        .unwrap();
-        assert_eq!(read_u64(&data, PLAYER_SKILLS_XP_OFFSET + 8), 2);
-
-        PlayerSkillsState::apply_burden_mining_action(
-            &mut data,
-            &owner,
-            &global_config,
-            rule,
-            400_000,
-            7,
-        )
-        .unwrap();
-        assert_eq!(read_u64(&data, PLAYER_SKILLS_XP_OFFSET + 8), 3);
-        let before = data.clone();
-        assert!(
-            !PlayerSkillsState::apply_burden_mining_action(
-                &mut data,
-                &owner,
-                &global_config,
-                rule,
-                400_000,
-                7,
-            )
-            .unwrap()
-            .changed
-        );
-        assert_eq!(data, before);
     }
 
     #[test]
-    fn burden_empty_load_gives_no_xp_but_consumes_the_mining_sequence() {
+    fn burden_uses_complete_twenty_kilogram_steps_and_caps_distance_at_five() {
         let owner = Pubkey::new_unique();
         let global_config = Pubkey::new_unique();
-        let rule = BurdenMiningRule {
-            enabled: true,
-            skill_index: 1,
-            max_effective_mass_grams: 100_000,
-            work_per_xp: 100_000,
-        };
         let mut data = vec![0_u8; PLAYER_SKILLS_LEN];
         PlayerSkillsState::pack_empty(&mut data, 1, &owner, &global_config, 2, 3).unwrap();
-        let result = PlayerSkillsState::apply_burden_mining_action(
+
+        settle_burden_mine(
             &mut data,
             &owner,
             &global_config,
-            rule,
             0,
             1,
+            MiningCoordinate { x: 0, y: 0, z: 0 },
+        );
+        let under_step = settle_burden_mine(
+            &mut data,
+            &owner,
+            &global_config,
+            19_999,
+            2,
+            MiningCoordinate { x: 16, y: 0, z: 0 },
+        );
+        assert_eq!(under_step.applied_delta, 0);
+        let forty_six_kg = settle_burden_mine(
+            &mut data,
+            &owner,
+            &global_config,
+            46_000,
+            3,
+            MiningCoordinate { x: 32, y: 0, z: 0 },
+        );
+        assert_eq!(forty_six_kg.applied_delta, 2);
+        let capped = settle_burden_mine(
+            &mut data,
+            &owner,
+            &global_config,
+            40_000,
+            4,
+            MiningCoordinate { x: 192, y: 0, z: 0 },
+        );
+        assert_eq!(capped.applied_delta, 10);
+        assert_eq!(read_u64(&data, PLAYER_SKILLS_XP_OFFSET + 8), 12);
+    }
+
+    #[test]
+    fn burden_uses_chebyshev_chunks_and_floor_division_for_negative_coordinates() {
+        let owner = Pubkey::new_unique();
+        let global_config = Pubkey::new_unique();
+        let mut data = vec![0_u8; PLAYER_SKILLS_LEN];
+        PlayerSkillsState::pack_empty(&mut data, 1, &owner, &global_config, 2, 3).unwrap();
+
+        settle_burden_mine(
+            &mut data,
+            &owner,
+            &global_config,
+            40_000,
+            1,
+            MiningCoordinate {
+                x: 15,
+                y: -500,
+                z: 15,
+            },
+        );
+        let result = settle_burden_mine(
+            &mut data,
+            &owner,
+            &global_config,
+            40_000,
+            2,
+            MiningCoordinate {
+                x: -17,
+                y: 500,
+                z: 63,
+            },
+        );
+
+        assert_eq!(result.applied_delta, 6);
+    }
+
+    #[test]
+    fn burden_zero_xp_mine_updates_baseline_and_duplicate_sequence_cannot_pay_twice() {
+        let owner = Pubkey::new_unique();
+        let global_config = Pubkey::new_unique();
+        let mut data = vec![0_u8; PLAYER_SKILLS_LEN];
+        PlayerSkillsState::pack_empty(&mut data, 1, &owner, &global_config, 2, 3).unwrap();
+
+        settle_burden_mine(
+            &mut data,
+            &owner,
+            &global_config,
+            40_000,
+            1,
+            MiningCoordinate { x: 0, y: 0, z: 0 },
+        );
+        settle_burden_mine(
+            &mut data,
+            &owner,
+            &global_config,
+            19_999,
+            2,
+            MiningCoordinate { x: 31, y: 0, z: 0 },
+        );
+        let paid = PlayerSkillsState::apply_burden_mining_action(
+            &mut data,
+            &owner,
+            &global_config,
+            burden_rule(),
+            40_000,
+            3,
+            MiningCoordinate { x: 32, y: 0, z: 0 },
         )
         .unwrap();
-        assert!(result.changed);
-        assert_eq!(result.applied_delta, 0);
-        assert_eq!(read_u64(&data, PLAYER_SKILLS_XP_OFFSET + 8), 0);
+        assert_eq!(paid.applied_delta, 2);
+        let before_duplicate = data.clone();
+        let duplicate = PlayerSkillsState::apply_burden_mining_action(
+            &mut data,
+            &owner,
+            &global_config,
+            burden_rule(),
+            400_000,
+            3,
+            MiningCoordinate { x: 320, y: 0, z: 0 },
+        )
+        .unwrap();
+        assert!(!duplicate.changed);
+        assert_eq!(data, before_duplicate);
+        assert_eq!(read_u64(&data, PLAYER_SKILLS_XP_OFFSET + 8), 2);
         assert_eq!(
             read_u64(
                 &data,
                 PLAYER_SKILLS_CURSORS_OFFSET + BURDEN_SEQUENCE_CURSOR_INDEX * 8,
             ),
-            1
+            3
         );
     }
 

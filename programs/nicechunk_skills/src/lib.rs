@@ -42,6 +42,8 @@ const GLOBAL_CONFIG_DEVELOPMENT_WALLET_OFFSET: usize = 53;
 const SYNC_MINING_COORDINATE_LEN: usize = 12;
 const CHUNK_MINE_WITH_REWARDS_TAG: u8 = 8;
 const CHUNK_FELL_TREE_WITH_REWARDS_TAG: u8 = 9;
+const CHUNK_BATCH_MINE_WITH_REWARDS_TAG: u8 = 20;
+const CHUNK_RANGE_MINE_WITH_REWARDS_TAG: u8 = 21;
 const PLAYER_PROFILE_SEED: &[u8] = b"player-v7";
 const PLAYER_PROFILE_MAGIC: [u8; 8] = *b"NCKPLY01";
 const PLAYER_PROFILE_LEN: usize = 773;
@@ -87,7 +89,7 @@ fn set_burden_mining_rule(
     accounts: &[AccountInfo],
     payload: &[u8],
 ) -> ProgramResult {
-    if accounts.len() != 3 || payload.len() != 18 {
+    if accounts.len() != 3 || payload.len() != 13 {
         return Err(NicechunkSkillsError::InvalidInstruction.into());
     }
     let account_info_iter = &mut accounts.iter();
@@ -98,8 +100,9 @@ fn set_burden_mining_rule(
     let rule = BurdenMiningRule {
         enabled: payload[0] != 0,
         skill_index: payload[1],
-        max_effective_mass_grams: read_u64(payload, 2),
-        work_per_xp: read_u64(payload, 10),
+        mass_step_grams: read_u64(payload, 2),
+        chunk_size_blocks: read_u16(payload, 10),
+        max_distance_chunks: payload[12],
     };
     let clock = Clock::get()?;
     let mut data = rule_table.try_borrow_mut_data()?;
@@ -403,18 +406,21 @@ fn sync_player_skills(
             current_counter,
         )?;
     }
-    if let Some(rule) = RuleTableState::burden_mining_rule(&rule_table_data)? {
-        if let Some((pre_mine_mass_grams, mine_sequence)) =
-            burden_snapshot_from_sources(source_accounts, owner.key, global_config.key)?
-        {
-            PlayerSkillsState::apply_burden_mining_action(
-                &mut player_skills_data,
-                owner.key,
-                global_config.key,
-                rule,
-                pre_mine_mass_grams,
-                mine_sequence,
-            )?;
+    if let Some(coordinate) = mining_coordinate {
+        if let Some(rule) = RuleTableState::burden_mining_rule(&rule_table_data)? {
+            if let Some((pre_mine_mass_grams, mine_sequence)) =
+                burden_snapshot_from_sources(source_accounts, owner.key, global_config.key)?
+            {
+                PlayerSkillsState::apply_burden_mining_action(
+                    &mut player_skills_data,
+                    owner.key,
+                    global_config.key,
+                    rule,
+                    pre_mine_mass_grams,
+                    mine_sequence,
+                    coordinate,
+                )?;
+            }
         }
     }
     if let Some(coordinate) = mining_coordinate {
@@ -484,14 +490,20 @@ fn mining_instruction_matches(
     player_progress: &Pubkey,
     global_config: &Pubkey,
 ) -> bool {
-    if instruction.program_id != NICECHUNK_CHUNK_PROGRAM_ID || instruction.data.len() != 13 {
+    if instruction.program_id != NICECHUNK_CHUNK_PROGRAM_ID || instruction.data.is_empty() {
         return false;
     }
-    let (progress_index, global_config_index) = match instruction.data[0] {
-        CHUNK_MINE_WITH_REWARDS_TAG => (3, 6),
-        CHUNK_FELL_TREE_WITH_REWARDS_TAG => (3, 4),
-        _ => return false,
-    };
+    let (progress_index, global_config_index, coordinate_offset, required_data_len) =
+        match instruction.data[0] {
+            CHUNK_MINE_WITH_REWARDS_TAG => (3, 6, 1, 13),
+            CHUNK_FELL_TREE_WITH_REWARDS_TAG => (3, 4, 1, 13),
+            CHUNK_BATCH_MINE_WITH_REWARDS_TAG => (3, 6, 3, 15),
+            CHUNK_RANGE_MINE_WITH_REWARDS_TAG => (3, 6, 2, 16),
+            _ => return false,
+        };
+    if instruction.data.len() < required_data_len {
+        return false;
+    }
     if instruction.accounts.len() <= global_config_index
         || instruction.accounts[progress_index].pubkey != *player_progress
         || instruction.accounts[global_config_index].pubkey != *global_config
@@ -499,9 +511,9 @@ fn mining_instruction_matches(
         return false;
     }
     MiningCoordinate {
-        x: read_i32(&instruction.data, 1),
-        y: read_i16(&instruction.data, 5) as i32,
-        z: read_i32(&instruction.data, 7),
+        x: read_i32(&instruction.data, coordinate_offset),
+        y: read_i16(&instruction.data, coordinate_offset + 4) as i32,
+        z: read_i32(&instruction.data, coordinate_offset + 6),
     } == coordinate
 }
 
@@ -663,7 +675,7 @@ fn burden_snapshot_from_sources(
         NicechunkSkillsError::InvalidBackpackSource,
     )?;
     if data[BACKPACK_FLAGS_OFFSET] & BACKPACK_TOTAL_MASS_INITIALIZED == 0 {
-        return Err(NicechunkSkillsError::BackpackMassMigrationRequired.into());
+        return Err(NicechunkSkillsError::InvalidBackpackMassState.into());
     }
     Ok(Some((
         read_u64(&data, BACKPACK_LAST_MINE_PRE_MASS_OFFSET),
@@ -822,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn mining_proof_matches_reward_mine_and_tree_layouts() {
+    fn mining_proof_matches_all_reward_mining_layouts() {
         let owner = Pubkey::new_unique();
         let global_config = Pubkey::new_unique();
         let player_progress = Pubkey::find_program_address(
@@ -835,16 +847,44 @@ mod tests {
             y: 91,
             z: 1_024,
         };
-        for (tag, global_index, account_count) in [
-            (CHUNK_MINE_WITH_REWARDS_TAG, 6_usize, 12_usize),
-            (CHUNK_FELL_TREE_WITH_REWARDS_TAG, 4_usize, 9_usize),
+        for (tag, global_index, account_count, coordinate_offset, data_len) in [
+            (
+                CHUNK_MINE_WITH_REWARDS_TAG,
+                6_usize,
+                14_usize,
+                1_usize,
+                13_usize,
+            ),
+            (
+                CHUNK_FELL_TREE_WITH_REWARDS_TAG,
+                4_usize,
+                11_usize,
+                1_usize,
+                13_usize,
+            ),
+            (
+                CHUNK_BATCH_MINE_WITH_REWARDS_TAG,
+                6_usize,
+                14_usize,
+                3_usize,
+                15_usize,
+            ),
+            (
+                CHUNK_RANGE_MINE_WITH_REWARDS_TAG,
+                6_usize,
+                14_usize,
+                2_usize,
+                16_usize,
+            ),
         ] {
-            let mut data = vec![0_u8; 13];
+            let mut data = vec![0_u8; data_len];
             data[0] = tag;
-            data[1..5].copy_from_slice(&coordinate.x.to_le_bytes());
-            data[5..7].copy_from_slice(&(coordinate.y as i16).to_le_bytes());
-            data[7..11].copy_from_slice(&coordinate.z.to_le_bytes());
-            data[11..13].copy_from_slice(&22_u16.to_le_bytes());
+            data[coordinate_offset..coordinate_offset + 4]
+                .copy_from_slice(&coordinate.x.to_le_bytes());
+            data[coordinate_offset + 4..coordinate_offset + 6]
+                .copy_from_slice(&(coordinate.y as i16).to_le_bytes());
+            data[coordinate_offset + 6..coordinate_offset + 10]
+                .copy_from_slice(&coordinate.z.to_le_bytes());
             let mut accounts =
                 vec![AccountMeta::new_readonly(Pubkey::new_unique(), false); account_count];
             accounts[3].pubkey = player_progress;

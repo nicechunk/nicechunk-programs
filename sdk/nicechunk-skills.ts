@@ -23,11 +23,11 @@ export const SKILL_RULE_TABLE_HEADER_LEN = 912;
 export const SKILL_SOURCE_RULE_LEN = 136;
 export const SKILL_SOURCE_RULE_MAX_COUNT = 32;
 export const SKILL_GENERIC_SOURCE_RULE_MAX_COUNT = 30;
-export const SKILL_BURDEN_WORK_CURSOR_INDEX = 30;
+export const SKILL_BURDEN_XP_CURSOR_INDEX = 30;
 export const SKILL_BURDEN_SEQUENCE_CURSOR_INDEX = 31;
 export const SKILL_BURDEN_RULE_RECORD_INDEX = 31;
 export const SKILL_BURDEN_RULE_MAGIC = "NCKBRD01";
-export const SKILL_BURDEN_RULE_VERSION = 1;
+export const SKILL_BURDEN_RULE_VERSION = 2;
 export const SKILL_RULE_TABLE_LEN =
   SKILL_RULE_TABLE_HEADER_LEN + SKILL_SOURCE_RULE_MAX_COUNT * SKILL_SOURCE_RULE_LEN;
 export const SKILL_RULE_TABLE_THRESHOLDS_OFFSET = 108;
@@ -86,16 +86,18 @@ export interface MiningTravelRuleInput {
 export interface BurdenMiningRuleInput {
   enabled?: boolean;
   skill: PlayerSkillId | number;
-  maxEffectiveMassGrams: bigint | number;
-  workPerXp: bigint | number;
+  massStepGrams: bigint | number;
+  chunkSizeBlocks: number;
+  maxDistanceChunks: number;
 }
 
 export interface DecodedBurdenMiningRule {
   enabled: boolean;
   skill: PlayerSkillId;
   skillIndex: number;
-  maxEffectiveMassGrams: bigint;
-  workPerXp: bigint;
+  massStepGrams: bigint;
+  chunkSizeBlocks: number;
+  maxDistanceChunks: number;
 }
 
 export interface DecodedSkillRuleTable {
@@ -132,7 +134,7 @@ export interface DecodedPlayerSkills {
   createdAt: bigint;
   lastMiningCoordinate: Readonly<MiningCoordinateInput> | null;
   miningTravelCount: bigint;
-  burdenWorkGrams: bigint;
+  burdenXpAwarded: bigint;
   lastBurdenMineSequence: bigint;
 }
 
@@ -383,18 +385,20 @@ export function createSetBurdenMiningRuleInstruction({
   if (!Number.isInteger(skillIndex) || skillIndex < 0 || skillIndex >= SKILL_COUNT) {
     throw new Error("Invalid burden mining skill index.");
   }
-  const maxEffectiveMassGrams = requireUnsignedBigInt(
-    rule.maxEffectiveMassGrams,
-    "maxEffectiveMassGrams",
+  const massStepGrams = requireUnsignedBigInt(
+    rule.massStepGrams,
+    "massStepGrams",
     1n,
   );
-  const workPerXp = requireUnsignedBigInt(rule.workPerXp, "workPerXp", 1n);
-  const data = Buffer.alloc(19);
+  const chunkSizeBlocks = requireUnsigned(rule.chunkSizeBlocks, 0xffff, "chunkSizeBlocks", 1);
+  const maxDistanceChunks = requireUnsigned(rule.maxDistanceChunks, 0xff, "maxDistanceChunks", 1);
+  const data = Buffer.alloc(14);
   data.writeUInt8(6, 0);
   data.writeUInt8(rule.enabled === false ? 0 : 1, 1);
   data.writeUInt8(skillIndex, 2);
-  data.writeBigUInt64LE(maxEffectiveMassGrams, 3);
-  data.writeBigUInt64LE(workPerXp, 11);
+  data.writeBigUInt64LE(massStepGrams, 3);
+  data.writeUInt16LE(chunkSizeBlocks, 11);
+  data.writeUInt8(maxDistanceChunks, 13);
   const [ruleTable] = deriveSkillRuleTablePda({ globalConfig, programId });
   return new TransactionInstruction({
     programId,
@@ -490,8 +494,8 @@ export function decodePlayerSkills(data: Buffer | Uint8Array): DecodedPlayerSkil
         })
       : null,
     miningTravelCount: bytes.readBigUInt64LE(472),
-    burdenWorkGrams: bytes.readBigUInt64LE(
-      176 + SKILL_BURDEN_WORK_CURSOR_INDEX * 8,
+    burdenXpAwarded: bytes.readBigUInt64LE(
+      176 + SKILL_BURDEN_XP_CURSOR_INDEX * 8,
     ),
     lastBurdenMineSequence: bytes.readBigUInt64LE(
       176 + SKILL_BURDEN_SEQUENCE_CURSOR_INDEX * 8,
@@ -563,17 +567,20 @@ function decodeBurdenMiningRule(record: Buffer): DecodedBurdenMiningRule {
   }
   const enabled = record.readUInt8(10) !== 0;
   const skillIndex = record.readUInt8(11);
-  const maxEffectiveMassGrams = record.readBigUInt64LE(12);
-  const workPerXp = record.readBigUInt64LE(20);
-  if (skillIndex >= SKILL_COUNT || (enabled && (!maxEffectiveMassGrams || !workPerXp))) {
+  const massStepGrams = record.readBigUInt64LE(12);
+  const chunkSizeBlocks = record.readUInt16LE(20);
+  const maxDistanceChunks = record.readUInt8(22);
+  if (skillIndex >= SKILL_COUNT
+    || (enabled && (!massStepGrams || !chunkSizeBlocks || !maxDistanceChunks))) {
     throw new Error("Invalid burden mining rule configuration.");
   }
   return {
     enabled,
     skill: PLAYER_SKILL_IDS[skillIndex],
     skillIndex,
-    maxEffectiveMassGrams,
-    workPerXp,
+    massStepGrams,
+    chunkSizeBlocks,
+    maxDistanceChunks,
   };
 }
 

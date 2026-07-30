@@ -63,7 +63,7 @@ describe("nicechunk skills SDK", () => {
     assert.equal(decoded.levels.appraisal, 10);
     assert.equal(decoded.lastMiningCoordinate, null);
     assert.equal(decoded.miningTravelCount, 0n);
-    assert.equal(decoded.burdenWorkGrams, 0n);
+    assert.equal(decoded.burdenXpAwarded, 0n);
     assert.equal(decoded.lastBurdenMineSequence, 0n);
   });
 
@@ -104,15 +104,18 @@ describe("nicechunk skills SDK", () => {
       authority,
       rule: {
         skill: "burden",
-        maxEffectiveMassGrams: 100_000,
-        workPerXp: 100_000,
+        massStepGrams: 20_000,
+        chunkSizeBlocks: 16,
+        maxDistanceChunks: 5,
       },
     });
     assert.equal(instruction.data.readUInt8(0), 6);
     assert.equal(instruction.data.readUInt8(1), 1);
     assert.equal(instruction.data.readUInt8(2), PLAYER_SKILL_IDS.indexOf("burden"));
-    assert.equal(instruction.data.readBigUInt64LE(3), 100_000n);
-    assert.equal(instruction.data.readBigUInt64LE(11), 100_000n);
+    assert.equal(instruction.data.length, 14);
+    assert.equal(instruction.data.readBigUInt64LE(3), 20_000n);
+    assert.equal(instruction.data.readUInt16LE(11), 16);
+    assert.equal(instruction.data.readUInt8(13), 5);
 
     const globalConfig = PublicKey.unique();
     const table = Buffer.alloc(SKILL_RULE_TABLE_LEN);
@@ -126,20 +129,33 @@ describe("nicechunk skills SDK", () => {
     table.writeUInt8(PLAYER_SKILL_IDS.indexOf("swiftness"), 910);
     table.writeUInt8(1, 911);
     table.writeUInt16LE(1, 908);
+    PLAYER_SKILL_IDS.forEach((_skillId, skillIndex) => {
+      for (let levelIndex = 0; levelIndex < 10; levelIndex += 1) {
+        const offset = 108 + (skillIndex * 10 + levelIndex) * 8;
+        table.writeBigUInt64LE(BigInt((skillIndex + 1) * 1_000 + levelIndex + 1), offset);
+      }
+    });
     const burdenOffset = SKILL_RULE_TABLE_HEADER_LEN + 31 * SKILL_SOURCE_RULE_LEN;
     table.write(SKILL_BURDEN_RULE_MAGIC, burdenOffset, "utf8");
-    table.writeUInt16LE(1, burdenOffset + 8);
+    table.writeUInt16LE(2, burdenOffset + 8);
     table.writeUInt8(1, burdenOffset + 10);
     table.writeUInt8(PLAYER_SKILL_IDS.indexOf("burden"), burdenOffset + 11);
-    table.writeBigUInt64LE(100_000n, burdenOffset + 12);
-    table.writeBigUInt64LE(100_000n, burdenOffset + 20);
+    table.writeBigUInt64LE(20_000n, burdenOffset + 12);
+    table.writeUInt16LE(16, burdenOffset + 20);
+    table.writeUInt8(5, burdenOffset + 22);
 
     const decoded = decodeSkillRuleTable(table);
     assert.equal(decoded.authority.toBase58(), authority.toBase58());
     assert.equal(decoded.miningTravelRule.skill, "swiftness");
+    assert.deepEqual(decoded.thresholds.precisionGathering, [
+      1_001n, 1_002n, 1_003n, 1_004n, 1_005n,
+      1_006n, 1_007n, 1_008n, 1_009n, 1_010n,
+    ]);
+    assert.equal(decoded.thresholds.appraisal[9], 10_010n);
     assert.equal(decoded.burdenMiningRule?.skill, "burden");
-    assert.equal(decoded.burdenMiningRule?.maxEffectiveMassGrams, 100_000n);
-    assert.equal(decoded.burdenMiningRule?.workPerXp, 100_000n);
+    assert.equal(decoded.burdenMiningRule?.massStepGrams, 20_000n);
+    assert.equal(decoded.burdenMiningRule?.chunkSizeBlocks, 16);
+    assert.equal(decoded.burdenMiningRule?.maxDistanceChunks, 5);
   });
 
   it("reserves source rule slots 30 and 31 for burden accounting", async () => {
