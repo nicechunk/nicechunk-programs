@@ -1132,6 +1132,27 @@ mod tests {
         }
     }
 
+    fn block_recipe(block_id: u16, input_quantity: u32, output_code: u16) -> RecipeRecord {
+        let mut input = block_slot(block_id);
+        input.quantity = input_quantity;
+        input.volume_mm3 = 1_000_000;
+        let output_pda = Pubkey::new_unique();
+        let mut output = material_output(&output_pda);
+        output.item_code = output_code;
+        output.item_id = output_code as u64;
+        RecipeRecord {
+            recipe_id: output_code as u64,
+            enabled: true,
+            min_heat_tier: 0,
+            input_count: 1,
+            output_count: 1,
+            yield_bps: RECIPE_YIELD_BPS_DENOMINATOR,
+            inputs: [input; RECIPE_MAX_INPUTS],
+            outputs: [output; RECIPE_MAX_OUTPUTS],
+            updated_slot: 1,
+        }
+    }
+
     #[test]
     fn fuel_tiers_match_the_consumable_browser_rules() {
         assert_eq!(fuel_heat_tier(&block_slot(29)), 1);
@@ -1162,6 +1183,34 @@ mod tests {
         assert_eq!(validated.consumption_quantities[0], 2);
         assert_eq!(validated.consumed_input_units, 2);
         assert_eq!(validated.input_volume_mm3, 475_000);
+    }
+
+    #[test]
+    fn stacked_basalt_inputs_supply_three_recipe_batches() {
+        let owner = Pubkey::new_unique();
+        let recipe = block_recipe(14, 4, 1042);
+        let mut large_stack = block_slot(14);
+        large_stack.quantity = 30;
+        large_stack.volume_mm3 = 30_000_000;
+        let mut small_stack = block_slot(14);
+        small_stack.quantity = 1;
+        small_stack.volume_mm3 = 1_000_000;
+        let backpack = backpack_fixture(&owner, 2, &[large_stack, small_stack]);
+
+        let validated = BackpackAccountView::validate_recipe_inputs(
+            &backpack,
+            &owner,
+            &[1, 0],
+            &[],
+            &recipe,
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(validated.consumption_quantities[0], 11);
+        assert_eq!(validated.consumption_quantities[1], 1);
+        assert_eq!(validated.consumed_input_units, 12);
+        assert_eq!(validated.input_volume_mm3, 12_000_000);
     }
 
     #[test]

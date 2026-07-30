@@ -952,7 +952,7 @@ impl BackpackAccount {
                 Self::remove_resource_at(data, owner, index as u8, updated_slot)?;
                 continue;
             }
-            if record.kind != BACKPACK_SLOT_KIND_ITEM || record.volume_mm3 <= 1 {
+            if record.volume_mm3 <= 1 {
                 return Err(NicechunkBackpackError::InvalidSmeltingConsumption.into());
             }
 
@@ -968,14 +968,19 @@ impl BackpackAccount {
             let mut remaining = record;
             remaining.quantity = record.quantity.saturating_sub(consumed_quantity);
             remaining.volume_mm3 = remaining_volume;
-            remaining.durability_max =
-                scale_nonzero_metadata(record.durability_max, remaining_volume, record.volume_mm3);
-            remaining.durability_current = scale_nonzero_metadata(
-                record.durability_current,
-                remaining_volume,
-                record.volume_mm3,
-            )
-            .min(remaining.durability_max);
+            if record.kind == BACKPACK_SLOT_KIND_ITEM {
+                remaining.durability_max = scale_nonzero_metadata(
+                    record.durability_max,
+                    remaining_volume,
+                    record.volume_mm3,
+                );
+                remaining.durability_current = scale_nonzero_metadata(
+                    record.durability_current,
+                    remaining_volume,
+                    record.volume_mm3,
+                )
+                .min(remaining.durability_max);
+            }
             material_physics.apply_mass(&mut remaining)?;
             Self::replace_slot_at(data, owner, index as u8, &remaining, updated_slot)?;
         }
@@ -2841,6 +2846,53 @@ mod tests {
     }
 
     #[test]
+    fn smelting_consumes_twelve_basalt_units_across_stacked_block_slots() {
+        let owner = Pubkey::new_unique();
+        let physics_data = material_physics_fixture();
+        let physics = MaterialPhysicsTableView::new(&physics_data).unwrap();
+        let mut data = empty_backpack(&owner, 2);
+
+        let mut large_stack = BackpackSlotRecord::from_block_resource_with_volume_and_metadata(
+            block_resource(14, 0),
+            30_000_000,
+            0,
+        );
+        large_stack.quantity = 30;
+        physics.apply_mass(&mut large_stack).unwrap();
+        BackpackAccount::append_item(&mut data, &owner, &large_stack, 11).unwrap();
+
+        let mut small_stack = BackpackSlotRecord::from_block_resource_with_volume_and_metadata(
+            block_resource(14, 1),
+            1_000_000,
+            1,
+        );
+        physics.apply_mass(&mut small_stack).unwrap();
+        BackpackAccount::append_item(&mut data, &owner, &small_stack, 12).unwrap();
+
+        let mut input_quantities = [0_u32; BACKPACK_MAX_CAPACITY as usize];
+        input_quantities[0] = 11;
+        input_quantities[1] = 1;
+        BackpackAccount::consume_smelting_resources(
+            &mut data,
+            &owner,
+            &input_quantities,
+            &[false; BACKPACK_MAX_CAPACITY as usize],
+            &physics,
+            13,
+        )
+        .unwrap();
+
+        let remaining = BackpackAccount::slot_at(&data, 0).unwrap();
+        assert_eq!(remaining.kind, BACKPACK_SLOT_KIND_BLOCK);
+        assert_eq!(remaining.block_id().unwrap(), 14);
+        assert_eq!(remaining.quantity, 19);
+        assert_eq!(remaining.volume_mm3, 19_000_000);
+        assert_eq!(remaining.mass_grams().unwrap(), 55_100);
+        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 55_100);
+        assert_eq!(data[BackpackAccount::ITEM_COUNT_OFFSET], 1);
+    }
+
+    #[test]
     fn smelting_consumes_one_unit_from_a_stacked_material_fuel() {
         let owner = Pubkey::new_unique();
         let physics_data = material_physics_fixture();
@@ -2910,6 +2962,11 @@ mod tests {
             MaterialPhysicsRule {
                 key: 3,
                 density_kg_m3: 2_600,
+                standard_volume_mm3: 1_000_000,
+            },
+            MaterialPhysicsRule {
+                key: 14,
+                density_kg_m3: 2_900,
                 standard_volume_mm3: 1_000_000,
             },
             MaterialPhysicsRule {
