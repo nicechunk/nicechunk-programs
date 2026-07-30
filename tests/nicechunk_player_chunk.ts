@@ -62,6 +62,7 @@ import {
   NICECHUNK_SMELTING_PROGRAM_ID,
   UPSERT_RECIPE_ARGS_LEN,
 } from "../sdk/nicechunk-smelting.ts";
+import { derivePlayerSkillsPda } from "../sdk/nicechunk-skills.ts";
 import {
   deriveCivilizationAdapterAuthorityPda,
   NICECHUNK_CIVILIZATION_PROGRAM_ID,
@@ -1010,7 +1011,42 @@ describe("nicechunk player and mining SDK", () => {
     assert.equal(execute.keys[5].pubkey.toBase58(), deriveMaterialPhysicsPda({ globalConfig })[0].toBase58());
     assert.equal(execute.keys[6].pubkey.toBase58(), smeltingAuthority.toBase58());
     assert.equal(execute.keys[7].pubkey.toBase58(), NICECHUNK_BACKPACK_PROGRAM_ID.toBase58());
-    assert.equal(execute.keys[8].pubkey.toBase58(), SystemProgram.programId.toBase58());
+    assert.equal(execute.keys[8].pubkey.toBase58(), derivePlayerSkillsPda({ owner, globalConfig })[0].toBase58());
+    assert.equal(execute.keys[9].pubkey.toBase58(), SystemProgram.programId.toBase58());
+
+    assert.throws(() => createExecuteSmeltingInstruction({
+      owner,
+      recipeTable,
+      backpack,
+      recipeId,
+      inputIndexes: [0, 0],
+      fuelIndexes: [],
+    }), /must be unique/);
+    assert.throws(() => createExecuteSmeltingInstruction({
+      owner,
+      recipeTable,
+      backpack,
+      recipeId,
+      inputIndexes: [99],
+      fuelIndexes: [],
+    }), /integers from 0 to 98/);
+    assert.throws(() => createExecuteSmeltingInstruction({
+      owner,
+      recipeTable,
+      backpack,
+      recipeId,
+      inputIndexes: [0],
+      fuelIndexes: [],
+      batchMultiplier: 0,
+    }), /integer from 1 to 65535/);
+    assert.throws(() => createExecuteSmeltingInstruction({
+      owner,
+      recipeTable,
+      backpack,
+      recipeId: 0n,
+      inputIndexes: [0],
+      fuelIndexes: [],
+    }), /must be between 1/);
   });
 
   it("decodes compact chunk-broken state", () => {

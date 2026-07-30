@@ -33,6 +33,7 @@ pub const SMELTING_SKILL_OUTPUT_BPS_PER_LEVEL: u16 = 500;
 pub const SMELTING_SKILL_MAX_OUTPUT_BPS: u16 = 15_000;
 pub const SMELTING_XP_PER_INPUT: u64 = 1;
 pub const DURABILITY_BPS_DENOMINATOR: u64 = 10_000;
+const MATERIAL_MERGE_RECIPE_ID_OFFSET: u64 = 1_000;
 const BACKPACK_PACKED_Y_BITS: u16 = 9;
 pub const RECIPE_RECORD_LEN: usize = 8
     + 1
@@ -755,7 +756,11 @@ impl BackpackAccountView {
         let mut input_volume_mm3 = 0_u64;
         let mut consumed_input_units = 0_u64;
         let merge_recipe = recipe_is_material_merge(recipe);
-        if merge_recipe && (indexes.len() < 2 || multiplier as usize != indexes.len()) {
+        if merge_recipe
+            && (!fuel_indexes.is_empty()
+                || indexes.len() < 2
+                || multiplier as usize != indexes.len())
+        {
             return Err(NicechunkSmeltingError::InputRecipeMismatch.into());
         }
         for index in indexes {
@@ -812,6 +817,8 @@ impl BackpackAccountView {
                     return Err(NicechunkSmeltingError::InputRecipeMismatch.into());
                 }
             }
+        } else if consumed_input_units > u32::MAX as u64 || input_volume_mm3 > u32::MAX as u64 {
+            return Err(NicechunkSmeltingError::OutputOverflow.into());
         }
         let mut max_fuel_tier = 0_u8;
         for index in fuel_indexes {
@@ -862,17 +869,29 @@ impl BackpackAccountView {
     }
 }
 
-fn recipe_is_material_merge(recipe: &RecipeRecord) -> bool {
-    if recipe.input_count != 1 || recipe.output_count != 1 || recipe.min_heat_tier != 0 {
+pub(crate) fn recipe_is_material_merge(recipe: &RecipeRecord) -> bool {
+    if recipe.input_count != 1
+        || recipe.output_count != 1
+        || recipe.min_heat_tier != 0
+        || recipe.yield_bps != RECIPE_YIELD_BPS_DENOMINATOR
+    {
         return false;
     }
     let input = &recipe.inputs[0];
     let output = &recipe.outputs[0];
-    input.kind == BACKPACK_SLOT_KIND_ITEM
+    input.item_code > 0
+        && recipe.recipe_id
+            == u64::from(input.item_code).saturating_add(MATERIAL_MERGE_RECIPE_ID_OFFSET)
+        && input.kind == BACKPACK_SLOT_KIND_ITEM
         && output.kind == BACKPACK_SLOT_KIND_ITEM
         && input.category == BACKPACK_ITEM_CATEGORY_MATERIAL
         && output.category == BACKPACK_ITEM_CATEGORY_MATERIAL
         && input.item_code == output.item_code
+        && output.item_id == u64::from(output.item_code)
+        && input.quantity == 1
+        && output.quantity == 1
+        && input.volume_mm3 > 0
+        && input.volume_mm3 == output.volume_mm3
 }
 
 fn proportional_consumed_volume_mm3(
@@ -1119,6 +1138,7 @@ mod tests {
         let mut output = material_output(&output_pda);
         output.item_code = output_code;
         output.item_id = output_code as u64;
+        output.volume_mm3 = input.volume_mm3;
         RecipeRecord {
             recipe_id: output_code as u64,
             enabled: true,
@@ -1130,6 +1150,12 @@ mod tests {
             outputs: [output; RECIPE_MAX_OUTPUTS],
             updated_slot: 1,
         }
+    }
+
+    fn material_merge_recipe(item_code: u16) -> RecipeRecord {
+        let mut recipe = material_recipe(item_code, 1, item_code, 0);
+        recipe.recipe_id = u64::from(item_code) + MATERIAL_MERGE_RECIPE_ID_OFFSET;
+        recipe
     }
 
     fn block_recipe(block_id: u16, input_quantity: u32, output_code: u16) -> RecipeRecord {
@@ -1216,7 +1242,7 @@ mod tests {
     #[test]
     fn merge_recipe_consumes_complete_selected_stacks() {
         let owner = Pubkey::new_unique();
-        let recipe = material_recipe(1031, 1, 1031, 0);
+        let recipe = material_merge_recipe(1031);
         let mut first = material_slot(1031);
         first.quantity = 3;
         first.volume_mm3 = 300_000;
@@ -1239,6 +1265,150 @@ mod tests {
         assert_eq!(validated.consumption_quantities[1], 5);
         assert_eq!(validated.consumed_input_units, 8);
         assert_eq!(validated.input_volume_mm3, 800_000);
+    }
+
+    #[test]
+    fn merge_recipe_rejects_unrepresentable_output_volume() {
+        let owner = Pubkey::new_unique();
+        let recipe = material_merge_recipe(1031);
+        let mut first = material_slot(1031);
+        first.volume_mm3 = u32::MAX;
+        let mut second = material_slot(1031);
+        second.volume_mm3 = 1;
+        let backpack = backpack_fixture(&owner, 2, &[first, second]);
+
+        let error = BackpackAccountView::validate_recipe_inputs(
+            &backpack,
+            &owner,
+            &[0, 1],
+            &[],
+            &recipe,
+            2,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            solana_program::program_error::ProgramError::Custom(
+                NicechunkSmeltingError::OutputOverflow as u32,
+            ),
+        );
+    }
+
+    #[test]
+    fn merge_recipe_rejects_unrepresentable_output_quantity() {
+        let owner = Pubkey::new_unique();
+        let recipe = material_merge_recipe(1031);
+        let mut first = material_slot(1031);
+        first.quantity = u32::MAX;
+        first.volume_mm3 = 250_000;
+        let mut second = material_slot(1031);
+        second.volume_mm3 = 250_000;
+        let backpack = backpack_fixture(&owner, 2, &[first, second]);
+
+        let error = BackpackAccountView::validate_recipe_inputs(
+            &backpack,
+            &owner,
+            &[0, 1],
+            &[],
+            &recipe,
+            2,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            solana_program::program_error::ProgramError::Custom(
+                NicechunkSmeltingError::OutputOverflow as u32,
+            ),
+        );
+    }
+
+    #[test]
+    fn merge_recipe_rejects_fuel_indexes() {
+        let owner = Pubkey::new_unique();
+        let recipe = material_merge_recipe(1031);
+        let first = material_slot(1031);
+        let second = material_slot(1031);
+        let fuel = block_slot(47);
+        let backpack = backpack_fixture(&owner, 3, &[first, second, fuel]);
+
+        let error = BackpackAccountView::validate_recipe_inputs(
+            &backpack,
+            &owner,
+            &[0, 1],
+            &[2],
+            &recipe,
+            2,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            solana_program::program_error::ProgramError::Custom(
+                NicechunkSmeltingError::InputRecipeMismatch as u32,
+            ),
+        );
+    }
+
+    #[test]
+    fn material_merge_identity_requires_every_canonical_field() {
+        let canonical = material_merge_recipe(1031);
+        assert!(recipe_is_material_merge(&canonical));
+
+        let mut cases = Vec::new();
+        let mut recipe = canonical;
+        recipe.recipe_id -= 1;
+        cases.push(("recipe id", recipe));
+        let mut recipe = canonical;
+        recipe.input_count = 2;
+        cases.push(("input count", recipe));
+        let mut recipe = canonical;
+        recipe.output_count = 2;
+        cases.push(("output count", recipe));
+        let mut recipe = canonical;
+        recipe.min_heat_tier = 1;
+        cases.push(("heat tier", recipe));
+        let mut recipe = canonical;
+        recipe.yield_bps -= 1;
+        cases.push(("yield", recipe));
+        let mut recipe = canonical;
+        recipe.inputs[0].kind = BACKPACK_SLOT_KIND_BLOCK;
+        cases.push(("input kind", recipe));
+        let mut recipe = canonical;
+        recipe.outputs[0].kind = BACKPACK_SLOT_KIND_BLOCK;
+        cases.push(("output kind", recipe));
+        let mut recipe = canonical;
+        recipe.inputs[0].category = 2;
+        cases.push(("input category", recipe));
+        let mut recipe = canonical;
+        recipe.outputs[0].category = 2;
+        cases.push(("output category", recipe));
+        let mut recipe = canonical;
+        recipe.outputs[0].item_code += 1;
+        cases.push(("item code", recipe));
+        let mut recipe = canonical;
+        recipe.outputs[0].item_id += 1;
+        cases.push(("item id", recipe));
+        let mut recipe = canonical;
+        recipe.inputs[0].quantity = 2;
+        cases.push(("input quantity", recipe));
+        let mut recipe = canonical;
+        recipe.outputs[0].quantity = 2;
+        cases.push(("output quantity", recipe));
+        let mut recipe = canonical;
+        recipe.inputs[0].volume_mm3 = 0;
+        cases.push(("input volume", recipe));
+        let mut recipe = canonical;
+        recipe.outputs[0].volume_mm3 += 1;
+        cases.push(("output volume", recipe));
+
+        for (field, recipe) in cases {
+            assert!(
+                !recipe_is_material_merge(&recipe),
+                "changed {field} must not classify as a material merge",
+            );
+        }
     }
 
     #[test]

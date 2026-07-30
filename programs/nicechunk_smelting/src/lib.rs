@@ -387,6 +387,27 @@ fn execute_smelting(
         )?
     };
 
+    let recipe_input_volume_mm3 = recipe_input_volume_mm3(&recipe);
+    let mut output_volumes_mm3 = [0_u32; state::RECIPE_MAX_OUTPUTS];
+    let mut output_quantities = [0_u32; state::RECIPE_MAX_OUTPUTS];
+    for output_index in 0..recipe.output_count as usize {
+        let output = &recipe.outputs[output_index];
+        output_volumes_mm3[output_index] = smelting_recipe_output_volume_mm3(
+            &recipe,
+            output,
+            validated_inputs.input_volume_mm3,
+            recipe_input_volume_mm3,
+            multiplier,
+            skill_output_bps,
+        )?;
+        output_quantities[output_index] = smelting_output_quantity(
+            &recipe,
+            output,
+            validated_inputs.consumed_input_units,
+            multiplier,
+            skill_output_bps,
+        )?;
+    }
     consume_backpack_resources(
         program_id,
         smelting_authority,
@@ -398,24 +419,8 @@ fn execute_smelting(
         fuel_indexes,
         &validated_inputs.consumption_quantities,
     )?;
-    let recipe_input_volume_mm3 = recipe_input_volume_mm3(&recipe);
     for output_index in 0..recipe.output_count as usize {
         let output = &recipe.outputs[output_index];
-        let output_volume_mm3 = smelting_output_volume_mm3(
-            output.volume_mm3,
-            validated_inputs.input_volume_mm3,
-            recipe_input_volume_mm3,
-            multiplier,
-            recipe.yield_bps,
-            skill_output_bps,
-        );
-        let output_quantity = smelting_output_quantity(
-            &recipe,
-            output,
-            validated_inputs.consumed_input_units,
-            multiplier,
-            skill_output_bps,
-        );
         append_smelting_output_to_backpack(
             program_id,
             smelting_authority,
@@ -424,19 +429,18 @@ fn execute_smelting(
             backpack_program,
             material_physics,
             output,
-            output_volume_mm3,
-            output_quantity,
+            output_volumes_mm3[output_index],
+            output_quantities[output_index],
         )?;
     }
-    {
+    let gained_xp = smelting_xp_for_recipe(&recipe, validated_inputs.consumed_input_units);
+    if gained_xp > 0 {
         let mut progress_data = player_progress.try_borrow_mut_data()?;
         PlayerProgressState::add_smelting_xp(
             &mut progress_data,
             owner.key,
             global_config.key,
-            validated_inputs
-                .consumed_input_units
-                .saturating_mul(SMELTING_XP_PER_INPUT),
+            gained_xp,
             clock.slot,
         )?;
     }
@@ -552,7 +556,7 @@ fn append_smelting_output_to_backpack<'a>(
     backpack_program: &AccountInfo<'a>,
     material_physics: &AccountInfo<'a>,
     record: &state::BackpackSlotRecord,
-    output_volume_mm3: u64,
+    output_volume_mm3: u32,
     output_quantity: u32,
 ) -> ProgramResult {
     let (_, bump) = Pubkey::find_program_address(&[SMELTING_AUTHORITY_SEED], program_id);
@@ -560,7 +564,7 @@ fn append_smelting_output_to_backpack<'a>(
     data[0] = 5;
     let mut output = *record;
     output.quantity = output_quantity.max(1);
-    output.volume_mm3 = output_volume_mm3.min(u32::MAX as u64).max(1) as u32;
+    output.volume_mm3 = output_volume_mm3.max(1);
     normalize_smelting_output_metadata(&mut output);
     output.pack(&mut data[1..])?;
     let data = backpack_cpi_data(&data);
@@ -672,9 +676,9 @@ fn smelting_output_quantity(
     consumed_input_units: u64,
     multiplier: u16,
     skill_output_bps: u16,
-) -> u32 {
-    if recipe_is_material_merge(recipe) {
-        return consumed_input_units.max(1).min(u32::MAX as u64) as u32;
+) -> Result<u32, NicechunkSmeltingError> {
+    if state::recipe_is_material_merge(recipe) {
+        return checked_smelting_output_u32(consumed_input_units.max(1) as u128);
     }
     let quantity = (output.quantity.max(1) as u128)
         .saturating_mul(multiplier.max(1) as u128)
@@ -683,20 +687,36 @@ fn smelting_output_quantity(
             SMELTING_SKILL_MAX_OUTPUT_BPS,
         ) as u128)
         .saturating_div(RECIPE_YIELD_BPS_DENOMINATOR as u128);
-    quantity.max(1).min(u32::MAX as u128) as u32
+    checked_smelting_output_u32(quantity.max(1))
 }
 
-fn recipe_is_material_merge(recipe: &RecipeRecord) -> bool {
-    if recipe.input_count != 1 || recipe.output_count != 1 || recipe.min_heat_tier != 0 {
-        return false;
+fn smelting_xp_for_recipe(recipe: &RecipeRecord, consumed_input_units: u64) -> u64 {
+    if state::recipe_is_material_merge(recipe) {
+        0
+    } else {
+        consumed_input_units.saturating_mul(SMELTING_XP_PER_INPUT)
     }
-    let input = &recipe.inputs[0];
-    let output = &recipe.outputs[0];
-    input.kind == state::BACKPACK_SLOT_KIND_ITEM
-        && output.kind == state::BACKPACK_SLOT_KIND_ITEM
-        && input.category == state::BACKPACK_ITEM_CATEGORY_MATERIAL
-        && output.category == state::BACKPACK_ITEM_CATEGORY_MATERIAL
-        && input.item_code == output.item_code
+}
+
+fn smelting_recipe_output_volume_mm3(
+    recipe: &RecipeRecord,
+    output: &state::BackpackSlotRecord,
+    input_volume_mm3: u64,
+    recipe_input_volume_mm3: u64,
+    multiplier: u16,
+    skill_output_bps: u16,
+) -> Result<u32, NicechunkSmeltingError> {
+    if state::recipe_is_material_merge(recipe) {
+        return checked_smelting_output_u32(input_volume_mm3.max(1) as u128);
+    }
+    smelting_output_volume_mm3(
+        output.volume_mm3,
+        input_volume_mm3,
+        recipe_input_volume_mm3,
+        multiplier,
+        recipe.yield_bps,
+        skill_output_bps,
+    )
 }
 
 fn smelting_output_volume_mm3(
@@ -706,7 +726,7 @@ fn smelting_output_volume_mm3(
     multiplier: u16,
     recipe_yield_bps: u16,
     skill_output_bps: u16,
-) -> u64 {
+) -> Result<u32, NicechunkSmeltingError> {
     let multiplier = multiplier.max(1) as u128;
     let skill_multiplier_bps = skill_output_bps.clamp(
         SMELTING_SKILL_BASE_OUTPUT_BPS,
@@ -722,11 +742,17 @@ fn smelting_output_volume_mm3(
     let recipe_volume = pda_volume
         .saturating_mul(recipe_yield_bps as u128)
         .saturating_div(RECIPE_YIELD_BPS_DENOMINATOR as u128);
-    recipe_volume
+    let final_volume = recipe_volume
         .saturating_mul(skill_multiplier_bps)
-        .saturating_div(RECIPE_YIELD_BPS_DENOMINATOR as u128)
-        .min(u32::MAX as u128)
-        .max(1) as u64
+        .saturating_div(RECIPE_YIELD_BPS_DENOMINATOR as u128);
+    checked_smelting_output_u32(final_volume.max(1))
+}
+
+fn checked_smelting_output_u32(value: u128) -> Result<u32, NicechunkSmeltingError> {
+    if value > u32::MAX as u128 {
+        return Err(NicechunkSmeltingError::OutputOverflow);
+    }
+    Ok(value.max(1) as u32)
 }
 
 #[cfg(feature = "unified-game")]
@@ -956,8 +982,8 @@ fn read_u16(data: &[u8], offset: usize) -> u16 {
 mod tests {
     use super::{
         process_instruction, smelting_output_quantity, smelting_output_volume_mm3,
-        smelting_payload_shape_is_valid, validate_global_config, validate_recipe_authority,
-        GLOBAL_CONFIG_SEED,
+        smelting_payload_shape_is_valid, smelting_recipe_output_volume_mm3, smelting_xp_for_recipe,
+        validate_global_config, validate_recipe_authority, GLOBAL_CONFIG_SEED,
     };
     use crate::state::{
         BackpackSlotRecord, PlayerProgressState, RecipeRecord, BACKPACK_ITEM_CATEGORY_MATERIAL,
@@ -1009,9 +1035,10 @@ mod tests {
 
     #[test]
     fn smelting_skill_bonus_scales_real_output_volume() {
-        let base = smelting_output_volume_mm3(1_000_000, 1_000_000, 1_000_000, 1, 10_000, 10_000);
+        let base =
+            smelting_output_volume_mm3(1_000_000, 1_000_000, 1_000_000, 1, 10_000, 10_000).unwrap();
         let maximum =
-            smelting_output_volume_mm3(1_000_000, 1_000_000, 1_000_000, 1, 10_000, 15_000);
+            smelting_output_volume_mm3(1_000_000, 1_000_000, 1_000_000, 1, 10_000, 15_000).unwrap();
 
         assert_eq!(base, 1_000_000);
         assert_eq!(maximum, 1_500_000);
@@ -1019,7 +1046,8 @@ mod tests {
 
     #[test]
     fn copper_bloom_base_output_is_six_point_two_percent_of_input() {
-        let output = smelting_output_volume_mm3(3_000_000, 300_000, 3_000_000, 1, 620, 10_000);
+        let output =
+            smelting_output_volume_mm3(3_000_000, 300_000, 3_000_000, 1, 620, 10_000).unwrap();
         assert_eq!(output, 18_600);
     }
 
@@ -1034,8 +1062,10 @@ mod tests {
 
     #[test]
     fn pda_output_volume_controls_each_material_independently() {
-        let cloth = smelting_output_volume_mm3(1_000_000, 5_000_000, 5_000_000, 1, 6_500, 10_000);
-        let dye = smelting_output_volume_mm3(20_000, 3_000_000, 3_000_000, 1, 6_000, 10_000);
+        let cloth =
+            smelting_output_volume_mm3(1_000_000, 5_000_000, 5_000_000, 1, 6_500, 10_000).unwrap();
+        let dye =
+            smelting_output_volume_mm3(20_000, 3_000_000, 3_000_000, 1, 6_000, 10_000).unwrap();
 
         assert_eq!(cloth, 650_000);
         assert_eq!(dye, 12_000);
@@ -1043,8 +1073,10 @@ mod tests {
 
     #[test]
     fn actual_input_volume_scales_the_pda_output() {
-        let full = smelting_output_volume_mm3(1_000_000, 3_000_000, 3_000_000, 1, 6_000, 10_000);
-        let half = smelting_output_volume_mm3(1_000_000, 1_500_000, 3_000_000, 1, 6_000, 10_000);
+        let full =
+            smelting_output_volume_mm3(1_000_000, 3_000_000, 3_000_000, 1, 6_000, 10_000).unwrap();
+        let half =
+            smelting_output_volume_mm3(1_000_000, 1_500_000, 3_000_000, 1, 6_000, 10_000).unwrap();
 
         assert_eq!(full, 600_000);
         assert_eq!(half, 300_000);
@@ -1052,8 +1084,10 @@ mod tests {
 
     #[test]
     fn recipe_yield_and_skill_bonus_both_scale_final_material_volume() {
-        let cloth = smelting_output_volume_mm3(5_000_000, 5_000_000, 5_000_000, 1, 650, 12_000);
-        let dye = smelting_output_volume_mm3(3_000_000, 3_000_000, 3_000_000, 1, 600, 12_000);
+        let cloth =
+            smelting_output_volume_mm3(5_000_000, 5_000_000, 5_000_000, 1, 650, 12_000).unwrap();
+        let dye =
+            smelting_output_volume_mm3(3_000_000, 3_000_000, 3_000_000, 1, 600, 12_000).unwrap();
 
         assert_eq!(cloth, 390_000);
         assert_eq!(dye, 216_000);
@@ -1061,17 +1095,59 @@ mod tests {
 
     #[test]
     fn batch_multiplier_scales_pda_output_without_equal_splitting() {
-        let large = smelting_output_volume_mm3(1_000_000, 6_000_000, 3_000_000, 2, 10_000, 10_000);
-        let small = smelting_output_volume_mm3(20_000, 6_000_000, 3_000_000, 2, 10_000, 10_000);
+        let large =
+            smelting_output_volume_mm3(1_000_000, 6_000_000, 3_000_000, 2, 10_000, 10_000).unwrap();
+        let small =
+            smelting_output_volume_mm3(20_000, 6_000_000, 3_000_000, 2, 10_000, 10_000).unwrap();
 
         assert_eq!(large, 2_000_000);
         assert_eq!(small, 40_000);
     }
 
     #[test]
-    fn merge_recipe_preserves_real_input_volume_before_skill_bonus() {
-        let output = smelting_output_volume_mm3(20_000, 8_400, 20_000, 1, 10_000, 12_000);
-        assert_eq!(output, 10_080);
+    fn merge_recipe_preserves_exact_input_volume_without_skill_bonus() {
+        let mut recipe = RecipeRecord::default();
+        recipe.recipe_id = 2031;
+        recipe.input_count = 1;
+        recipe.output_count = 1;
+        recipe.inputs[0] = material_record(1031, 1);
+        recipe.outputs[0] = material_record(1031, 1);
+
+        let output = smelting_recipe_output_volume_mm3(
+            &recipe,
+            &recipe.outputs[0],
+            8_400,
+            20_000,
+            2,
+            12_000,
+        )
+        .unwrap();
+
+        assert_eq!(output, 8_400);
+        assert_eq!(smelting_xp_for_recipe(&recipe, 8), 0);
+    }
+
+    #[test]
+    fn ordinary_same_material_process_is_not_treated_as_a_free_merge() {
+        let mut recipe = RecipeRecord::default();
+        recipe.input_count = 1;
+        recipe.output_count = 1;
+        recipe.yield_bps = 9_000;
+        recipe.inputs[0] = material_record(1031, 1);
+        recipe.outputs[0] = material_record(1031, 1);
+
+        let output = smelting_recipe_output_volume_mm3(
+            &recipe,
+            &recipe.outputs[0],
+            20_000,
+            20_000,
+            1,
+            15_000,
+        )
+        .unwrap();
+
+        assert_eq!(output, 27_000);
+        assert_eq!(smelting_xp_for_recipe(&recipe, 8), 8);
     }
 
     #[test]
@@ -1083,15 +1159,15 @@ mod tests {
         recipe.outputs[0] = material_record(1032, 4);
 
         assert_eq!(
-            smelting_output_quantity(&recipe, &recipe.outputs[0], 2, 1, 10_000),
+            smelting_output_quantity(&recipe, &recipe.outputs[0], 2, 1, 10_000).unwrap(),
             4,
         );
         assert_eq!(
-            smelting_output_quantity(&recipe, &recipe.outputs[0], 4, 2, 10_000),
+            smelting_output_quantity(&recipe, &recipe.outputs[0], 4, 2, 10_000).unwrap(),
             8,
         );
         assert_eq!(
-            smelting_output_quantity(&recipe, &recipe.outputs[0], 2, 1, 15_000),
+            smelting_output_quantity(&recipe, &recipe.outputs[0], 2, 1, 15_000).unwrap(),
             6,
         );
     }
@@ -1099,15 +1175,34 @@ mod tests {
     #[test]
     fn merge_recipe_output_quantity_preserves_all_consumed_units() {
         let mut recipe = RecipeRecord::default();
+        recipe.recipe_id = 2031;
         recipe.input_count = 1;
         recipe.output_count = 1;
         recipe.inputs[0] = material_record(1031, 1);
         recipe.outputs[0] = material_record(1031, 1);
 
         assert_eq!(
-            smelting_output_quantity(&recipe, &recipe.outputs[0], 8, 2, 15_000),
+            smelting_output_quantity(&recipe, &recipe.outputs[0], 8, 2, 15_000).unwrap(),
             8,
         );
+    }
+
+    #[test]
+    fn unrepresentable_primary_outputs_are_rejected_instead_of_truncated() {
+        let mut recipe = RecipeRecord::default();
+        recipe.input_count = 1;
+        recipe.output_count = 1;
+        recipe.inputs[0] = material_record(1031, 1);
+        recipe.outputs[0] = material_record(1032, u32::MAX);
+
+        assert!(matches!(
+            smelting_output_quantity(&recipe, &recipe.outputs[0], 1, 2, 10_000),
+            Err(NicechunkSmeltingError::OutputOverflow),
+        ));
+        assert!(matches!(
+            smelting_output_volume_mm3(u32::MAX, u32::MAX as u64, 1, 2, 10_000, 15_000),
+            Err(NicechunkSmeltingError::OutputOverflow),
+        ));
     }
 
     fn material_record(item_code: u16, quantity: u32) -> BackpackSlotRecord {
@@ -1116,6 +1211,8 @@ mod tests {
             category: BACKPACK_ITEM_CATEGORY_MATERIAL,
             quantity,
             item_code,
+            item_id: u64::from(item_code),
+            volume_mm3: 20_000,
             ..BackpackSlotRecord::default()
         }
     }

@@ -5,6 +5,7 @@ import {
 } from "@solana/web3.js";
 import { Buffer } from "buffer";
 import {
+  BACKPACK_MAX_CAPACITY,
   BACKPACK_SLOT_RECORD_LEN,
   deriveMaterialPhysicsPda,
   encodeBackpackSlotRecord,
@@ -44,6 +45,7 @@ export const RECIPE_RECORD_LEN =
 export const RECIPE_TABLE_LEN = RECIPE_TABLE_HEADER_LEN + RECIPE_TABLE_MAX_RECIPES * RECIPE_RECORD_LEN;
 export const UPSERT_RECIPE_ARGS_LEN =
   8 + 1 + 1 + 1 + 1 + 2 + 2 + RECIPE_MAX_INPUTS * BACKPACK_SLOT_RECORD_LEN + RECIPE_MAX_OUTPUTS * BACKPACK_SLOT_RECORD_LEN;
+const U64_MAX = 0xffffffffffffffffn;
 
 function smeltingInstructionData(programId: PublicKey, data: Buffer): Buffer {
   return programId.equals(NICECHUNK_GAME_PROGRAM_ID)
@@ -184,6 +186,12 @@ export function createExecuteSmeltingInstruction({
   backpackProgramId?: PublicKey;
   coreProgramId?: PublicKey;
 }): TransactionInstruction {
+  const selection = normalizeExecuteSmeltingSelection({
+    recipeId,
+    inputIndexes,
+    fuelIndexes,
+    batchMultiplier,
+  });
   const [smeltingAuthority] = deriveSmeltingAuthorityPda(smeltingProgramId);
   const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
   const [materialPhysics] = deriveMaterialPhysicsPda({
@@ -196,12 +204,10 @@ export function createExecuteSmeltingInstruction({
     programId: smeltingProgramId,
   });
   const [playerSkills] = derivePlayerSkillsPda({ owner, globalConfig });
-  const indexes = inputIndexes.map((index) => Number(index));
-  const fuels = fuelIndexes.map((index) => Number(index));
-  const multiplier = Math.max(1, Math.min(0xffff, Math.floor(Number(batchMultiplier) || 1)));
+  const { indexes, fuels, multiplier } = selection;
   const data = Buffer.alloc(13 + indexes.length + fuels.length);
   data.writeUInt8(2, 0);
-  data.writeBigUInt64LE(BigInt(recipeId), 1);
+  data.writeBigUInt64LE(selection.recipeId, 1);
   data.writeUInt8(indexes.length, 9);
   data.writeUInt8(fuels.length, 10);
   data.writeUInt16LE(multiplier, 11);
@@ -294,11 +300,23 @@ export function encodeSmeltingRecipeArgs(recipe: SmeltingRecipeInput): Buffer {
 }
 
 function validateSmeltingRecipeShape(recipe: SmeltingRecipeInput): void {
-  if (!recipe.inputs.length || recipe.inputs.length > RECIPE_MAX_INPUTS) {
+  normalizeU64(recipe.recipeId, "Smelting recipe id");
+  if (!Array.isArray(recipe.inputs) || !recipe.inputs.length || recipe.inputs.length > RECIPE_MAX_INPUTS) {
     throw new Error(`Smelting recipe inputs must be 1-${RECIPE_MAX_INPUTS}`);
   }
-  if (!recipe.outputs.length || recipe.outputs.length > RECIPE_MAX_OUTPUTS) {
+  if (!Array.isArray(recipe.outputs) || !recipe.outputs.length || recipe.outputs.length > RECIPE_MAX_OUTPUTS) {
     throw new Error(`Smelting recipe outputs must be 1-${RECIPE_MAX_OUTPUTS}`);
+  }
+  const minHeatTier = recipe.minHeatTier ?? 1;
+  if (!Number.isInteger(minHeatTier) || minHeatTier < 0 || minHeatTier > 0xff) {
+    throw new Error("Smelting recipe heat tier must be an integer from 0 to 255");
+  }
+  const yieldBps = recipe.yieldBps ?? RECIPE_YIELD_BPS_DENOMINATOR;
+  if (!Number.isInteger(yieldBps) || yieldBps < 1 || yieldBps > RECIPE_YIELD_BPS_DENOMINATOR) {
+    throw new Error(`Smelting recipe yield must be an integer from 1 to ${RECIPE_YIELD_BPS_DENOMINATOR}`);
+  }
+  if (recipe.enabled !== undefined && typeof recipe.enabled !== "boolean") {
+    throw new Error("Smelting recipe enabled must be a boolean");
   }
 }
 
@@ -322,12 +340,70 @@ function assertSmeltingRecipeAuthority(authority: PublicKey): void {
 }
 
 function writeSmeltingRecipeHeader(data: Buffer, recipe: SmeltingRecipeInput): void {
-  data.writeBigUInt64LE(BigInt(recipe.recipeId), 0);
+  const recipeId = normalizeU64(recipe.recipeId, "Smelting recipe id");
+  const minHeatTier = recipe.minHeatTier ?? 1;
+  const yieldBps = recipe.yieldBps ?? RECIPE_YIELD_BPS_DENOMINATOR;
+  data.writeBigUInt64LE(recipeId, 0);
   data.writeUInt8(recipe.enabled === false ? 0 : 1, 8);
-  data.writeUInt8(recipe.minHeatTier ?? 1, 9);
+  data.writeUInt8(minHeatTier, 9);
   data.writeUInt8(recipe.inputs.length, 10);
   data.writeUInt8(recipe.outputs.length, 11);
-  const yieldBps = Math.max(1, Math.min(RECIPE_YIELD_BPS_DENOMINATOR, Math.floor(Number(recipe.yieldBps) || RECIPE_YIELD_BPS_DENOMINATOR)));
   data.writeUInt16LE(yieldBps, 12);
   data.writeUInt16LE(0, 14);
+}
+
+function normalizeExecuteSmeltingSelection({
+  recipeId,
+  inputIndexes,
+  fuelIndexes,
+  batchMultiplier,
+}: {
+  recipeId: bigint | number;
+  inputIndexes: number[];
+  fuelIndexes: number[];
+  batchMultiplier: number;
+}): {
+  recipeId: bigint;
+  indexes: number[];
+  fuels: number[];
+  multiplier: number;
+} {
+  const normalizedRecipeId = normalizeU64(recipeId, "Smelting recipe id");
+  const indexes = normalizeBackpackIndexList(inputIndexes, "Smelting input indexes");
+  const fuels = normalizeBackpackIndexList(fuelIndexes, "Smelting fuel indexes");
+  if (!indexes.length) throw new Error("Smelting requires at least one input index");
+  if (indexes.length + fuels.length > BACKPACK_MAX_CAPACITY) {
+    throw new Error(`Smelting supports at most ${BACKPACK_MAX_CAPACITY} total input and fuel indexes`);
+  }
+  if (new Set([...indexes, ...fuels]).size !== indexes.length + fuels.length) {
+    throw new Error("Smelting input and fuel indexes must be unique");
+  }
+  if (!Number.isSafeInteger(batchMultiplier) || batchMultiplier < 1 || batchMultiplier > 0xffff) {
+    throw new Error("Smelting batch multiplier must be an integer from 1 to 65535");
+  }
+  return { recipeId: normalizedRecipeId, indexes, fuels, multiplier: batchMultiplier };
+}
+
+function normalizeBackpackIndexList(value: number[], label: string): number[] {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  if (value.some((index) => !Number.isInteger(index) || index < 0 || index >= BACKPACK_MAX_CAPACITY)) {
+    throw new Error(`${label} must contain integers from 0 to ${BACKPACK_MAX_CAPACITY - 1}`);
+  }
+  return [...value];
+}
+
+function normalizeU64(value: bigint | number, label: string): bigint {
+  if (typeof value === "number" && !Number.isSafeInteger(value)) {
+    throw new Error(`${label} must be a safe integer or bigint`);
+  }
+  let normalized: bigint;
+  try {
+    normalized = BigInt(value);
+  } catch {
+    throw new Error(`${label} must be an integer`);
+  }
+  if (normalized < 1n || normalized > U64_MAX) {
+    throw new Error(`${label} must be between 1 and ${U64_MAX}`);
+  }
+  return normalized;
 }

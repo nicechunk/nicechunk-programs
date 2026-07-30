@@ -41,6 +41,7 @@ pub enum NicechunkSmeltingError {
     InvalidPlayerSkillsPda = 6835,
     InvalidPlayerSkillsOwner = 6836,
     InvalidPlayerSkillsData = 6837,
+    OutputOverflow = 6838,
 }
 
 impl From<NicechunkSmeltingError> for ProgramError {
