@@ -1,5 +1,15 @@
 #![allow(unexpected_cfgs)]
 
+#[cfg(any(
+    all(feature = "devnet", feature = "testnet"),
+    all(feature = "devnet", feature = "mainnet"),
+    all(feature = "testnet", feature = "mainnet")
+))]
+compile_error!("Only one cluster feature can be enabled");
+
+#[cfg(not(any(feature = "devnet", feature = "testnet", feature = "mainnet")))]
+compile_error!("One cluster feature must be enabled");
+
 use solana_program::{account_info::AccountInfo, declare_id, entrypoint::ProgramResult};
 
 #[cfg(not(feature = "no-entrypoint"))]

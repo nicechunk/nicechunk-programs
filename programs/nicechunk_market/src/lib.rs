@@ -5,6 +5,7 @@ use solana_program::{
     clock::Clock,
     declare_id,
     entrypoint::ProgramResult,
+    hash::hashv,
     program::{invoke, invoke_signed},
     pubkey::Pubkey,
     rent::Rent,
@@ -17,12 +18,14 @@ use solana_program::entrypoint;
 
 pub mod cluster_config;
 pub mod errors;
+pub mod membership;
 pub mod state;
 
 use cluster_config::{
     MARKET_TREASURY, NCK_MINT, NICECHUNK_BACKPACK_PROGRAM_ID, NICECHUNK_PLAYER_PROGRAM_ID,
 };
 use errors::{require_key_eq, NicechunkMarketError};
+use membership::{MarketUserState, MARKET_USER_SEED};
 use state::{
     CreateListingArgs, ListingAccount, ListingInitArgs, LISTING_SEED, MARKET_AUTHORITY_SEED,
     SOURCE_BACKPACK, SOURCE_EQUIPMENT,
@@ -42,17 +45,37 @@ const BACKPACK_SLOT_RECORD_LEN: usize = 80;
 const BACKPACK_OWNER_OFFSET: usize = 20;
 const BACKPACK_CAPACITY_OFFSET: usize = 52;
 const BACKPACK_ITEM_COUNT_OFFSET: usize = 53;
+const BACKPACK_FLAGS_OFFSET: usize = 55;
+const BACKPACK_FLAG_MASS_STATE_VALID: u8 = 1;
 const BACKPACK_SLOT_KIND_BLOCK: u8 = 1;
 const BACKPACK_SLOT_KIND_ITEM: u8 = 2;
-const BACKPACK_SLOT_ITEM_PDA_OFFSET: usize = 28;
+const BACKPACK_ITEM_CATEGORY_BLUEPRINT: u8 = 3;
 const PLAYER_PROFILE_MAGIC: [u8; 8] = *b"NCKPLY01";
+const PLAYER_PROFILE_VERSION: u16 = 7;
 const PLAYER_PROFILE_LEN: usize = 773;
 const PLAYER_PROFILE_SEED: &[u8] = b"player-v7";
+const PLAYER_PROFILE_INITIALIZED_OFFSET: usize = 11;
 const PLAYER_PROFILE_OWNER_OFFSET: usize = 12;
 const PLAYER_PROFILE_GLOBAL_CONFIG_OFFSET: usize = 44;
+const PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT_OFFSET: usize = 102;
 const PLAYER_PROFILE_EQUIPMENT_OFFSET: usize = 103;
 const PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT: usize = 9;
-const CLEAR_EQUIPMENT_BACKPACK_INDEX: u8 = u8::MAX;
+const PLAYER_EQUIPMENT_MAGIC: [u8; 8] = *b"NCKEQP01";
+const PLAYER_EQUIPMENT_VERSION: u16 = 1;
+const PLAYER_EQUIPMENT_SEED: &[u8] = b"player-equipment-v1";
+const PLAYER_EQUIPMENT_LEN: usize = 7_040;
+const PLAYER_EQUIPMENT_OWNER_OFFSET: usize = 12;
+const PLAYER_EQUIPMENT_PROFILE_OFFSET: usize = 44;
+const PLAYER_EQUIPMENT_GLOBAL_CONFIG_OFFSET: usize = 76;
+const PLAYER_EQUIPMENT_SLOT_COUNT_OFFSET: usize = 108;
+const PLAYER_EQUIPMENT_SLOTS_OFFSET: usize = 128;
+const PLAYER_EQUIPMENT_SLOT_LEN: usize = 768;
+const PLAYER_EQUIPMENT_RECORD_STATE_OFFSET: usize = 0;
+const PLAYER_EQUIPMENT_RECORD_SLOT_OFFSET: usize = 1;
+const PLAYER_EQUIPMENT_RECORD_FLAGS_OFFSET: usize = 3;
+const PLAYER_EQUIPMENT_RECORD_BACKPACK_OFFSET: usize = 8;
+const PLAYER_EQUIPMENT_RECORD_BACKPACK_SLOT_OFFSET: usize = 40;
+const PLAYER_EQUIPMENT_FLAG_CUSTODY: u8 = 1 << 1;
 const MARKET_FEE_BPS: u16 = 100;
 const BPS_DENOMINATOR: u64 = 10_000;
 
@@ -74,9 +97,44 @@ pub fn process_instruction(
         0 => create_listing(program_id, accounts, payload),
         1 => cancel_listing(program_id, accounts),
         2 => buy_listing(program_id, accounts),
-        3 => Err(NicechunkMarketError::InvalidInstruction.into()),
+        3 => join_market(program_id, accounts),
         _ => Err(NicechunkMarketError::InvalidInstruction.into()),
     }
+}
+
+fn join_market(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    if accounts.len() != 3 {
+        return Err(NicechunkMarketError::InvalidAccountCount.into());
+    }
+    let account_info_iter = &mut accounts.iter();
+    let owner = next_account_info(account_info_iter)?;
+    let market_user = next_account_info(account_info_iter)?;
+    let system_program_account = next_account_info(account_info_iter)?;
+    if !owner.is_signer || !owner.is_writable || !market_user.is_writable {
+        return Err(NicechunkMarketError::InvalidMarketUser.into());
+    }
+    require_key_eq(
+        system_program_account.key,
+        &system_program::ID,
+        NicechunkMarketError::InvalidSystemProgram,
+    )?;
+    validate_market_user_pda(program_id, market_user.key, owner.key)?;
+    if market_user.owner == program_id {
+        return Err(NicechunkMarketError::MarketAlreadyJoined.into());
+    }
+    if market_user.owner != &system_program::ID || market_user.data_len() != 0 {
+        return Err(NicechunkMarketError::InvalidSystemAccount.into());
+    }
+
+    let clock = Clock::get()?;
+    create_market_user_account(
+        program_id,
+        owner,
+        market_user,
+        system_program_account,
+        owner.key,
+        clock.slot,
+    )
 }
 
 fn create_listing(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8]) -> ProgramResult {
@@ -84,7 +142,12 @@ fn create_listing(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8])
     if args.source_type != SOURCE_BACKPACK && args.source_type != SOURCE_EQUIPMENT {
         return Err(NicechunkMarketError::InvalidInstruction.into());
     }
-    if accounts.len() != 8 {
+    let expected_account_count = if args.source_type == SOURCE_BACKPACK {
+        6
+    } else {
+        8
+    };
+    if accounts.len() != expected_account_count {
         return Err(NicechunkMarketError::InvalidAccountCount.into());
     }
 
@@ -104,22 +167,6 @@ fn create_listing(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8])
         &system_program::ID,
         NicechunkMarketError::InvalidSystemProgram,
     )?;
-    let backpack = next_account_info(account_info_iter)?;
-    let backpack_program = next_account_info(account_info_iter)?;
-    require_key_eq(
-        backpack_program.key,
-        &NICECHUNK_BACKPACK_PROGRAM_ID,
-        NicechunkMarketError::InvalidBackpackProgram,
-    )?;
-    let player_profile = next_account_info(account_info_iter)?;
-    let global_config = next_account_info(account_info_iter)?;
-    let player_program = next_account_info(account_info_iter)?;
-    require_key_eq(
-        player_program.key,
-        &NICECHUNK_PLAYER_PROGRAM_ID,
-        NicechunkMarketError::InvalidPlayerProgram,
-    )?;
-
     let bump = validate_listing_pda(program_id, listing.key, seller.key, args.listing_id)?;
     if listing.owner == program_id {
         return Err(NicechunkMarketError::ListingAlreadyInitialized.into());
@@ -128,49 +175,63 @@ fn create_listing(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8])
         return Err(NicechunkMarketError::InvalidSystemAccount.into());
     }
 
+    let mut backpack_source = None;
+    let mut equipment_source = None;
     let source_slot = match args.source_type {
         SOURCE_BACKPACK => {
+            let backpack = next_account_info(account_info_iter)?;
+            let backpack_program = next_account_info(account_info_iter)?;
+            require_key_eq(
+                backpack_program.key,
+                &NICECHUNK_BACKPACK_PROGRAM_ID,
+                NicechunkMarketError::InvalidBackpackProgram,
+            )?;
             let source_slot =
                 read_backpack_slot_for_listing(backpack, seller.key, args.source_index)?;
-            remove_backpack_resource(seller, backpack, backpack_program, args.source_index as u16)?;
-            if let Some(equipment_slot) = read_matching_equipment_slot_for_listing(
-                player_profile,
-                seller.key,
-                player_program.key,
-                global_config.key,
-                &source_slot,
-            )? {
-                clear_player_equipment_slot(
-                    seller,
-                    player_profile,
-                    global_config,
-                    player_program,
-                    equipment_slot,
-                )?;
-            }
+            backpack_source = Some((backpack, backpack_program));
             source_slot
         }
         SOURCE_EQUIPMENT => {
-            let (source_slot, backpack_index) = read_equipment_slot_for_listing(
+            let player_profile = next_account_info(account_info_iter)?;
+            let player_equipment = next_account_info(account_info_iter)?;
+            let global_config = next_account_info(account_info_iter)?;
+            let player_program = next_account_info(account_info_iter)?;
+            require_key_eq(
+                player_program.key,
+                &NICECHUNK_PLAYER_PROGRAM_ID,
+                NicechunkMarketError::InvalidPlayerProgram,
+            )?;
+            let source_slot = read_equipment_slot_for_listing(
                 player_profile,
-                backpack,
+                player_equipment,
                 seller.key,
                 args.source_index,
                 player_program.key,
                 global_config.key,
             )?;
-            remove_backpack_resource(seller, backpack, backpack_program, backpack_index as u16)?;
-            clear_player_equipment_slot(
-                seller,
+            equipment_source = Some((
                 player_profile,
+                player_equipment,
                 global_config,
                 player_program,
-                args.source_index,
-            )?;
+            ));
             source_slot
         }
         _ => return Err(NicechunkMarketError::InvalidInstruction.into()),
     };
+    let market_user = next_account_info(account_info_iter)?;
+    validate_transferable_source_slot(&source_slot)?;
+
+    let clock = Clock::get()?;
+    validate_existing_market_user(program_id, market_user, seller.key)?;
+    if !market_user.is_writable {
+        return Err(NicechunkMarketError::InvalidMarketUser.into());
+    }
+    {
+        let mut data = market_user.try_borrow_mut_data()?;
+        MarketUserState::validate(&data, seller.key)?;
+        MarketUserState::increment_active(&mut data, clock.slot)?;
+    }
 
     create_listing_pda(
         seller,
@@ -181,7 +242,6 @@ fn create_listing(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8])
         bump,
     )?;
 
-    let clock = Clock::get()?;
     {
         let mut data = listing.try_borrow_mut_data()?;
         ListingAccount::pack(
@@ -200,11 +260,27 @@ fn create_listing(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8])
             },
         )?;
     }
+
+    if let Some((backpack, backpack_program)) = backpack_source {
+        remove_backpack_resource(seller, backpack, backpack_program, args.source_index as u16)?;
+    }
+    if let Some((player_profile, player_equipment, global_config, player_program)) =
+        equipment_source
+    {
+        release_player_equipment_to_market(
+            seller,
+            player_profile,
+            player_equipment,
+            global_config,
+            listing,
+            player_program,
+        )?;
+    }
     Ok(())
 }
 
 fn cancel_listing(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
-    if accounts.len() != 7 {
+    if accounts.len() != 8 {
         return Err(NicechunkMarketError::InvalidAccountCount.into());
     }
 
@@ -237,7 +313,9 @@ fn cancel_listing(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResul
     let market_authority = next_account_info(account_info_iter)?;
     let material_physics = next_account_info(account_info_iter)?;
     let global_config = next_account_info(account_info_iter)?;
+    let market_user = next_account_info(account_info_iter)?;
     validate_material_physics_accounts(backpack_program, material_physics, global_config)?;
+    validate_existing_market_user(program_id, market_user, seller.key)?;
     append_market_slot_to_backpack(
         program_id,
         market_authority,
@@ -248,19 +326,12 @@ fn cancel_listing(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResul
         &source_slot,
     )?;
 
+    let clock = Clock::get()?;
     {
         let mut data = listing.try_borrow_mut_data()?;
-        data[state::ListingAccount::STATE_OFFSET] = state::LISTING_STATE_CANCELED;
-        data.fill(0);
+        ListingAccount::mark_canceled(&mut data, clock.slot, clock.unix_timestamp)?;
     }
-
-    let listing_lamports = listing.lamports();
-    **seller.try_borrow_mut_lamports()? = seller
-        .lamports()
-        .checked_add(listing_lamports)
-        .ok_or(NicechunkMarketError::InvalidListingData)?;
-    **listing.try_borrow_mut_lamports()? = 0;
-
+    decrement_market_user_active(market_user, seller.key, clock.slot)?;
     Ok(())
 }
 
@@ -305,17 +376,20 @@ fn buy_listing(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let price_base_units = ListingAccount::price_base_units(&data)?;
     let source_slot = ListingAccount::source_slot(&data)?;
     drop(data);
+    validate_transferable_source_slot(&source_slot)?;
 
     let base_account_count = match currency {
         state::CURRENCY_SOL => 5,
         state::CURRENCY_NCK => 8,
         _ => return Err(NicechunkMarketError::UnsupportedCurrency.into()),
     };
-    let expected_account_count = base_account_count + 5;
+    let expected_account_count = base_account_count + 7;
     if accounts.len() != expected_account_count {
         return Err(NicechunkMarketError::InvalidAccountCount.into());
     }
 
+    let mut sol_payment_accounts = None;
+    let mut nck_payment_accounts = None;
     match currency {
         state::CURRENCY_SOL => {
             let system_program_account = next_account_info(account_info_iter)?;
@@ -330,30 +404,7 @@ fn buy_listing(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
                 &MARKET_TREASURY,
                 NicechunkMarketError::InvalidTreasury,
             )?;
-            let (seller_amount, fee_amount) = split_market_payment(price_base_units)?;
-            if seller_amount > 0 {
-                let seller_payment =
-                    system_instruction::transfer(buyer.key, seller.key, seller_amount);
-                invoke(
-                    &seller_payment,
-                    &[
-                        buyer.clone(),
-                        seller.clone(),
-                        system_program_account.clone(),
-                    ],
-                )?;
-            }
-            if fee_amount > 0 {
-                let fee_payment = system_instruction::transfer(buyer.key, treasury.key, fee_amount);
-                invoke(
-                    &fee_payment,
-                    &[
-                        buyer.clone(),
-                        treasury.clone(),
-                        system_program_account.clone(),
-                    ],
-                )?;
-            }
+            sol_payment_accounts = Some((system_program_account, treasury));
         }
         state::CURRENCY_NCK => {
             let buyer_nck_token = next_account_info(account_info_iter)?;
@@ -380,27 +431,13 @@ fn buy_listing(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
             validate_token_account(buyer_nck_token, &NCK_MINT, buyer.key)?;
             validate_token_account(seller_nck_token, &NCK_MINT, seller.key)?;
             validate_token_account(treasury_nck_token, &NCK_MINT, &MARKET_TREASURY)?;
-            let (seller_amount, fee_amount) = split_market_payment(price_base_units)?;
-            if seller_amount > 0 {
-                transfer_nck(
-                    buyer_nck_token,
-                    seller_nck_token,
-                    nck_mint,
-                    buyer,
-                    token_program,
-                    seller_amount,
-                )?;
-            }
-            if fee_amount > 0 {
-                transfer_nck(
-                    buyer_nck_token,
-                    treasury_nck_token,
-                    nck_mint,
-                    buyer,
-                    token_program,
-                    fee_amount,
-                )?;
-            }
+            nck_payment_accounts = Some((
+                buyer_nck_token,
+                seller_nck_token,
+                treasury_nck_token,
+                nck_mint,
+                token_program,
+            ));
         }
         _ => return Err(NicechunkMarketError::UnsupportedCurrency.into()),
     }
@@ -410,7 +447,60 @@ fn buy_listing(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let market_authority = next_account_info(account_info_iter)?;
     let material_physics = next_account_info(account_info_iter)?;
     let global_config = next_account_info(account_info_iter)?;
+    let seller_market_user = next_account_info(account_info_iter)?;
+    let buyer_market_user = next_account_info(account_info_iter)?;
     validate_material_physics_accounts(backpack_program, material_physics, global_config)?;
+    validate_existing_market_user(program_id, seller_market_user, seller.key)?;
+    validate_existing_market_user(program_id, buyer_market_user, buyer.key)?;
+    let (seller_amount, fee_amount) = split_market_payment(price_base_units)?;
+    if let Some((system_program_account, treasury)) = sol_payment_accounts {
+        if seller_amount > 0 {
+            let seller_payment = system_instruction::transfer(buyer.key, seller.key, seller_amount);
+            invoke(
+                &seller_payment,
+                &[
+                    buyer.clone(),
+                    seller.clone(),
+                    system_program_account.clone(),
+                ],
+            )?;
+        }
+        if fee_amount > 0 {
+            let fee_payment = system_instruction::transfer(buyer.key, treasury.key, fee_amount);
+            invoke(
+                &fee_payment,
+                &[
+                    buyer.clone(),
+                    treasury.clone(),
+                    system_program_account.clone(),
+                ],
+            )?;
+        }
+    }
+    if let Some((buyer_nck_token, seller_nck_token, treasury_nck_token, nck_mint, token_program)) =
+        nck_payment_accounts
+    {
+        if seller_amount > 0 {
+            transfer_nck(
+                buyer_nck_token,
+                seller_nck_token,
+                nck_mint,
+                buyer,
+                token_program,
+                seller_amount,
+            )?;
+        }
+        if fee_amount > 0 {
+            transfer_nck(
+                buyer_nck_token,
+                treasury_nck_token,
+                nck_mint,
+                buyer,
+                token_program,
+                fee_amount,
+            )?;
+        }
+    }
     append_market_slot_to_backpack(
         program_id,
         market_authority,
@@ -422,8 +512,12 @@ fn buy_listing(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     )?;
 
     let clock = Clock::get()?;
-    let mut data = listing.try_borrow_mut_data()?;
-    ListingAccount::mark_sold(&mut data, buyer.key, clock.slot, clock.unix_timestamp)
+    {
+        let mut data = listing.try_borrow_mut_data()?;
+        ListingAccount::mark_sold(&mut data, buyer.key, clock.slot, clock.unix_timestamp)?;
+    }
+    decrement_market_user_active(seller_market_user, seller.key, clock.slot)?;
+    Ok(())
 }
 
 fn split_market_payment(price_base_units: u64) -> Result<(u64, u64), NicechunkMarketError> {
@@ -485,14 +579,19 @@ fn read_backpack_slot_for_listing(
 
 fn read_equipment_slot_for_listing(
     player_profile: &AccountInfo,
-    backpack: &AccountInfo,
+    player_equipment: &AccountInfo,
     owner: &Pubkey,
     equipment_slot: u8,
     player_program: &Pubkey,
     global_config: &Pubkey,
-) -> Result<([u8; BACKPACK_SLOT_RECORD_LEN], u8), solana_program::program_error::ProgramError> {
+) -> Result<[u8; BACKPACK_SLOT_RECORD_LEN], solana_program::program_error::ProgramError> {
     require_key_eq(
         player_profile.owner,
+        player_program,
+        NicechunkMarketError::InvalidPlayerProgram,
+    )?;
+    require_key_eq(
+        player_equipment.owner,
         player_program,
         NicechunkMarketError::InvalidPlayerProgram,
     )?;
@@ -507,57 +606,101 @@ fn read_equipment_slot_for_listing(
     if equipment_slot as usize >= PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT {
         return Err(NicechunkMarketError::InvalidEquipmentSource.into());
     }
-    let equipment_offset = PLAYER_PROFILE_EQUIPMENT_OFFSET + equipment_slot as usize * 32;
-    let equipped_item = Pubkey::new_from_array(
-        profile_data[equipment_offset..equipment_offset + 32]
-            .try_into()
-            .map_err(|_| NicechunkMarketError::InvalidPlayerProfile)?,
-    );
-    drop(profile_data);
-    if equipped_item == Pubkey::default() {
-        return Err(NicechunkMarketError::InvalidEquipmentSource.into());
-    }
-
-    require_key_eq(
-        backpack.owner,
-        &NICECHUNK_BACKPACK_PROGRAM_ID,
-        NicechunkMarketError::InvalidBackpackProgram,
-    )?;
-    let backpack_data = backpack.try_borrow_data()?;
-    validate_backpack_data_and_pda(backpack.key, &backpack_data, owner)?;
-    find_backpack_item_slot_by_pda(&backpack_data, &equipped_item)
-}
-
-fn read_matching_equipment_slot_for_listing(
-    player_profile: &AccountInfo,
-    owner: &Pubkey,
-    player_program: &Pubkey,
-    global_config: &Pubkey,
-    source_slot: &[u8; BACKPACK_SLOT_RECORD_LEN],
-) -> Result<Option<u8>, solana_program::program_error::ProgramError> {
-    let Some(source_item) = item_pda_from_backpack_slot(source_slot)? else {
-        return Ok(None);
-    };
-    require_key_eq(
-        player_profile.owner,
-        player_program,
-        NicechunkMarketError::InvalidPlayerProgram,
-    )?;
-    let profile_data = player_profile.try_borrow_data()?;
-    validate_player_profile_data_and_pda(
-        player_profile.key,
-        &profile_data,
+    let equipment_data = player_equipment.try_borrow_data()?;
+    validate_player_equipment_data_and_pda(
+        player_equipment.key,
+        &equipment_data,
         owner,
+        player_profile.key,
         player_program,
         global_config,
     )?;
-    for equipment_slot in 0..PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT {
-        let offset = PLAYER_PROFILE_EQUIPMENT_OFFSET + equipment_slot * 32;
-        if &profile_data[offset..offset + 32] == source_item.as_ref() {
-            return Ok(Some(equipment_slot as u8));
+    validate_equipment_source_record(&profile_data, &equipment_data, equipment_slot)
+}
+
+fn validate_equipment_source_record(
+    profile_data: &[u8],
+    equipment_data: &[u8],
+    equipment_slot: u8,
+) -> Result<[u8; BACKPACK_SLOT_RECORD_LEN], solana_program::program_error::ProgramError> {
+    if profile_data.len() != PLAYER_PROFILE_LEN
+        || equipment_data.len() != PLAYER_EQUIPMENT_LEN
+        || equipment_slot as usize >= PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT
+    {
+        return Err(NicechunkMarketError::InvalidEquipmentSource.into());
+    }
+    let offset =
+        PLAYER_EQUIPMENT_SLOTS_OFFSET + equipment_slot as usize * PLAYER_EQUIPMENT_SLOT_LEN;
+    if equipment_data[offset + PLAYER_EQUIPMENT_RECORD_STATE_OFFSET] != 1
+        || equipment_data[offset + PLAYER_EQUIPMENT_RECORD_SLOT_OFFSET] != equipment_slot
+        || equipment_data[offset + PLAYER_EQUIPMENT_RECORD_FLAGS_OFFSET]
+            & PLAYER_EQUIPMENT_FLAG_CUSTODY
+            == 0
+    {
+        return Err(NicechunkMarketError::InvalidEquipmentSource.into());
+    }
+    let source_slot = copy_valid_backpack_slot(
+        &equipment_data[offset + PLAYER_EQUIPMENT_RECORD_BACKPACK_SLOT_OFFSET
+            ..offset + PLAYER_EQUIPMENT_RECORD_BACKPACK_SLOT_OFFSET + BACKPACK_SLOT_RECORD_LEN],
+    )?;
+    let identity = Pubkey::new_from_array(
+        hashv(&[
+            b"equipment-v2",
+            &equipment_data[offset + PLAYER_EQUIPMENT_RECORD_BACKPACK_OFFSET
+                ..offset + PLAYER_EQUIPMENT_RECORD_BACKPACK_OFFSET + 32],
+            &source_slot,
+        ])
+        .to_bytes(),
+    );
+    let profile_offset = PLAYER_PROFILE_EQUIPMENT_OFFSET + equipment_slot as usize * 32;
+    if &profile_data[profile_offset..profile_offset + 32] != identity.as_ref() {
+        return Err(NicechunkMarketError::InvalidEquipmentSource.into());
+    }
+    Ok(source_slot)
+}
+
+fn validate_player_equipment_data_and_pda(
+    player_equipment: &Pubkey,
+    data: &[u8],
+    owner: &Pubkey,
+    player_profile: &Pubkey,
+    player_program: &Pubkey,
+    global_config: &Pubkey,
+) -> ProgramResult {
+    if data.len() != PLAYER_EQUIPMENT_LEN
+        || data[0..8] != PLAYER_EQUIPMENT_MAGIC
+        || u16::from_le_bytes([data[8], data[9]]) != PLAYER_EQUIPMENT_VERSION
+        || data[11] != 1
+        || data[PLAYER_EQUIPMENT_SLOT_COUNT_OFFSET] as usize != PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT
+        || &data[PLAYER_EQUIPMENT_OWNER_OFFSET..PLAYER_EQUIPMENT_OWNER_OFFSET + 32]
+            != owner.as_ref()
+        || &data[PLAYER_EQUIPMENT_PROFILE_OFFSET..PLAYER_EQUIPMENT_PROFILE_OFFSET + 32]
+            != player_profile.as_ref()
+        || &data[PLAYER_EQUIPMENT_GLOBAL_CONFIG_OFFSET..PLAYER_EQUIPMENT_GLOBAL_CONFIG_OFFSET + 32]
+            != global_config.as_ref()
+    {
+        return Err(NicechunkMarketError::InvalidEquipmentSource.into());
+    }
+    for slot in 0..PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT {
+        let offset = PLAYER_EQUIPMENT_SLOTS_OFFSET + slot * PLAYER_EQUIPMENT_SLOT_LEN;
+        let state = data[offset + PLAYER_EQUIPMENT_RECORD_STATE_OFFSET];
+        if state > 1
+            || data[offset + PLAYER_EQUIPMENT_RECORD_SLOT_OFFSET] as usize != slot
+            || (state == 1
+                && data[offset + PLAYER_EQUIPMENT_RECORD_FLAGS_OFFSET]
+                    & PLAYER_EQUIPMENT_FLAG_CUSTODY
+                    == 0)
+        {
+            return Err(NicechunkMarketError::InvalidEquipmentSource.into());
         }
     }
-    Ok(None)
+    let (expected, _) =
+        Pubkey::find_program_address(&[PLAYER_EQUIPMENT_SEED, owner.as_ref()], player_program);
+    require_key_eq(
+        player_equipment,
+        &expected,
+        NicechunkMarketError::InvalidEquipmentSource,
+    )
 }
 
 fn validate_backpack_data_and_pda(backpack: &Pubkey, data: &[u8], owner: &Pubkey) -> ProgramResult {
@@ -565,6 +708,7 @@ fn validate_backpack_data_and_pda(backpack: &Pubkey, data: &[u8], owner: &Pubkey
         || data[0..8] != *b"NCKBPK01"
         || u16::from_le_bytes([data[8], data[9]]) != BACKPACK_VERSION
         || data[11] != 1
+        || data[BACKPACK_FLAGS_OFFSET] & BACKPACK_FLAG_MASS_STATE_VALID == 0
     {
         return Err(NicechunkMarketError::InvalidBackpackData.into());
     }
@@ -596,7 +740,13 @@ fn validate_player_profile_data_and_pda(
     player_program: &Pubkey,
     global_config: &Pubkey,
 ) -> ProgramResult {
-    if data.len() != PLAYER_PROFILE_LEN || data[0..8] != PLAYER_PROFILE_MAGIC {
+    if data.len() != PLAYER_PROFILE_LEN
+        || data[0..8] != PLAYER_PROFILE_MAGIC
+        || u16::from_le_bytes([data[8], data[9]]) != PLAYER_PROFILE_VERSION
+        || data[PLAYER_PROFILE_INITIALIZED_OFFSET] != 1
+        || data[PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT_OFFSET] as usize
+            != PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT
+    {
         return Err(NicechunkMarketError::InvalidPlayerProfile.into());
     }
     if &data[PLAYER_PROFILE_OWNER_OFFSET..PLAYER_PROFILE_OWNER_OFFSET + 32] != owner.as_ref() {
@@ -628,24 +778,6 @@ fn copy_backpack_slot_at(
     copy_valid_backpack_slot(&data[offset..offset + BACKPACK_SLOT_RECORD_LEN])
 }
 
-fn find_backpack_item_slot_by_pda(
-    data: &[u8],
-    item: &Pubkey,
-) -> Result<([u8; BACKPACK_SLOT_RECORD_LEN], u8), solana_program::program_error::ProgramError> {
-    let item_count = data[BACKPACK_ITEM_COUNT_OFFSET];
-    for index in 0..item_count {
-        let offset = BACKPACK_HEADER_LEN + index as usize * BACKPACK_SLOT_RECORD_LEN;
-        let slot = &data[offset..offset + BACKPACK_SLOT_RECORD_LEN];
-        if slot[0] == BACKPACK_SLOT_KIND_ITEM
-            && &slot[BACKPACK_SLOT_ITEM_PDA_OFFSET..BACKPACK_SLOT_ITEM_PDA_OFFSET + 32]
-                == item.as_ref()
-        {
-            return Ok((copy_valid_backpack_slot(slot)?, index));
-        }
-    }
-    Err(NicechunkMarketError::InvalidEquipmentSource.into())
-}
-
 fn copy_valid_backpack_slot(
     slot: &[u8],
 ) -> Result<[u8; BACKPACK_SLOT_RECORD_LEN], solana_program::program_error::ProgramError> {
@@ -663,45 +795,44 @@ fn copy_valid_backpack_slot(
     Ok(source_slot)
 }
 
-fn item_pda_from_backpack_slot(
-    slot: &[u8; BACKPACK_SLOT_RECORD_LEN],
-) -> Result<Option<Pubkey>, solana_program::program_error::ProgramError> {
-    if slot[0] != BACKPACK_SLOT_KIND_ITEM {
-        return Ok(None);
+fn validate_transferable_source_slot(
+    source_slot: &[u8; BACKPACK_SLOT_RECORD_LEN],
+) -> ProgramResult {
+    if source_slot[0] == BACKPACK_SLOT_KIND_ITEM
+        && source_slot[1] == BACKPACK_ITEM_CATEGORY_BLUEPRINT
+    {
+        return Err(NicechunkMarketError::NonTransferableItem.into());
     }
-    let item = Pubkey::new_from_array(
-        slot[BACKPACK_SLOT_ITEM_PDA_OFFSET..BACKPACK_SLOT_ITEM_PDA_OFFSET + 32]
-            .try_into()
-            .map_err(|_| NicechunkMarketError::InvalidBackpackData)?,
-    );
-    if item == Pubkey::default() {
-        return Ok(None);
-    }
-    Ok(Some(item))
+    Ok(())
 }
 
-fn clear_player_equipment_slot<'a>(
+fn release_player_equipment_to_market<'a>(
     seller: &AccountInfo<'a>,
     player_profile: &AccountInfo<'a>,
+    player_equipment: &AccountInfo<'a>,
     global_config: &AccountInfo<'a>,
+    listing: &AccountInfo<'a>,
     player_program: &AccountInfo<'a>,
-    equipment_slot: u8,
 ) -> ProgramResult {
     let ix = solana_program::instruction::Instruction {
         program_id: NICECHUNK_PLAYER_PROGRAM_ID,
         accounts: vec![
             solana_program::instruction::AccountMeta::new_readonly(*seller.key, true),
             solana_program::instruction::AccountMeta::new(*player_profile.key, false),
+            solana_program::instruction::AccountMeta::new(*player_equipment.key, false),
             solana_program::instruction::AccountMeta::new_readonly(*global_config.key, false),
+            solana_program::instruction::AccountMeta::new_readonly(*listing.key, false),
         ],
-        data: vec![2, equipment_slot, CLEAR_EQUIPMENT_BACKPACK_INDEX],
+        data: vec![16],
     };
     invoke(
         &ix,
         &[
             seller.clone(),
             player_profile.clone(),
+            player_equipment.clone(),
             global_config.clone(),
+            listing.clone(),
             player_program.clone(),
         ],
     )
@@ -837,6 +968,92 @@ fn validate_token_account(
     Ok(())
 }
 
+fn validate_market_user_pda(
+    program_id: &Pubkey,
+    market_user: &Pubkey,
+    owner: &Pubkey,
+) -> Result<u8, solana_program::program_error::ProgramError> {
+    let (expected_market_user, bump) =
+        Pubkey::find_program_address(&[MARKET_USER_SEED, owner.as_ref()], program_id);
+    require_key_eq(
+        market_user,
+        &expected_market_user,
+        NicechunkMarketError::InvalidMarketUser,
+    )?;
+    Ok(bump)
+}
+
+fn create_market_user_account<'a>(
+    program_id: &Pubkey,
+    payer: &AccountInfo<'a>,
+    market_user: &AccountInfo<'a>,
+    system_program_account: &AccountInfo<'a>,
+    owner: &Pubkey,
+    current_slot: u64,
+) -> ProgramResult {
+    if !payer.is_signer || !payer.is_writable || !market_user.is_writable {
+        return Err(NicechunkMarketError::InvalidMarketUser.into());
+    }
+    require_key_eq(
+        system_program_account.key,
+        &system_program::ID,
+        NicechunkMarketError::InvalidSystemProgram,
+    )?;
+    let bump = validate_market_user_pda(program_id, market_user.key, owner)?;
+    if market_user.owner != &system_program::ID || market_user.data_len() != 0 {
+        return Err(NicechunkMarketError::InvalidMarketUser.into());
+    }
+
+    let rent = Rent::get()?;
+    let create = system_instruction::create_account(
+        payer.key,
+        market_user.key,
+        rent.minimum_balance(MarketUserState::LEN),
+        MarketUserState::LEN as u64,
+        program_id,
+    );
+    invoke_signed(
+        &create,
+        &[
+            payer.clone(),
+            market_user.clone(),
+            system_program_account.clone(),
+        ],
+        &[&[MARKET_USER_SEED, owner.as_ref(), &[bump]]],
+    )?;
+    MarketUserState::pack(
+        &mut market_user.try_borrow_mut_data()?,
+        bump,
+        owner,
+        current_slot,
+    )
+}
+
+fn validate_existing_market_user(
+    program_id: &Pubkey,
+    market_user: &AccountInfo,
+    owner: &Pubkey,
+) -> ProgramResult {
+    if market_user.owner != program_id {
+        return Err(NicechunkMarketError::InvalidMarketUser.into());
+    }
+    validate_market_user_pda(program_id, market_user.key, owner)?;
+    MarketUserState::validate(&market_user.try_borrow_data()?, owner)
+}
+
+fn decrement_market_user_active(
+    market_user: &AccountInfo,
+    owner: &Pubkey,
+    current_slot: u64,
+) -> ProgramResult {
+    if !market_user.is_writable {
+        return Err(NicechunkMarketError::InvalidMarketUser.into());
+    }
+    let mut data = market_user.try_borrow_mut_data()?;
+    MarketUserState::validate(&data, owner)?;
+    MarketUserState::decrement_active(&mut data, current_slot)
+}
+
 fn validate_listing_pda(
     program_id: &Pubkey,
     listing: &Pubkey,
@@ -902,4 +1119,214 @@ fn create_listing_pda<'a>(
         ],
         &[seeds],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn market_rejects_non_transferable_blueprint_slots() {
+        let mut blueprint = [0_u8; BACKPACK_SLOT_RECORD_LEN];
+        blueprint[0] = BACKPACK_SLOT_KIND_ITEM;
+        blueprint[1] = BACKPACK_ITEM_CATEGORY_BLUEPRINT;
+        blueprint[4..8].copy_from_slice(&1_u32.to_le_bytes());
+        assert!(matches!(
+            validate_transferable_source_slot(&blueprint),
+            Err(solana_program::program_error::ProgramError::Custom(6633))
+        ));
+
+        let mut forged = blueprint;
+        forged[1] = 2;
+        assert!(validate_transferable_source_slot(&forged).is_ok());
+    }
+
+    #[test]
+    fn market_rejects_retired_or_uninitialized_player_profiles() {
+        let owner = Pubkey::new_unique();
+        let player_program = Pubkey::new_unique();
+        let global_config = Pubkey::new_unique();
+        let (player_profile, _) =
+            Pubkey::find_program_address(&[PLAYER_PROFILE_SEED, owner.as_ref()], &player_program);
+        let mut data = vec![0_u8; PLAYER_PROFILE_LEN];
+        data[0..8].copy_from_slice(&PLAYER_PROFILE_MAGIC);
+        data[8..10].copy_from_slice(&PLAYER_PROFILE_VERSION.to_le_bytes());
+        data[PLAYER_PROFILE_INITIALIZED_OFFSET] = 1;
+        data[PLAYER_PROFILE_OWNER_OFFSET..PLAYER_PROFILE_OWNER_OFFSET + 32]
+            .copy_from_slice(owner.as_ref());
+        data[PLAYER_PROFILE_GLOBAL_CONFIG_OFFSET..PLAYER_PROFILE_GLOBAL_CONFIG_OFFSET + 32]
+            .copy_from_slice(global_config.as_ref());
+        data[PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT_OFFSET] =
+            PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT as u8;
+
+        validate_player_profile_data_and_pda(
+            &player_profile,
+            &data,
+            &owner,
+            &player_program,
+            &global_config,
+        )
+        .unwrap();
+
+        let mut retired = data.clone();
+        retired[8..10].copy_from_slice(&(PLAYER_PROFILE_VERSION - 1).to_le_bytes());
+        assert!(validate_player_profile_data_and_pda(
+            &player_profile,
+            &retired,
+            &owner,
+            &player_program,
+            &global_config,
+        )
+        .is_err());
+
+        let mut uninitialized = data;
+        uninitialized[PLAYER_PROFILE_INITIALIZED_OFFSET] = 0;
+        assert!(validate_player_profile_data_and_pda(
+            &player_profile,
+            &uninitialized,
+            &owner,
+            &player_program,
+            &global_config,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn market_equipment_source_requires_current_custody_and_matching_identity() {
+        let owner = Pubkey::new_unique();
+        let player_program = Pubkey::new_unique();
+        let global_config = Pubkey::new_unique();
+        let backpack = Pubkey::new_unique();
+        let equipment_slot = 5_u8;
+        let (player_profile, profile_bump) =
+            Pubkey::find_program_address(&[PLAYER_PROFILE_SEED, owner.as_ref()], &player_program);
+        let (player_equipment, equipment_bump) =
+            Pubkey::find_program_address(&[PLAYER_EQUIPMENT_SEED, owner.as_ref()], &player_program);
+
+        let mut profile_data = vec![0_u8; PLAYER_PROFILE_LEN];
+        profile_data[0..8].copy_from_slice(&PLAYER_PROFILE_MAGIC);
+        profile_data[8..10].copy_from_slice(&PLAYER_PROFILE_VERSION.to_le_bytes());
+        profile_data[10] = profile_bump;
+        profile_data[PLAYER_PROFILE_INITIALIZED_OFFSET] = 1;
+        profile_data[PLAYER_PROFILE_OWNER_OFFSET..PLAYER_PROFILE_OWNER_OFFSET + 32]
+            .copy_from_slice(owner.as_ref());
+        profile_data[PLAYER_PROFILE_GLOBAL_CONFIG_OFFSET..PLAYER_PROFILE_GLOBAL_CONFIG_OFFSET + 32]
+            .copy_from_slice(global_config.as_ref());
+        profile_data[PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT_OFFSET] =
+            PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT as u8;
+
+        let mut equipment_data = vec![0_u8; PLAYER_EQUIPMENT_LEN];
+        equipment_data[0..8].copy_from_slice(&PLAYER_EQUIPMENT_MAGIC);
+        equipment_data[8..10].copy_from_slice(&PLAYER_EQUIPMENT_VERSION.to_le_bytes());
+        equipment_data[10] = equipment_bump;
+        equipment_data[11] = 1;
+        equipment_data[PLAYER_EQUIPMENT_OWNER_OFFSET..PLAYER_EQUIPMENT_OWNER_OFFSET + 32]
+            .copy_from_slice(owner.as_ref());
+        equipment_data[PLAYER_EQUIPMENT_PROFILE_OFFSET..PLAYER_EQUIPMENT_PROFILE_OFFSET + 32]
+            .copy_from_slice(player_profile.as_ref());
+        equipment_data
+            [PLAYER_EQUIPMENT_GLOBAL_CONFIG_OFFSET..PLAYER_EQUIPMENT_GLOBAL_CONFIG_OFFSET + 32]
+            .copy_from_slice(global_config.as_ref());
+        equipment_data[PLAYER_EQUIPMENT_SLOT_COUNT_OFFSET] =
+            PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT as u8;
+        for slot in 0..PLAYER_PROFILE_EQUIPMENT_SLOT_COUNT {
+            let offset = PLAYER_EQUIPMENT_SLOTS_OFFSET + slot * PLAYER_EQUIPMENT_SLOT_LEN;
+            equipment_data[offset + PLAYER_EQUIPMENT_RECORD_SLOT_OFFSET] = slot as u8;
+        }
+
+        let offset =
+            PLAYER_EQUIPMENT_SLOTS_OFFSET + equipment_slot as usize * PLAYER_EQUIPMENT_SLOT_LEN;
+        equipment_data[offset + PLAYER_EQUIPMENT_RECORD_STATE_OFFSET] = 1;
+        equipment_data[offset + PLAYER_EQUIPMENT_RECORD_FLAGS_OFFSET] =
+            PLAYER_EQUIPMENT_FLAG_CUSTODY;
+        equipment_data[offset + PLAYER_EQUIPMENT_RECORD_BACKPACK_OFFSET
+            ..offset + PLAYER_EQUIPMENT_RECORD_BACKPACK_OFFSET + 32]
+            .copy_from_slice(backpack.as_ref());
+        let mut source_slot = [0_u8; BACKPACK_SLOT_RECORD_LEN];
+        source_slot[0] = BACKPACK_SLOT_KIND_BLOCK;
+        source_slot[4..8].copy_from_slice(&1_u32.to_le_bytes());
+        source_slot[8..12].copy_from_slice(&17_i32.to_le_bytes());
+        equipment_data[offset + PLAYER_EQUIPMENT_RECORD_BACKPACK_SLOT_OFFSET
+            ..offset + PLAYER_EQUIPMENT_RECORD_BACKPACK_SLOT_OFFSET + BACKPACK_SLOT_RECORD_LEN]
+            .copy_from_slice(&source_slot);
+        let identity = hashv(&[b"equipment-v2", backpack.as_ref(), &source_slot]).to_bytes();
+        let profile_offset = PLAYER_PROFILE_EQUIPMENT_OFFSET + equipment_slot as usize * 32;
+        profile_data[profile_offset..profile_offset + 32].copy_from_slice(&identity);
+
+        validate_player_profile_data_and_pda(
+            &player_profile,
+            &profile_data,
+            &owner,
+            &player_program,
+            &global_config,
+        )
+        .unwrap();
+        validate_player_equipment_data_and_pda(
+            &player_equipment,
+            &equipment_data,
+            &owner,
+            &player_profile,
+            &player_program,
+            &global_config,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_equipment_source_record(&profile_data, &equipment_data, equipment_slot)
+                .unwrap(),
+            source_slot
+        );
+
+        let mut non_custodied = equipment_data.clone();
+        non_custodied[offset + PLAYER_EQUIPMENT_RECORD_FLAGS_OFFSET] = 0;
+        assert!(validate_player_equipment_data_and_pda(
+            &player_equipment,
+            &non_custodied,
+            &owner,
+            &player_profile,
+            &player_program,
+            &global_config,
+        )
+        .is_err());
+        assert!(
+            validate_equipment_source_record(&profile_data, &non_custodied, equipment_slot,)
+                .is_err()
+        );
+
+        let mut wrong_version = equipment_data.clone();
+        wrong_version[8..10].copy_from_slice(&(PLAYER_EQUIPMENT_VERSION + 1).to_le_bytes());
+        assert!(validate_player_equipment_data_and_pda(
+            &player_equipment,
+            &wrong_version,
+            &owner,
+            &player_profile,
+            &player_program,
+            &global_config,
+        )
+        .is_err());
+
+        let mut wrong_identity = profile_data.clone();
+        wrong_identity[profile_offset] ^= 1;
+        assert!(
+            validate_equipment_source_record(&wrong_identity, &equipment_data, equipment_slot,)
+                .is_err()
+        );
+        assert!(validate_player_equipment_data_and_pda(
+            &Pubkey::new_unique(),
+            &equipment_data,
+            &owner,
+            &player_profile,
+            &player_program,
+            &global_config,
+        )
+        .is_err());
+        assert!(validate_player_equipment_data_and_pda(
+            &player_equipment,
+            &equipment_data,
+            &Pubkey::new_unique(),
+            &player_profile,
+            &player_program,
+            &global_config,
+        )
+        .is_err());
+    }
 }

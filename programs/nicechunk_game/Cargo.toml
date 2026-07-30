@@ -10,14 +10,29 @@ name = "nicechunk_game"
 
 [features]
 default = ["devnet"]
-devnet = []
-testnet = []
-mainnet = []
+devnet = [
+  "nicechunk_backpack/devnet",
+  "nicechunk_chunk/devnet",
+  "nicechunk_market/devnet",
+  "nicechunk_smelting/devnet",
+]
+testnet = [
+  "nicechunk_backpack/testnet",
+  "nicechunk_chunk/testnet",
+  "nicechunk_market/testnet",
+  "nicechunk_smelting/testnet",
+]
+mainnet = [
+  "nicechunk_backpack/mainnet",
+  "nicechunk_chunk/mainnet",
+  "nicechunk_market/mainnet",
+  "nicechunk_smelting/mainnet",
+]
 no-entrypoint = []
 
 [dependencies]
 solana-program.workspace = true
-nicechunk_backpack = { path = "../nicechunk_backpack", default-features = false, features = ["devnet", "no-entrypoint", "unified-game"] }
-nicechunk_chunk = { path = "../nicechunk_chunk", default-features = false, features = ["devnet", "no-entrypoint", "unified-game"] }
-nicechunk_market = { path = "../nicechunk_market", default-features = false, features = ["devnet", "no-entrypoint", "unified-game"] }
-nicechunk_smelting = { path = "../nicechunk_smelting", default-features = false, features = ["devnet", "no-entrypoint", "unified-game"] }
+nicechunk_backpack = { path = "../nicechunk_backpack", default-features = false, features = ["no-entrypoint", "unified-game"] }
+nicechunk_chunk = { path = "../nicechunk_chunk", default-features = false, features = ["no-entrypoint", "unified-game"] }
+nicechunk_market = { path = "../nicechunk_market", default-features = false, features = ["no-entrypoint", "unified-game"] }
+nicechunk_smelting = { path = "../nicechunk_smelting", default-features = false, features = ["no-entrypoint", "unified-game"] }

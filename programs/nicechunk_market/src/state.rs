@@ -185,6 +185,19 @@ impl ListingAccount {
             .copy_from_slice(&sold_slot.to_le_bytes());
         Ok(())
     }
+
+    pub fn mark_canceled(data: &mut [u8], settled_slot: u64, settled_at: i64) -> ProgramResult {
+        Self::validate_active(data)?;
+        data[Self::STATE_OFFSET] = LISTING_STATE_CANCELED;
+        data[Self::BUYER_OFFSET..Self::BUYER_OFFSET + 32].fill(0);
+        data[Self::SOLD_SLOT_OFFSET..Self::SOLD_SLOT_OFFSET + 8]
+            .copy_from_slice(&settled_slot.to_le_bytes());
+        data[Self::SOLD_AT_OFFSET..Self::SOLD_AT_OFFSET + 8]
+            .copy_from_slice(&settled_at.to_le_bytes());
+        data[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
+            .copy_from_slice(&settled_slot.to_le_bytes());
+        Ok(())
+    }
 }
 
 pub struct CreateListingArgs {
@@ -363,5 +376,43 @@ mod tests {
             ),
             40
         );
+    }
+
+    #[test]
+    fn canceled_listing_remains_a_complete_settlement_record() {
+        let seller = Pubkey::new_unique();
+        let mut data = [0_u8; ListingAccount::LEN];
+        ListingAccount::pack(
+            &mut data,
+            &ListingInitArgs {
+                bump: 1,
+                seller: &seller,
+                listing_id: 8,
+                currency: CURRENCY_NCK,
+                source_type: SOURCE_BACKPACK,
+                source_index: 4,
+                price_base_units: 2_000_000,
+                source_slot: [7_u8; BACKPACK_SLOT_RECORD_LEN],
+                created_slot: 11,
+                created_at: 22,
+            },
+        )
+        .unwrap();
+
+        ListingAccount::mark_canceled(&mut data, 33, 44).unwrap();
+
+        assert_eq!(data[ListingAccount::STATE_OFFSET], LISTING_STATE_CANCELED);
+        assert_eq!(read_u64(&data, ListingAccount::SOLD_SLOT_OFFSET), 33);
+        assert_eq!(read_u64(&data, ListingAccount::UPDATED_SLOT_OFFSET), 33);
+        assert_eq!(
+            i64::from_le_bytes(
+                data[ListingAccount::SOLD_AT_OFFSET..ListingAccount::SOLD_AT_OFFSET + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            44
+        );
+        assert_eq!(ListingAccount::listing_id(&data).unwrap(), 8);
+        assert_eq!(ListingAccount::seller(&data).unwrap(), seller);
     }
 }

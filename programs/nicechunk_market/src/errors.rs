@@ -33,6 +33,11 @@ pub enum NicechunkMarketError {
     InvalidPlayerProfile = 6630,
     InvalidEquipmentSource = 6631,
     InvalidMaterialPhysics = 6632,
+    NonTransferableItem = 6633,
+    InvalidMarketUser = 6634,
+    ActiveListingLimitReached = 6635,
+    InvalidActiveListingCount = 6636,
+    MarketAlreadyJoined = 6637,
 }
 
 impl From<NicechunkMarketError> for ProgramError {
