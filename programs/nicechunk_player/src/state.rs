@@ -16,9 +16,12 @@ pub const PLAYER_EQUIPMENT_SLOT_LEN: usize = 768;
 pub const PLAYER_EQUIPMENT_MODEL_CODE_MAX_BYTES: usize = 640;
 pub const PLAYER_EQUIPMENT_FLAG_MODEL: u8 = 1 << 0;
 pub const PLAYER_EQUIPMENT_FLAG_CUSTODY: u8 = 1 << 1;
-const NCF1_LEGACY_VERSION: u8 = 14;
 const NCF1_VERSION: u8 = 15;
 pub const EQUIPMENT_TRANSFER_AUTHORITY_SEED: &[u8] = b"equipment-transfer-v1";
+pub const MARKET_LISTING_MAGIC: [u8; 8] = *b"NCKMKT01";
+pub const MARKET_LISTING_VERSION: u16 = 5;
+pub const MARKET_LISTING_SEED: &[u8] = b"listing";
+pub const MARKET_LISTING_LEN: usize = 216;
 pub const APPEARANCE_MODEL_CODE_MAX_BYTES: usize = 2048;
 pub const APPEARANCE_TITLE_MAX_BYTES: usize = 96;
 pub const APPEARANCE_EQUIPMENT_SLOT_COUNT: usize = 12;
@@ -66,7 +69,11 @@ pub const BACKPACK_HEADER_LEN: usize = 128;
 pub const BACKPACK_SLOT_RECORD_LEN: usize = 80;
 pub const BACKPACK_ID_OFFSET: usize = 12;
 pub const BACKPACK_OWNER_OFFSET: usize = 20;
+pub const BACKPACK_CAPACITY_OFFSET: usize = 52;
 pub const BACKPACK_ITEM_COUNT_OFFSET: usize = 53;
+pub const BACKPACK_FLAGS_OFFSET: usize = 55;
+pub const BACKPACK_FLAG_MASS_STATE_VALID: u8 = 1;
+pub const BACKPACK_MAX_CAPACITY: usize = 99;
 pub const BACKPACK_SLOT_KIND_BLOCK: u8 = 1;
 pub const BACKPACK_SLOT_KIND_ITEM: u8 = 2;
 pub const BACKPACK_STACK_LIMIT: u32 = 99;
@@ -231,24 +238,41 @@ impl PlayerProfile {
     }
 
     pub fn validate_owner(data: &[u8], owner: &Pubkey) -> ProgramResult {
-        if data.len() != Self::LEN || data[0..8] != PLAYER_PROFILE_MAGIC {
-            return Err(NicechunkPlayerError::InvalidPlayerProfileData.into());
-        }
+        Self::validate_layout(data)?;
         if &data[Self::OWNER_OFFSET..Self::OWNER_OFFSET + 32] != owner.as_ref() {
             return Err(NicechunkPlayerError::InvalidPlayerAuthority.into());
         }
         Ok(())
     }
 
-    pub fn has_equipped_backpack(data: &[u8]) -> Result<bool, NicechunkPlayerError> {
-        if data.len() != Self::LEN || data[0..8] != PLAYER_PROFILE_MAGIC {
-            return Err(NicechunkPlayerError::InvalidPlayerProfileData);
+    fn validate_layout(data: &[u8]) -> ProgramResult {
+        if data.len() != Self::LEN
+            || data[0..8] != PLAYER_PROFILE_MAGIC
+            || read_u16(data, 8) != PLAYER_PROFILE_VERSION
+            || data[11] != 1
+            || data[102] as usize != EQUIPMENT_SLOT_COUNT
+        {
+            return Err(NicechunkPlayerError::InvalidPlayerProfileData.into());
         }
+        Ok(())
+    }
+
+    pub fn has_equipped_backpack(data: &[u8]) -> Result<bool, NicechunkPlayerError> {
+        Self::validate_layout(data).map_err(|_| NicechunkPlayerError::InvalidPlayerProfileData)?;
         Ok(
             data[Self::EQUIPPED_BACKPACK_OFFSET..Self::EQUIPPED_BACKPACK_OFFSET + 32]
                 .iter()
                 .any(|byte| *byte != 0),
         )
+    }
+
+    pub fn equipped_backpack(data: &[u8]) -> Result<Pubkey, NicechunkPlayerError> {
+        Self::validate_layout(data).map_err(|_| NicechunkPlayerError::InvalidPlayerProfileData)?;
+        Ok(Pubkey::new_from_array(
+            data[Self::EQUIPPED_BACKPACK_OFFSET..Self::EQUIPPED_BACKPACK_OFFSET + 32]
+                .try_into()
+                .map_err(|_| NicechunkPlayerError::InvalidPlayerProfileData)?,
+        ))
     }
 
     pub fn write_position(
@@ -287,6 +311,19 @@ impl PlayerProfile {
         dst[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
             .copy_from_slice(&updated_slot.to_le_bytes());
         Ok(())
+    }
+
+    pub fn equipment_slot_identity(data: &[u8], slot: u8) -> Result<Pubkey, NicechunkPlayerError> {
+        Self::validate_layout(data).map_err(|_| NicechunkPlayerError::InvalidPlayerProfileData)?;
+        if slot as usize >= EQUIPMENT_SLOT_COUNT {
+            return Err(NicechunkPlayerError::InvalidEquipmentSlot);
+        }
+        let offset = Self::EQUIPMENT_OFFSET + slot as usize * 32;
+        Ok(Pubkey::new_from_array(
+            data[offset..offset + 32]
+                .try_into()
+                .map_err(|_| NicechunkPlayerError::InvalidPlayerProfileData)?,
+        ))
     }
 
     pub fn owner(data: &[u8]) -> Result<Pubkey, NicechunkPlayerError> {
@@ -386,9 +423,8 @@ pub struct PlayerEquipmentInitArgs<'a> {
 
 /// Public, authoritative hotbar equipment state.
 ///
-/// Each record owns the exact item moved out of Backpack and, for forged items,
-/// the verified NCF1 model bytes needed by a fresh client to render it. Legacy
-/// records without the custody flag remain readable for one-time migration.
+/// Each active record owns the exact item moved out of Backpack and, for forged
+/// items, the verified NCF1 model bytes needed by a fresh client to render it.
 pub struct PlayerEquipment;
 
 impl PlayerEquipment {
@@ -445,13 +481,7 @@ impl PlayerEquipment {
         player_profile: &Pubkey,
         global_config: &Pubkey,
     ) -> ProgramResult {
-        if data.len() != Self::LEN
-            || data[0..8] != PLAYER_EQUIPMENT_MAGIC
-            || read_u16(data, 8) != PLAYER_EQUIPMENT_VERSION
-            || data[Self::SLOT_COUNT_OFFSET] as usize != EQUIPMENT_SLOT_COUNT
-        {
-            return Err(NicechunkPlayerError::InvalidPlayerEquipmentData.into());
-        }
+        Self::validate_layout(data)?;
         if &data[Self::OWNER_OFFSET..Self::OWNER_OFFSET + 32] != owner.as_ref() {
             return Err(NicechunkPlayerError::InvalidPlayerAuthority.into());
         }
@@ -470,36 +500,13 @@ impl PlayerEquipment {
 
     pub fn clear_slot(dst: &mut [u8], slot: u8, updated_slot: u64) -> ProgramResult {
         let offset = Self::slot_offset(slot)?;
-        if dst.len() != Self::LEN || dst[0..8] != PLAYER_EQUIPMENT_MAGIC {
-            return Err(NicechunkPlayerError::InvalidPlayerEquipmentData.into());
-        }
+        Self::validate_layout(dst)?;
         dst[offset..offset + PLAYER_EQUIPMENT_SLOT_LEN].fill(0);
         dst[offset + Self::RECORD_SLOT_OFFSET] = slot;
         dst[offset + Self::RECORD_BACKPACK_INDEX_OFFSET] = u8::MAX;
         dst[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
             .copy_from_slice(&updated_slot.to_le_bytes());
         Ok(())
-    }
-
-    pub fn write_slot(
-        dst: &mut [u8],
-        slot: u8,
-        backpack_index: u8,
-        backpack: &Pubkey,
-        backpack_record: &[u8; BACKPACK_SLOT_RECORD_LEN],
-        model_code: &[u8],
-        updated_slot: u64,
-    ) -> ProgramResult {
-        Self::write_slot_internal(
-            dst,
-            slot,
-            backpack_index,
-            backpack,
-            backpack_record,
-            model_code,
-            updated_slot,
-            false,
-        )
     }
 
     pub fn write_custodied_slot(
@@ -519,7 +526,6 @@ impl PlayerEquipment {
             backpack_record,
             model_code,
             updated_slot,
-            true,
         )
     }
 
@@ -532,12 +538,9 @@ impl PlayerEquipment {
         backpack_record: &[u8; BACKPACK_SLOT_RECORD_LEN],
         model_code: &[u8],
         updated_slot: u64,
-        custodied: bool,
     ) -> ProgramResult {
         let offset = Self::slot_offset(slot)?;
-        if dst.len() != Self::LEN || dst[0..8] != PLAYER_EQUIPMENT_MAGIC {
-            return Err(NicechunkPlayerError::InvalidPlayerEquipmentData.into());
-        }
+        Self::validate_layout(dst)?;
         Self::validate_model_code(backpack_record, model_code)?;
 
         let mut preserved_code = [0_u8; PLAYER_EQUIPMENT_MODEL_CODE_MAX_BYTES];
@@ -556,15 +559,11 @@ impl PlayerEquipment {
         dst[offset + Self::RECORD_STATE_OFFSET] = 1;
         dst[offset + Self::RECORD_SLOT_OFFSET] = slot;
         dst[offset + Self::RECORD_BACKPACK_INDEX_OFFSET] = backpack_index;
-        dst[offset + Self::RECORD_FLAGS_OFFSET] = if effective_code.is_empty() {
+        dst[offset + Self::RECORD_FLAGS_OFFSET] = (if effective_code.is_empty() {
             0
         } else {
             PLAYER_EQUIPMENT_FLAG_MODEL
-        } | if custodied {
-            PLAYER_EQUIPMENT_FLAG_CUSTODY
-        } else {
-            0
-        };
+        }) | PLAYER_EQUIPMENT_FLAG_CUSTODY;
         dst[offset + Self::RECORD_MODEL_LENGTH_OFFSET
             ..offset + Self::RECORD_MODEL_LENGTH_OFFSET + 2]
             .copy_from_slice(&(effective_code.len() as u16).to_le_bytes());
@@ -768,9 +767,22 @@ impl PlayerEquipment {
         if data.len() != Self::LEN
             || data[0..8] != PLAYER_EQUIPMENT_MAGIC
             || read_u16(data, 8) != PLAYER_EQUIPMENT_VERSION
+            || data[11] != 1
             || data[Self::SLOT_COUNT_OFFSET] as usize != EQUIPMENT_SLOT_COUNT
         {
             return Err(NicechunkPlayerError::InvalidPlayerEquipmentData);
+        }
+        for slot in 0..EQUIPMENT_SLOT_COUNT {
+            let offset = Self::SLOTS_OFFSET + slot * PLAYER_EQUIPMENT_SLOT_LEN;
+            let state = data[offset + Self::RECORD_STATE_OFFSET];
+            if state > 1
+                || data[offset + Self::RECORD_SLOT_OFFSET] as usize != slot
+                || (state == 1
+                    && data[offset + Self::RECORD_FLAGS_OFFSET] & PLAYER_EQUIPMENT_FLAG_CUSTODY
+                        == 0)
+            {
+                return Err(NicechunkPlayerError::InvalidPlayerEquipmentData);
+            }
         }
         Ok(())
     }
@@ -792,13 +804,15 @@ impl PlayerEquipment {
         let forged = backpack_record[0] == BACKPACK_SLOT_KIND_ITEM
             && backpack_record[1] == BACKPACK_ITEM_CATEGORY_FORGED
             && read_u16(backpack_record, 18) == BACKPACK_FORGED_ITEM_CODE;
-        if model_code.is_empty() {
-            return Ok(());
+        if !forged {
+            return if model_code.is_empty() {
+                Ok(())
+            } else {
+                Err(NicechunkPlayerError::InvalidEquipmentModel.into())
+            };
         }
-        let model_version = model_code[0] >> 4;
-        if !forged
-            || model_code.len() < 14
-            || (model_version != NCF1_LEGACY_VERSION && model_version != NCF1_VERSION)
+        if model_code.len() < 14
+            || model_code[0] >> 4 != NCF1_VERSION
             || fnv1a32(model_code) != read_u32(backpack_record, 76)
         {
             return Err(NicechunkPlayerError::InvalidEquipmentModel.into());
@@ -837,6 +851,56 @@ impl PlayerEquipment {
             return len;
         }
         0
+    }
+}
+
+pub struct MarketListingView;
+
+impl MarketListingView {
+    const BUMP_OFFSET: usize = 10;
+    const STATE_OFFSET: usize = 11;
+    const SELLER_OFFSET: usize = 12;
+    const LISTING_ID_OFFSET: usize = 44;
+    const CURRENCY_OFFSET: usize = 52;
+    const SOURCE_INDEX_OFFSET: usize = 53;
+    const PRICE_OFFSET: usize = 54;
+    const SOURCE_SLOT_OFFSET: usize = 62;
+    const SOURCE_TYPE_OFFSET: usize = 214;
+    const STATE_ACTIVE: u8 = 1;
+    const SOURCE_EQUIPMENT: u8 = 2;
+
+    pub fn validate_equipment_source(
+        data: &[u8],
+        listing: &Pubkey,
+        market_program: &Pubkey,
+        seller: &Pubkey,
+        equipment_slot: u8,
+        source_record: &[u8; BACKPACK_SLOT_RECORD_LEN],
+    ) -> ProgramResult {
+        if data.len() != MARKET_LISTING_LEN
+            || data[0..8] != MARKET_LISTING_MAGIC
+            || read_u16(data, 8) != MARKET_LISTING_VERSION
+            || data[Self::STATE_OFFSET] != Self::STATE_ACTIVE
+            || &data[Self::SELLER_OFFSET..Self::SELLER_OFFSET + 32] != seller.as_ref()
+            || !matches!(data[Self::CURRENCY_OFFSET], 1 | 2)
+            || read_u64(data, Self::PRICE_OFFSET) == 0
+            || data[Self::SOURCE_TYPE_OFFSET] != Self::SOURCE_EQUIPMENT
+            || data[Self::SOURCE_INDEX_OFFSET] != equipment_slot
+            || &data[Self::SOURCE_SLOT_OFFSET..Self::SOURCE_SLOT_OFFSET + BACKPACK_SLOT_RECORD_LEN]
+                != source_record
+        {
+            return Err(NicechunkPlayerError::InvalidMarketListing.into());
+        }
+        let listing_id = read_u64(data, Self::LISTING_ID_OFFSET);
+        let listing_id_bytes = listing_id.to_le_bytes();
+        let (expected, bump) = Pubkey::find_program_address(
+            &[MARKET_LISTING_SEED, seller.as_ref(), &listing_id_bytes],
+            market_program,
+        );
+        if listing != &expected || data[Self::BUMP_OFFSET] != bump {
+            return Err(NicechunkPlayerError::InvalidMarketListing.into());
+        }
+        Ok(())
     }
 }
 
@@ -999,7 +1063,11 @@ impl PlayerAppearance {
         player_profile: &Pubkey,
         global_config: &Pubkey,
     ) -> ProgramResult {
-        if data.len() != Self::LEN || data[0..8] != PLAYER_APPEARANCE_MAGIC {
+        if data.len() != Self::LEN
+            || data[0..8] != PLAYER_APPEARANCE_MAGIC
+            || data[11] != 1
+            || data[Self::EQUIPMENT_SLOT_COUNT_OFFSET] as usize != APPEARANCE_EQUIPMENT_SLOT_COUNT
+        {
             return Err(NicechunkPlayerError::InvalidAppearanceData.into());
         }
         if read_u16(data, 8) != PLAYER_APPEARANCE_VERSION {
@@ -1085,7 +1153,15 @@ impl BackpackAccountView {
         if data.len() != BACKPACK_LEN || data[0..8] != BACKPACK_MAGIC {
             return Err(NicechunkPlayerError::InvalidBackpackData.into());
         }
-        if read_u16(data, 8) != BACKPACK_VERSION {
+        let capacity = data[BACKPACK_CAPACITY_OFFSET] as usize;
+        let item_count = data[BACKPACK_ITEM_COUNT_OFFSET] as usize;
+        if read_u16(data, 8) != BACKPACK_VERSION
+            || data[11] != 1
+            || data[BACKPACK_FLAGS_OFFSET] & BACKPACK_FLAG_MASS_STATE_VALID == 0
+            || capacity == 0
+            || capacity > BACKPACK_MAX_CAPACITY
+            || item_count > capacity
+        {
             return Err(NicechunkPlayerError::InvalidBackpackData.into());
         }
         if &data[BACKPACK_OWNER_OFFSET..BACKPACK_OWNER_OFFSET + 32] != owner.as_ref() {
@@ -1194,10 +1270,11 @@ pub struct PlayerSessionInitArgs<'a> {
 
 /// Public session authorization account.
 ///
-/// A player wallet creates this PDA once per short gameplay session. High
-/// frequency gameplay transactions can then be signed by the temporary
-/// `session_authority` key while other programs verify the owner, world,
-/// action mask and expiry from this fixed layout.
+/// A player wallet creates or refreshes this expiry-bearing PDA. High-frequency
+/// gameplay transactions can then be signed by the `session_authority` key
+/// while other programs verify the owner, world, action mask, and expiry from
+/// this fixed layout. `max_actions` and `action_count` are stored fields, but
+/// current consumer validators do not enforce or increment them.
 pub struct PlayerSession;
 
 impl PlayerSession {
@@ -1281,7 +1358,11 @@ impl PlayerSession {
         player_profile: &Pubkey,
         global_config: &Pubkey,
     ) -> ProgramResult {
-        if data.len() != Self::LEN || data[0..8] != PLAYER_SESSION_MAGIC {
+        if data.len() != Self::LEN
+            || data[0..8] != PLAYER_SESSION_MAGIC
+            || read_u16(data, 8) != PLAYER_SESSION_VERSION
+            || data[11] != 1
+        {
             return Err(NicechunkPlayerError::InvalidPlayerSessionData.into());
         }
         if &data[Self::OWNER_OFFSET..Self::OWNER_OFFSET + 32] != owner.as_ref() {
@@ -1673,6 +1754,11 @@ mod tests {
                 ..PlayerProfile::EQUIPPED_BACKPACK_OFFSET + 32],
             Pubkey::default().as_ref()
         );
+        assert!(!PlayerProfile::has_equipped_backpack(&data).ok().unwrap());
+        assert_eq!(
+            PlayerProfile::equipped_backpack(&data).ok().unwrap(),
+            Pubkey::default()
+        );
         assert_eq!(
             u64::from_le_bytes(
                 data[PlayerProfile::CREATED_SLOT_OFFSET..PlayerProfile::CREATED_SLOT_OFFSET + 8]
@@ -1710,6 +1796,13 @@ mod tests {
             .unwrap(),
             "Jerry_Miner"
         );
+        let backpack = Pubkey::new_unique();
+        PlayerProfile::write_equipped_backpack(&mut data, &backpack, 124).unwrap();
+        assert!(PlayerProfile::has_equipped_backpack(&data).ok().unwrap());
+        assert_eq!(
+            PlayerProfile::equipped_backpack(&data).ok().unwrap(),
+            backpack
+        );
     }
 
     #[test]
@@ -1731,7 +1824,28 @@ mod tests {
     }
 
     #[test]
-    fn player_equipment_persists_verified_backpack_identity_and_model() {
+    fn player_profile_rejects_retired_or_uninitialized_layouts() {
+        let owner = Pubkey::new_unique();
+        let global_config = Pubkey::new_unique();
+        let mut data = vec![0_u8; PlayerProfile::LEN];
+        PlayerProfile::pack_default(&mut data, 252, &owner, &global_config, 1, "", 123, 456)
+            .unwrap();
+
+        let mut retired = data.clone();
+        retired[8..10].copy_from_slice(&(PLAYER_PROFILE_VERSION - 1).to_le_bytes());
+        assert!(PlayerProfile::validate_owner(&retired, &owner).is_err());
+
+        let mut uninitialized = data.clone();
+        uninitialized[11] = 0;
+        assert!(PlayerProfile::validate_owner(&uninitialized, &owner).is_err());
+
+        let mut wrong_slot_count = data;
+        wrong_slot_count[102] = (EQUIPMENT_SLOT_COUNT - 1) as u8;
+        assert!(PlayerProfile::validate_owner(&wrong_slot_count, &owner).is_err());
+    }
+
+    #[test]
+    fn player_equipment_persists_custodied_backpack_identity_and_model() {
         let owner = Pubkey::new_unique();
         let profile = Pubkey::new_unique();
         let global_config = Pubkey::new_unique();
@@ -1757,23 +1871,25 @@ mod tests {
         record[18..20].copy_from_slice(&BACKPACK_FORGED_ITEM_CODE.to_le_bytes());
         record[20..28].copy_from_slice(&77_u64.to_le_bytes());
         record[28..60].copy_from_slice(item_pda.as_ref());
-        let model = [0xe0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+        let model = [0xf0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
         record[76..80].copy_from_slice(&fnv1a32(&model).to_le_bytes());
 
-        PlayerEquipment::write_slot(&mut data, 7, 4, &backpack, &record, &model, 101).unwrap();
+        PlayerEquipment::write_custodied_slot(&mut data, 7, 4, &backpack, &record, &model, 101)
+            .unwrap();
         PlayerEquipment::validate_owner_and_config(&data, &owner, &profile, &global_config)
             .unwrap();
         let offset = PlayerEquipment::SLOTS_OFFSET + 7 * PLAYER_EQUIPMENT_SLOT_LEN;
         assert_eq!(data[offset], 1);
         assert_eq!(data[offset + 1], 7);
         assert_eq!(data[offset + 2], 4);
+        assert_ne!(data[offset + 3] & PLAYER_EQUIPMENT_FLAG_CUSTODY, 0);
         assert_eq!(&data[offset + 8..offset + 40], backpack.as_ref());
         assert_eq!(&data[offset + 40..offset + 120], &record);
         assert_eq!(&data[offset + 120..offset + 134], &model);
 
         let mut invalid_record = record;
         invalid_record[76..80].copy_from_slice(&123_u32.to_le_bytes());
-        assert!(PlayerEquipment::write_slot(
+        assert!(PlayerEquipment::write_custodied_slot(
             &mut data,
             6,
             5,
@@ -1783,27 +1899,35 @@ mod tests {
             102,
         )
         .is_err());
+        let mut non_custodied = data.clone();
+        non_custodied[offset + 3] &= !PLAYER_EQUIPMENT_FLAG_CUSTODY;
+        assert!(PlayerEquipment::validate_owner_and_config(
+            &non_custodied,
+            &owner,
+            &profile,
+            &global_config,
+        )
+        .is_err());
         PlayerEquipment::clear_slot(&mut data, 7, 103).unwrap();
         assert_eq!(data[offset], 0);
         assert_eq!(data[offset + 2], u8::MAX);
     }
 
     #[test]
-    fn player_equipment_accepts_legacy_and_current_ncf1_models() {
+    fn player_equipment_accepts_only_current_ncf1_models() {
         let mut record = [0_u8; BACKPACK_SLOT_RECORD_LEN];
         record[0] = BACKPACK_SLOT_KIND_ITEM;
         record[1] = BACKPACK_ITEM_CATEGORY_FORGED;
         record[18..20].copy_from_slice(&BACKPACK_FORGED_ITEM_CODE.to_le_bytes());
 
-        for version in [NCF1_LEGACY_VERSION, NCF1_VERSION] {
-            let mut model = [0_u8; 14];
-            model[0] = version << 4;
-            record[76..80].copy_from_slice(&fnv1a32(&model).to_le_bytes());
-            PlayerEquipment::validate_model_code(&record, &model).unwrap();
-        }
+        let mut model = [0_u8; 14];
+        model[0] = NCF1_VERSION << 4;
+        record[76..80].copy_from_slice(&fnv1a32(&model).to_le_bytes());
+        PlayerEquipment::validate_model_code(&record, &model).unwrap();
+        assert!(PlayerEquipment::validate_model_code(&record, &[]).is_err());
 
-        let mut retired_model = [0_u8; 14];
-        retired_model[0] = 13 << 4;
+        let mut retired_model = model;
+        retired_model[0] = 14 << 4;
         record[76..80].copy_from_slice(&fnv1a32(&retired_model).to_le_bytes());
         assert!(PlayerEquipment::validate_model_code(&record, &retired_model).is_err());
     }
@@ -1892,7 +2016,10 @@ mod tests {
             .copy_from_slice(&120_u32.to_le_bytes());
         record[BACKPACK_SLOT_DURABILITY_MAX_OFFSET..BACKPACK_SLOT_DURABILITY_MAX_OFFSET + 4]
             .copy_from_slice(&150_u32.to_le_bytes());
-        PlayerEquipment::write_custodied_slot(&mut data, 3, 4, &backpack, &record, &[], 101)
+        let mut model = [0_u8; 14];
+        model[0] = NCF1_VERSION << 4;
+        record[76..80].copy_from_slice(&fnv1a32(&model).to_le_bytes());
+        PlayerEquipment::write_custodied_slot(&mut data, 3, 4, &backpack, &record, &model, 101)
             .unwrap();
 
         PlayerEquipment::consume_forged_durability(&mut data, 3, 7, 102).unwrap();
@@ -1903,6 +2030,103 @@ mod tests {
         );
         assert_eq!(read_u64(&data, PlayerEquipment::UPDATED_SLOT_OFFSET), 102);
         assert!(PlayerEquipment::consume_forged_durability(&mut data, 3, 114, 103).is_err());
+    }
+
+    #[test]
+    fn market_listing_view_rejects_noncanonical_equipment_escrow() {
+        let seller = Pubkey::new_unique();
+        let market_program = Pubkey::new_unique();
+        let listing_id = 42_u64;
+        let listing_id_bytes = listing_id.to_le_bytes();
+        let (listing, bump) = Pubkey::find_program_address(
+            &[MARKET_LISTING_SEED, seller.as_ref(), &listing_id_bytes],
+            &market_program,
+        );
+        let equipment_slot = 4_u8;
+        let mut source_record = [0_u8; BACKPACK_SLOT_RECORD_LEN];
+        source_record[0] = BACKPACK_SLOT_KIND_BLOCK;
+        source_record[4..8].copy_from_slice(&1_u32.to_le_bytes());
+
+        let mut data = vec![0_u8; MARKET_LISTING_LEN];
+        data[0..8].copy_from_slice(&MARKET_LISTING_MAGIC);
+        data[8..10].copy_from_slice(&MARKET_LISTING_VERSION.to_le_bytes());
+        data[MarketListingView::BUMP_OFFSET] = bump;
+        data[MarketListingView::STATE_OFFSET] = MarketListingView::STATE_ACTIVE;
+        data[MarketListingView::SELLER_OFFSET..MarketListingView::SELLER_OFFSET + 32]
+            .copy_from_slice(seller.as_ref());
+        data[MarketListingView::LISTING_ID_OFFSET..MarketListingView::LISTING_ID_OFFSET + 8]
+            .copy_from_slice(&listing_id_bytes);
+        data[MarketListingView::CURRENCY_OFFSET] = 1;
+        data[MarketListingView::SOURCE_INDEX_OFFSET] = equipment_slot;
+        data[MarketListingView::PRICE_OFFSET..MarketListingView::PRICE_OFFSET + 8]
+            .copy_from_slice(&100_u64.to_le_bytes());
+        data[MarketListingView::SOURCE_SLOT_OFFSET
+            ..MarketListingView::SOURCE_SLOT_OFFSET + BACKPACK_SLOT_RECORD_LEN]
+            .copy_from_slice(&source_record);
+        data[MarketListingView::SOURCE_TYPE_OFFSET] = MarketListingView::SOURCE_EQUIPMENT;
+
+        MarketListingView::validate_equipment_source(
+            &data,
+            &listing,
+            &market_program,
+            &seller,
+            equipment_slot,
+            &source_record,
+        )
+        .unwrap();
+
+        for offset in [
+            MarketListingView::BUMP_OFFSET,
+            MarketListingView::STATE_OFFSET,
+            MarketListingView::CURRENCY_OFFSET,
+            MarketListingView::SOURCE_INDEX_OFFSET,
+            MarketListingView::SOURCE_TYPE_OFFSET,
+        ] {
+            let mut invalid = data.clone();
+            invalid[offset] ^= 1;
+            assert!(MarketListingView::validate_equipment_source(
+                &invalid,
+                &listing,
+                &market_program,
+                &seller,
+                equipment_slot,
+                &source_record,
+            )
+            .is_err());
+        }
+
+        let mut zero_price = data.clone();
+        zero_price[MarketListingView::PRICE_OFFSET..MarketListingView::PRICE_OFFSET + 8].fill(0);
+        assert!(MarketListingView::validate_equipment_source(
+            &zero_price,
+            &listing,
+            &market_program,
+            &seller,
+            equipment_slot,
+            &source_record,
+        )
+        .is_err());
+
+        let mut wrong_record = source_record;
+        wrong_record[8] = 1;
+        assert!(MarketListingView::validate_equipment_source(
+            &data,
+            &listing,
+            &market_program,
+            &seller,
+            equipment_slot,
+            &wrong_record,
+        )
+        .is_err());
+        assert!(MarketListingView::validate_equipment_source(
+            &data,
+            &Pubkey::new_unique(),
+            &market_program,
+            &seller,
+            equipment_slot,
+            &source_record,
+        )
+        .is_err());
     }
 
     #[test]
@@ -2090,7 +2314,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(&data[0..8], &PLAYER_SESSION_MAGIC);
+        assert_eq!(
+            u16::from_le_bytes(data[8..10].try_into().unwrap()),
+            PLAYER_SESSION_VERSION
+        );
         assert_eq!(data[10], 251);
+        assert_eq!(data[11], 1);
         assert_eq!(
             &data[PlayerSession::OWNER_OFFSET..PlayerSession::OWNER_OFFSET + 32],
             owner.as_ref()
@@ -2103,5 +2332,62 @@ mod tests {
         assert_eq!(u16::from_le_bytes(data[142..144].try_into().unwrap()), 6);
         assert_eq!(i64::from_le_bytes(data[144..152].try_into().unwrap()), 999);
         assert_eq!(u32::from_le_bytes(data[176..180].try_into().unwrap()), 10);
+    }
+
+    #[test]
+    fn player_session_rejects_retired_or_uninitialized_layouts() {
+        let owner = Pubkey::new_unique();
+        let session_authority = Pubkey::new_unique();
+        let player_profile = Pubkey::new_unique();
+        let global_config = Pubkey::new_unique();
+        let mut data = [0_u8; PlayerSession::LEN];
+        PlayerSession::pack(
+            &mut data,
+            &PlayerSessionInitArgs {
+                bump: 251,
+                owner: &owner,
+                session_authority: &session_authority,
+                player_profile: &player_profile,
+                global_config: &global_config,
+                world_id: 1,
+                allowed_actions: SESSION_ACTION_BREAK_BLOCK,
+                expires_at: 999,
+                max_actions: 10,
+                created_slot: 123,
+                created_at: 456,
+            },
+        )
+        .unwrap();
+
+        PlayerSession::validate_owner_and_config(
+            &data,
+            &owner,
+            &session_authority,
+            &player_profile,
+            &global_config,
+        )
+        .unwrap();
+
+        let mut retired = data;
+        retired[8..10].copy_from_slice(&(PLAYER_SESSION_VERSION + 1).to_le_bytes());
+        assert!(PlayerSession::validate_owner_and_config(
+            &retired,
+            &owner,
+            &session_authority,
+            &player_profile,
+            &global_config,
+        )
+        .is_err());
+
+        let mut uninitialized = data;
+        uninitialized[11] = 0;
+        assert!(PlayerSession::validate_owner_and_config(
+            &uninitialized,
+            &owner,
+            &session_authority,
+            &player_profile,
+            &global_config,
+        )
+        .is_err());
     }
 }

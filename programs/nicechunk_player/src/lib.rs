@@ -27,9 +27,9 @@ use cluster_config::{
 };
 use errors::{require_key_eq, NicechunkPlayerError};
 use state::{
-    BackpackAccountView, GlobalConfigView, InviteIndex, InviteIndexInitArgs, PlayerAppearance,
-    PlayerAppearanceInitArgs, PlayerEquipment, PlayerEquipmentInitArgs, PlayerProfile,
-    PlayerSession, PlayerSessionInitArgs, UsernameIndex, UsernameIndexInitArgs,
+    BackpackAccountView, GlobalConfigView, InviteIndex, InviteIndexInitArgs, MarketListingView,
+    PlayerAppearance, PlayerAppearanceInitArgs, PlayerEquipment, PlayerEquipmentInitArgs,
+    PlayerProfile, PlayerSession, PlayerSessionInitArgs, UsernameIndex, UsernameIndexInitArgs,
     EQUIPMENT_TRANSFER_AUTHORITY_SEED, INVITE_INDEX_SEED, PLAYER_APPEARANCE_SEED,
     PLAYER_EQUIPMENT_SEED, PLAYER_PROFILE_SEED, PLAYER_SESSION_SEED, SESSION_ACTION_BREAK_BLOCK,
     SESSION_ACTION_PLACE_BLOCK, USERNAME_INDEX_SEED,
@@ -38,6 +38,8 @@ use state::{
 declare_id!("CHZHsBCGn58ih2WrPfKSYhvCEjMPGhArTiYCH7AWWBkB");
 
 const CLEAR_EQUIPMENT_BACKPACK_INDEX: u8 = u8::MAX;
+const RELEASE_EQUIPMENT_TO_MARKET_TAG: u8 = 16;
+const CONSUME_PLACEMENT_RESOURCE_TAG: u8 = 17;
 const CHUNK_PLACED_SEED: &[u8] = b"chunk-placed";
 const MATERIAL_PHYSICS_SEED: &[u8] = b"material-physics-v2";
 const MATERIAL_PHYSICS_MAGIC: [u8; 8] = *b"NCKPHY02";
@@ -60,10 +62,9 @@ pub fn process_instruction(
         .split_first()
         .ok_or(NicechunkPlayerError::InvalidInstruction)?;
 
-    match tag {
+    match *tag {
         0 => initialize_player(program_id, accounts, payload),
         1 => update_position(program_id, accounts, payload),
-        2 => set_equipment_slot(program_id, accounts, payload),
         3 => set_backpack_style(program_id, accounts, payload),
         4 => create_or_refresh_player_session(program_id, accounts, payload),
         5 => set_equipped_backpack(program_id, accounts),
@@ -73,11 +74,13 @@ pub fn process_instruction(
         9 => close_player_appearance(program_id, accounts),
         10 => initialize_invite_index_page(program_id, accounts, payload),
         11 => append_invite_registration(program_id, accounts, payload),
-        12 => set_equipment_slot_v2(program_id, accounts, payload),
         13 => transfer_equipment_slot(program_id, accounts, payload),
         14 => swap_equipment_slots(program_id, accounts, payload),
         15 => consume_equipment_durability(program_id, accounts, payload),
-        16 => consume_placement_resource(program_id, accounts, payload),
+        RELEASE_EQUIPMENT_TO_MARKET_TAG => {
+            release_equipment_to_market(program_id, accounts, payload)
+        }
+        CONSUME_PLACEMENT_RESOURCE_TAG => consume_placement_resource(program_id, accounts, payload),
         _ => Err(NicechunkPlayerError::InvalidInstruction.into()),
     }
 }
@@ -277,6 +280,99 @@ fn material_density_for_block(
         }
     }
     Err(NicechunkPlayerError::InvalidMaterialPhysics.into())
+}
+
+fn release_equipment_to_market(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    payload: &[u8],
+) -> ProgramResult {
+    if accounts.len() != 5 || !payload.is_empty() {
+        return Err(NicechunkPlayerError::InvalidInstruction.into());
+    }
+    let account_info_iter = &mut accounts.iter();
+    let authority = next_account_info(account_info_iter)?;
+    let player_profile = next_account_info(account_info_iter)?;
+    let player_equipment = next_account_info(account_info_iter)?;
+    let global_config = next_account_info(account_info_iter)?;
+    let listing = next_account_info(account_info_iter)?;
+
+    validate_player_write_accounts(program_id, authority, player_profile, global_config)?;
+    if !player_equipment.is_writable {
+        return Err(NicechunkPlayerError::InvalidWritableAccount.into());
+    }
+    require_key_eq(
+        player_equipment.owner,
+        program_id,
+        NicechunkPlayerError::InvalidPlayerEquipmentOwner,
+    )?;
+    require_key_eq(
+        listing.owner,
+        &NICECHUNK_GAME_PROGRAM_ID,
+        NicechunkPlayerError::InvalidMarketListing,
+    )?;
+    let (expected_equipment, _) =
+        Pubkey::find_program_address(&[PLAYER_EQUIPMENT_SEED, authority.key.as_ref()], program_id);
+    require_key_eq(
+        player_equipment.key,
+        &expected_equipment,
+        NicechunkPlayerError::InvalidPlayerEquipmentPda,
+    )?;
+
+    let equipment_slot = {
+        let listing_data = listing.try_borrow_data()?;
+        if listing_data.len() != state::MARKET_LISTING_LEN {
+            return Err(NicechunkPlayerError::InvalidMarketListing.into());
+        }
+        listing_data[53]
+    };
+    let (source_record, source_identity) = {
+        let equipment_data = player_equipment.try_borrow_data()?;
+        PlayerEquipment::validate_owner_and_config(
+            &equipment_data,
+            authority.key,
+            player_profile.key,
+            global_config.key,
+        )?;
+        if !PlayerEquipment::slot_is_custodied(&equipment_data, equipment_slot)? {
+            return Err(NicechunkPlayerError::EquipmentNotCustodied.into());
+        }
+        (
+            PlayerEquipment::slot_record(&equipment_data, equipment_slot)?,
+            PlayerEquipment::slot_identity(&equipment_data, equipment_slot)?,
+        )
+    };
+    {
+        let profile_data = player_profile.try_borrow_data()?;
+        if PlayerProfile::equipment_slot_identity(&profile_data, equipment_slot)? != source_identity
+        {
+            return Err(NicechunkPlayerError::InvalidPlayerEquipmentData.into());
+        }
+    }
+    {
+        let listing_data = listing.try_borrow_data()?;
+        MarketListingView::validate_equipment_source(
+            &listing_data,
+            listing.key,
+            &NICECHUNK_GAME_PROGRAM_ID,
+            authority.key,
+            equipment_slot,
+            &source_record,
+        )?;
+    }
+
+    let clock = Clock::get()?;
+    {
+        let mut equipment_data = player_equipment.try_borrow_mut_data()?;
+        PlayerEquipment::clear_slot(&mut equipment_data, equipment_slot, clock.slot)?;
+    }
+    let mut profile_data = player_profile.try_borrow_mut_data()?;
+    PlayerProfile::write_equipment_slot(
+        &mut profile_data,
+        equipment_slot,
+        &Pubkey::default(),
+        clock.slot,
+    )
 }
 
 fn consume_equipment_durability(
@@ -944,186 +1040,6 @@ fn update_position(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8]
     PlayerProfile::write_position(&mut data, x, y, z, clock.slot)
 }
 
-fn set_equipment_slot(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    payload: &[u8],
-) -> ProgramResult {
-    if payload.len() != 2 || (accounts.len() != 3 && accounts.len() != 4) {
-        return Err(NicechunkPlayerError::InvalidInstruction.into());
-    }
-
-    let account_info_iter = &mut accounts.iter();
-    let authority = next_account_info(account_info_iter)?;
-    let player_profile = next_account_info(account_info_iter)?;
-    let global_config = next_account_info(account_info_iter)?;
-
-    validate_player_write_accounts(program_id, authority, player_profile, global_config)?;
-    let slot = payload[0];
-    let backpack_index = payload[1];
-    let item = if backpack_index == CLEAR_EQUIPMENT_BACKPACK_INDEX {
-        if accounts.len() != 3 {
-            return Err(NicechunkPlayerError::InvalidAccountCount.into());
-        }
-        Pubkey::default()
-    } else {
-        if accounts.len() != 4 {
-            return Err(NicechunkPlayerError::InvalidAccountCount.into());
-        }
-        let backpack = next_account_info(account_info_iter)?;
-        if backpack.owner != &NICECHUNK_BACKPACK_PROGRAM_ID
-            && backpack.owner != &NICECHUNK_GAME_PROGRAM_ID
-        {
-            return Err(NicechunkPlayerError::InvalidBackpackProgram.into());
-        }
-        let backpack_data = backpack.try_borrow_data()?;
-        BackpackAccountView::validate_pda_and_owner(
-            &backpack_data,
-            backpack.key,
-            backpack.owner,
-            authority.key,
-        )?;
-        BackpackAccountView::equippable_item_pda_at(&backpack_data, authority.key, backpack_index)?
-    };
-    let clock = Clock::get()?;
-    let mut data = player_profile.try_borrow_mut_data()?;
-    PlayerProfile::write_equipment_slot(&mut data, slot, &item, clock.slot)
-}
-
-fn set_equipment_slot_v2(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    payload: &[u8],
-) -> ProgramResult {
-    if payload.len() < 4 {
-        return Err(NicechunkPlayerError::InvalidInstruction.into());
-    }
-    let slot = payload[0];
-    let backpack_index = payload[1];
-    let model_length = read_u16(payload, 2) as usize;
-    if payload.len() != 4 + model_length {
-        return Err(NicechunkPlayerError::InvalidInstruction.into());
-    }
-    let clears_slot = backpack_index == CLEAR_EQUIPMENT_BACKPACK_INDEX;
-    if accounts.len() != if clears_slot { 5 } else { 6 } || (clears_slot && model_length != 0) {
-        return Err(NicechunkPlayerError::InvalidAccountCount.into());
-    }
-
-    let account_info_iter = &mut accounts.iter();
-    let authority = next_account_info(account_info_iter)?;
-    let player_profile = next_account_info(account_info_iter)?;
-    let player_equipment = next_account_info(account_info_iter)?;
-    let global_config = next_account_info(account_info_iter)?;
-    let system_program_account = next_account_info(account_info_iter)?;
-    let backpack = if clears_slot {
-        None
-    } else {
-        Some(next_account_info(account_info_iter)?)
-    };
-
-    validate_player_write_accounts(program_id, authority, player_profile, global_config)?;
-    if !authority.is_writable {
-        return Err(NicechunkPlayerError::InvalidPlayerAuthority.into());
-    }
-    if !player_equipment.is_writable {
-        return Err(NicechunkPlayerError::InvalidWritableAccount.into());
-    }
-    require_key_eq(
-        system_program_account.key,
-        &system_program::ID,
-        NicechunkPlayerError::InvalidSystemProgram,
-    )?;
-    let (expected_player_equipment, bump) =
-        Pubkey::find_program_address(&[PLAYER_EQUIPMENT_SEED, authority.key.as_ref()], program_id);
-    require_key_eq(
-        player_equipment.key,
-        &expected_player_equipment,
-        NicechunkPlayerError::InvalidPlayerEquipmentPda,
-    )?;
-
-    let equipment_exists =
-        player_equipment.owner == program_id && player_equipment.data_len() == PlayerEquipment::LEN;
-    let clock = Clock::get()?;
-    if clears_slot && !equipment_exists {
-        if player_equipment.owner != &system_program::ID || player_equipment.data_len() != 0 {
-            return Err(NicechunkPlayerError::InvalidPlayerEquipmentOwner.into());
-        }
-        let mut profile_data = player_profile.try_borrow_mut_data()?;
-        return PlayerProfile::write_equipment_slot(
-            &mut profile_data,
-            slot,
-            &Pubkey::default(),
-            clock.slot,
-        );
-    }
-
-    ensure_player_equipment_current(
-        authority,
-        player_profile,
-        player_equipment,
-        global_config,
-        system_program_account,
-        program_id,
-        bump,
-        &clock,
-    )?;
-
-    let legacy_identity = if let Some(backpack) = backpack {
-        if backpack.owner != &NICECHUNK_BACKPACK_PROGRAM_ID
-            && backpack.owner != &NICECHUNK_GAME_PROGRAM_ID
-        {
-            return Err(NicechunkPlayerError::InvalidBackpackProgram.into());
-        }
-        let backpack_data = backpack.try_borrow_data()?;
-        BackpackAccountView::validate_pda_and_owner(
-            &backpack_data,
-            backpack.key,
-            backpack.owner,
-            authority.key,
-        )?;
-        let backpack_record = BackpackAccountView::equipment_record_at(
-            &backpack_data,
-            authority.key,
-            backpack_index,
-        )?;
-        drop(backpack_data);
-        {
-            let mut equipment_data = player_equipment.try_borrow_mut_data()?;
-            PlayerEquipment::validate_owner_and_config(
-                &equipment_data,
-                authority.key,
-                player_profile.key,
-                global_config.key,
-            )?;
-            PlayerEquipment::write_slot(
-                &mut equipment_data,
-                slot,
-                backpack_index,
-                backpack.key,
-                &backpack_record,
-                &payload[4..],
-                clock.slot,
-            )?;
-        }
-        Pubkey::new_from_array(
-            hashv(&[b"equipment-v1", backpack.key.as_ref(), &backpack_record]).to_bytes(),
-        )
-    } else {
-        let mut equipment_data = player_equipment.try_borrow_mut_data()?;
-        PlayerEquipment::validate_owner_and_config(
-            &equipment_data,
-            authority.key,
-            player_profile.key,
-            global_config.key,
-        )?;
-        PlayerEquipment::clear_slot(&mut equipment_data, slot, clock.slot)?;
-        Pubkey::default()
-    };
-
-    let mut profile_data = player_profile.try_borrow_mut_data()?;
-    PlayerProfile::write_equipment_slot(&mut profile_data, slot, &legacy_identity, clock.slot)
-}
-
 fn transfer_equipment_slot(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -1571,6 +1487,10 @@ fn set_equipped_backpack(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progr
     {
         let data = player_profile.try_borrow_data()?;
         PlayerProfile::validate_owner(&data, authority.key)?;
+        let equipped_backpack = PlayerProfile::equipped_backpack(&data)?;
+        if equipped_backpack != Pubkey::default() && equipped_backpack != *backpack.key {
+            return Err(NicechunkPlayerError::PlayerBackpackAlreadyBound.into());
+        }
     }
 
     {
@@ -1713,37 +1633,16 @@ fn ensure_player_equipment_current<'a>(
         return Ok(());
     }
 
-    if player_equipment.owner == program_id {
-        let rent = Rent::get()?;
-        let lamports = rent.minimum_balance(PlayerEquipment::LEN);
-        if player_equipment.lamports() < lamports {
-            let transfer = system_instruction::transfer(
-                payer.key,
-                player_equipment.key,
-                lamports - player_equipment.lamports(),
-            );
-            invoke(
-                &transfer,
-                &[
-                    payer.clone(),
-                    player_equipment.clone(),
-                    system_program_account.clone(),
-                ],
-            )?;
-        }
-        player_equipment.realloc(PlayerEquipment::LEN, false)?;
-    } else {
-        if player_equipment.owner != &system_program::ID || player_equipment.data_len() != 0 {
-            return Err(NicechunkPlayerError::InvalidPlayerEquipmentOwner.into());
-        }
-        create_or_allocate_player_equipment_pda(
-            payer,
-            player_equipment,
-            system_program_account,
-            program_id,
-            bump,
-        )?;
+    if player_equipment.owner != &system_program::ID || player_equipment.data_len() != 0 {
+        return Err(NicechunkPlayerError::InvalidPlayerEquipmentOwner.into());
     }
+    create_or_allocate_player_equipment_pda(
+        payer,
+        player_equipment,
+        system_program_account,
+        program_id,
+        bump,
+    )?;
 
     let mut data = player_equipment.try_borrow_mut_data()?;
     PlayerEquipment::pack_empty(
@@ -1837,40 +1736,17 @@ fn ensure_player_profile_current<'a>(
         }
     }
 
-    if player_profile.owner == program_id {
-        let rent = Rent::get()?;
-        let lamports = rent.minimum_balance(PlayerProfile::LEN);
-        if player_profile.lamports() < lamports {
-            let transfer = system_instruction::transfer(
-                payer.key,
-                player_profile.key,
-                lamports - player_profile.lamports(),
-            );
-            invoke(
-                &transfer,
-                &[
-                    payer.clone(),
-                    player_profile.clone(),
-                    system_program_account.clone(),
-                ],
-            )?;
-        }
-        if player_profile.data_len() != PlayerProfile::LEN {
-            player_profile.realloc(PlayerProfile::LEN, false)?;
-        }
-    } else {
-        if player_profile.owner != &system_program::ID || player_profile.data_len() != 0 {
-            return Err(NicechunkPlayerError::InvalidSystemAccount.into());
-        }
-        create_or_allocate_player_profile_pda(
-            payer,
-            player_profile,
-            system_program_account,
-            program_id,
-            owner,
-            bump,
-        )?;
+    if player_profile.owner != &system_program::ID || player_profile.data_len() != 0 {
+        return Err(NicechunkPlayerError::InvalidSystemAccount.into());
     }
+    create_or_allocate_player_profile_pda(
+        payer,
+        player_profile,
+        system_program_account,
+        program_id,
+        owner,
+        bump,
+    )?;
 
     let mut data = player_profile.try_borrow_mut_data()?;
     PlayerProfile::pack_default(
@@ -2280,7 +2156,7 @@ fn ensure_appearance_rent<'a>(
         )?;
     }
     if appearance.data_len() != PlayerAppearance::LEN {
-        appearance.realloc(PlayerAppearance::LEN, false)?;
+        return Err(NicechunkPlayerError::InvalidAppearanceData.into());
     }
     require_key_eq(
         appearance.owner,
@@ -2396,4 +2272,27 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
         bytes[offset + 6],
         bytes[offset + 7],
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn market_and_placement_abis_remain_distinct() {
+        assert_eq!(RELEASE_EQUIPMENT_TO_MARKET_TAG, 16);
+        assert_eq!(CONSUME_PLACEMENT_RESOURCE_TAG, 17);
+        assert_ne!(
+            RELEASE_EQUIPMENT_TO_MARKET_TAG,
+            CONSUME_PLACEMENT_RESOURCE_TAG
+        );
+        assert_eq!(NicechunkPlayerError::InvalidMarketListing as u32, 6255);
+        assert_eq!(
+            NicechunkPlayerError::InvalidChunkPlacedAuthority as u32,
+            6256
+        );
+        assert_eq!(NicechunkPlayerError::PlacementSlotMismatch as u32, 6257);
+        assert_eq!(NicechunkPlayerError::InvalidPlacementResource as u32, 6258);
+        assert_eq!(NicechunkPlayerError::InvalidMaterialPhysics as u32, 6259);
+    }
 }

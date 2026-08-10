@@ -43,6 +43,10 @@ then consumes exactly one matching 80-byte resource slot through the Backpack or
 Player program, and finally appends the placed voxel. If any step fails, Solana
 rolls back the inventory change and the world change together.
 
+The Player CPI ABI keeps tag 16 reserved for releasing equipped items into
+market escrow. Equipment-backed placement uses tag 17. These tags must remain
+distinct so a Chunk placement can never enter the market custody path.
+
 Each Chunk uses one sparse `ChunkPlaced` PDA. Empty Chunks have no placement
 account and therefore no rent cost. The account starts with 64 records, grows in
 64-record increments, and is capped at 2,048 records. Its 16-byte header is

@@ -64,6 +64,7 @@ const PLAYER_SKILLS_LEVELS_OFFSET: usize = 156;
 const PRECISION_GATHERING_SKILL_INDEX: usize = 0;
 const EXPLORATION_SKILL_INDEX: usize = 6;
 const MAX_SKILL_LEVEL: u8 = 10;
+const PLAYER_CONSUME_PLACEMENT_RESOURCE_TAG: u8 = 17;
 
 #[cfg(not(feature = "no-entrypoint"))]
 entrypoint!(process_instruction);
@@ -3023,7 +3024,8 @@ fn consume_player_equipment_placement_resource<'a>(
     expected_slot: &[u8; 80],
 ) -> Result<(u16, u32), solana_program::program_error::ProgramError> {
     let mut data = Vec::with_capacity(1 + 4 + 4 + 1 + expected_slot.len());
-    data.push(16);
+    // Player tag 16 is the stable market-escrow release ABI.
+    data.push(PLAYER_CONSUME_PLACEMENT_RESOURCE_TAG);
     data.extend_from_slice(&chunk_x.to_le_bytes());
     data.extend_from_slice(&chunk_z.to_le_bytes());
     data.push(source_index);
