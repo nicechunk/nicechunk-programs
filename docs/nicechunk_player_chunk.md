@@ -24,6 +24,7 @@ mainnet.
 PlayerProfile     ["player-v7", owner]
 PlayerSession     ["session", owner, session_authority]
 ChunkBroken       ["chunk-broken", global_config, i32_le(chunk_x), i32_le(chunk_z)]
+ChunkPlaced       ["chunk-placed", global_config, i32_le(chunk_x), i32_le(chunk_z)]
 PlayerProgress    ["player-progress", global_config, owner]
 FoundationChunk   ["foundation-chunk-v2", global_config, i32_le(chunk_x), i32_le(chunk_z)]
 Backpack          ["backpack", owner, u64_le(backpack_id)]
@@ -33,6 +34,64 @@ SkillRuleTable    ["skill-rules-v2", global_config]
 
 `FoundationChunk` accepts only `NCKFCI02` version 2. `PlayerSkills` accepts only
 `NCKSKL02` version 2, and `SkillRuleTable` accepts only `NCKXPR02` version 2.
+
+## Authoritative Block Placement
+
+Ordinary resource placement is an atomic on-chain state transition. The Chunk
+program first validates the destination and its face-adjacent support block,
+then consumes exactly one matching 80-byte resource slot through the Backpack or
+Player program, and finally appends the placed voxel. If any step fails, Solana
+rolls back the inventory change and the world change together.
+
+Each Chunk uses one sparse `ChunkPlaced` PDA. Empty Chunks have no placement
+account and therefore no rent cost. The account starts with 64 records, grows in
+64-record increments, and is capped at 2,048 records. Its 16-byte header is
+followed by compact nine-byte records:
+
+```text
+[packed_local_xyz_u24, block_id_u16, original_volume_mm3_u32]
+```
+
+The original volume is retained so mining a placed voxel can restore the same
+amount and recompute mass from the canonical MaterialPhysics density. Record
+removal uses swap-delete; callers must treat record order as unstable.
+
+### PlaceBlock
+
+```text
+instruction_data = [
+  14,
+  i32_le(world_x), i16_le(world_y), i32_le(world_z),
+  i32_le(anchor_world_x), i16_le(anchor_world_y), i32_le(anchor_world_z),
+  source_kind_u8,
+  source_index_u8,
+  expected_source_slot_80_bytes
+]
+```
+
+The destination and anchor must have Manhattan distance one, including across a
+Chunk boundary. The final anchor state is resolved from `ChunkPlaced` first and
+otherwise from deterministic terrain minus `ChunkBroken`. Air, fluid, cutout
+plants, unknown blocks, occupied destinations, and unsupported placements are
+rejected before inventory can be consumed. The complete source-slot snapshot
+prevents index drift, stale clients, retries, and double clicks from consuming a
+different item.
+
+### MinePlacedBlock
+
+Tag 16 uses the same reward-bearing payload shape as `MineBlockWithRewards`.
+It removes the exact `ChunkPlaced` record and returns its stored volume to the
+backpack. Placed tree blocks do not invoke generated whole-tree felling, and
+placed gravel does not invoke deterministic natural-collapse rules.
+
+### Client Loading
+
+Clients derive both `ChunkBroken` and `ChunkPlaced` for each visible Chunk and
+read at most 50 Chunks per `getMultipleAccounts` request, exactly 100 accounts.
+The two sparse streams are merged into one final block delta map and persisted in
+the versioned local Chunk cache. Account bytes and RPC context slots are compared
+before remeshing, so unchanged Chunks do not rebuild. Cache data is only a render
+accelerator; PDA state remains authoritative after refresh and across wallets.
 
 ## Mining Action Identity
 

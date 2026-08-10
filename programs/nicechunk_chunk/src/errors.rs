@@ -77,6 +77,16 @@ pub enum NicechunkChunkError {
     InvalidPlayerSkillsData = 6382,
     InvalidBackpackData = 6383,
     InvalidMiningActionId = 6384,
+    InvalidChunkPlacedPda = 6385,
+    InvalidChunkPlacedData = 6386,
+    ChunkPlacedCapacityExceeded = 6387,
+    PlacementOccupied = 6388,
+    InvalidPlacementReturnData = 6389,
+    PlacedBlockNotFound = 6390,
+    PlacedBlockMismatch = 6391,
+    InvalidPlacementBlock = 6392,
+    InvalidPlacementSource = 6393,
+    InvalidPlacementAnchor = 6394,
 }
 
 impl From<NicechunkChunkError> for ProgramError {

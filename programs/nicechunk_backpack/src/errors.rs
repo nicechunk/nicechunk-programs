@@ -55,6 +55,9 @@ pub enum NicechunkBackpackError {
     InvalidPlayerSkillsOwner = 6449,
     InvalidPlayerSkillsData = 6450,
     InvalidSmeltingConsumption = 6451,
+    InvalidChunkPlacedAuthority = 6452,
+    InvalidPlacementConsumption = 6453,
+    PlacementSlotMismatch = 6454,
 }
 
 impl From<NicechunkBackpackError> for ProgramError {

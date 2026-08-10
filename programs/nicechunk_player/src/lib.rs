@@ -7,7 +7,7 @@ use solana_program::{
     entrypoint::ProgramResult,
     hash::hashv,
     instruction::{AccountMeta, Instruction},
-    program::{invoke, invoke_signed},
+    program::{invoke, invoke_signed, set_return_data},
     pubkey::Pubkey,
     rent::Rent,
     system_instruction, system_program,
@@ -22,8 +22,8 @@ pub mod errors;
 pub mod state;
 
 use cluster_config::{
-    NICECHUNK_BACKPACK_PROGRAM_ID, NICECHUNK_CORE_PROGRAM_ID, NICECHUNK_GAME_PROGRAM_ID,
-    NICECHUNK_TREASURY_AUTHORITY,
+    NICECHUNK_BACKPACK_PROGRAM_ID, NICECHUNK_CHUNK_PROGRAM_ID, NICECHUNK_CORE_PROGRAM_ID,
+    NICECHUNK_GAME_PROGRAM_ID, NICECHUNK_TREASURY_AUTHORITY,
 };
 use errors::{require_key_eq, NicechunkPlayerError};
 use state::{
@@ -38,6 +38,15 @@ use state::{
 declare_id!("CHZHsBCGn58ih2WrPfKSYhvCEjMPGhArTiYCH7AWWBkB");
 
 const CLEAR_EQUIPMENT_BACKPACK_INDEX: u8 = u8::MAX;
+const CHUNK_PLACED_SEED: &[u8] = b"chunk-placed";
+const MATERIAL_PHYSICS_SEED: &[u8] = b"material-physics-v2";
+const MATERIAL_PHYSICS_MAGIC: [u8; 8] = *b"NCKPHY02";
+const MATERIAL_PHYSICS_VERSION: u8 = 2;
+const MATERIAL_PHYSICS_HEADER_LEN: usize = 16;
+const MATERIAL_PHYSICS_RULE_LEN: usize = 8;
+const MATERIAL_PHYSICS_MAX_RULES: usize = 128;
+const MATERIAL_PHYSICS_LEN: usize =
+    MATERIAL_PHYSICS_HEADER_LEN + MATERIAL_PHYSICS_MAX_RULES * MATERIAL_PHYSICS_RULE_LEN;
 
 #[cfg(not(feature = "no-entrypoint"))]
 entrypoint!(process_instruction);
@@ -68,8 +77,206 @@ pub fn process_instruction(
         13 => transfer_equipment_slot(program_id, accounts, payload),
         14 => swap_equipment_slots(program_id, accounts, payload),
         15 => consume_equipment_durability(program_id, accounts, payload),
+        16 => consume_placement_resource(program_id, accounts, payload),
         _ => Err(NicechunkPlayerError::InvalidInstruction.into()),
     }
+}
+
+fn consume_placement_resource(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    payload: &[u8],
+) -> ProgramResult {
+    const PAYLOAD_LEN: usize = 4 + 4 + 1 + state::BACKPACK_SLOT_RECORD_LEN;
+    if accounts.len() != 7 || payload.len() != PAYLOAD_LEN {
+        return Err(NicechunkPlayerError::InvalidInstruction.into());
+    }
+    let chunk_x = i32::from_le_bytes(
+        payload[0..4]
+            .try_into()
+            .map_err(|_| NicechunkPlayerError::InvalidInstruction)?,
+    );
+    let chunk_z = i32::from_le_bytes(
+        payload[4..8]
+            .try_into()
+            .map_err(|_| NicechunkPlayerError::InvalidInstruction)?,
+    );
+    let equipment_slot = payload[8];
+    let expected_slot: [u8; state::BACKPACK_SLOT_RECORD_LEN] = payload[9..]
+        .try_into()
+        .map_err(|_| NicechunkPlayerError::InvalidInstruction)?;
+
+    let account_info_iter = &mut accounts.iter();
+    let chunk_placed = next_account_info(account_info_iter)?;
+    let player_profile = next_account_info(account_info_iter)?;
+    let player_equipment = next_account_info(account_info_iter)?;
+    let global_config = next_account_info(account_info_iter)?;
+    let backpack = next_account_info(account_info_iter)?;
+    let material_physics = next_account_info(account_info_iter)?;
+    let backpack_program = next_account_info(account_info_iter)?;
+
+    if !chunk_placed.is_signer {
+        return Err(NicechunkPlayerError::InvalidChunkPlacedAuthority.into());
+    }
+    if !player_profile.is_writable || !player_equipment.is_writable {
+        return Err(NicechunkPlayerError::InvalidWritableAccount.into());
+    }
+    require_key_eq(
+        chunk_placed.owner,
+        &NICECHUNK_CHUNK_PROGRAM_ID,
+        NicechunkPlayerError::InvalidChunkPlacedAuthority,
+    )?;
+    let chunk_x_bytes = chunk_x.to_le_bytes();
+    let chunk_z_bytes = chunk_z.to_le_bytes();
+    let (expected_chunk_placed, _) = Pubkey::find_program_address(
+        &[
+            CHUNK_PLACED_SEED,
+            global_config.key.as_ref(),
+            &chunk_x_bytes,
+            &chunk_z_bytes,
+        ],
+        &NICECHUNK_CHUNK_PROGRAM_ID,
+    );
+    require_key_eq(
+        chunk_placed.key,
+        &expected_chunk_placed,
+        NicechunkPlayerError::InvalidChunkPlacedAuthority,
+    )?;
+    require_key_eq(
+        global_config.owner,
+        &NICECHUNK_CORE_PROGRAM_ID,
+        NicechunkPlayerError::InvalidGlobalConfigOwner,
+    )?;
+    require_key_eq(
+        player_profile.owner,
+        program_id,
+        NicechunkPlayerError::InvalidPlayerProfileOwner,
+    )?;
+    require_key_eq(
+        player_equipment.owner,
+        program_id,
+        NicechunkPlayerError::InvalidPlayerEquipmentOwner,
+    )?;
+    if !backpack_program.executable
+        || (backpack_program.key != &NICECHUNK_GAME_PROGRAM_ID
+            && backpack_program.key != &NICECHUNK_BACKPACK_PROGRAM_ID)
+        || backpack.owner != backpack_program.key
+        || material_physics.owner != backpack_program.key
+    {
+        return Err(NicechunkPlayerError::InvalidBackpackProgram.into());
+    }
+
+    let owner = {
+        let profile_data = player_profile.try_borrow_data()?;
+        let owner = PlayerProfile::owner(&profile_data)?;
+        PlayerProfile::validate_owner_and_config(&profile_data, &owner, global_config.key)?;
+        owner
+    };
+    let (expected_profile, _) =
+        Pubkey::find_program_address(&[state::PLAYER_PROFILE_SEED, owner.as_ref()], program_id);
+    require_key_eq(
+        player_profile.key,
+        &expected_profile,
+        NicechunkPlayerError::InvalidPlayerProfilePda,
+    )?;
+    let (expected_equipment, _) =
+        Pubkey::find_program_address(&[state::PLAYER_EQUIPMENT_SEED, owner.as_ref()], program_id);
+    require_key_eq(
+        player_equipment.key,
+        &expected_equipment,
+        NicechunkPlayerError::InvalidPlayerEquipmentPda,
+    )?;
+
+    let block_id = u16::from_le_bytes(
+        expected_slot[12..14]
+            .try_into()
+            .map_err(|_| NicechunkPlayerError::InvalidPlacementResource)?,
+    ) >> 9;
+    let density_kg_m3 = material_density_for_block(
+        material_physics,
+        backpack_program.key,
+        global_config.key,
+        block_id,
+    )?;
+    let clock = Clock::get()?;
+    let (consumed_block_id, volume_mm3, identity) = {
+        let mut equipment_data = player_equipment.try_borrow_mut_data()?;
+        PlayerEquipment::consume_placement_resource(
+            &mut equipment_data,
+            &owner,
+            player_profile.key,
+            global_config.key,
+            backpack.key,
+            equipment_slot,
+            &expected_slot,
+            density_kg_m3,
+            clock.slot,
+        )?
+    };
+    {
+        let mut profile_data = player_profile.try_borrow_mut_data()?;
+        PlayerProfile::write_equipment_slot(
+            &mut profile_data,
+            equipment_slot,
+            &identity,
+            clock.slot,
+        )?;
+    }
+    let mut return_data = [0_u8; 6];
+    return_data[0..2].copy_from_slice(&consumed_block_id.to_le_bytes());
+    return_data[2..6].copy_from_slice(&volume_mm3.to_le_bytes());
+    set_return_data(&return_data);
+    Ok(())
+}
+
+fn material_density_for_block(
+    material_physics: &AccountInfo,
+    backpack_program: &Pubkey,
+    global_config: &Pubkey,
+    block_id: u16,
+) -> Result<u16, solana_program::program_error::ProgramError> {
+    if block_id == 0 {
+        return Err(NicechunkPlayerError::InvalidPlacementResource.into());
+    }
+    let (expected, _) = Pubkey::find_program_address(
+        &[MATERIAL_PHYSICS_SEED, global_config.as_ref()],
+        backpack_program,
+    );
+    require_key_eq(
+        material_physics.key,
+        &expected,
+        NicechunkPlayerError::InvalidMaterialPhysics,
+    )?;
+    let data = material_physics.try_borrow_data()?;
+    if data.len() != MATERIAL_PHYSICS_LEN
+        || data[0..8] != MATERIAL_PHYSICS_MAGIC
+        || data[8] != MATERIAL_PHYSICS_VERSION
+    {
+        return Err(NicechunkPlayerError::InvalidMaterialPhysics.into());
+    }
+    let count = data[10] as usize;
+    if count == 0 || count > MATERIAL_PHYSICS_MAX_RULES {
+        return Err(NicechunkPlayerError::InvalidMaterialPhysics.into());
+    }
+    let mut low = 0_usize;
+    let mut high = count;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let offset = MATERIAL_PHYSICS_HEADER_LEN + middle * MATERIAL_PHYSICS_RULE_LEN;
+        match read_u16(&data, offset).cmp(&block_id) {
+            core::cmp::Ordering::Less => low = middle + 1,
+            core::cmp::Ordering::Greater => high = middle,
+            core::cmp::Ordering::Equal => {
+                let density = read_u16(&data, offset + 2);
+                let standard_volume = read_u32(&data, offset + 4);
+                if density == 0 || standard_volume == 0 {
+                    return Err(NicechunkPlayerError::InvalidMaterialPhysics.into());
+                }
+                return Ok(density);
+            }
+        }
+    }
+    Err(NicechunkPlayerError::InvalidMaterialPhysics.into())
 }
 
 fn consume_equipment_durability(

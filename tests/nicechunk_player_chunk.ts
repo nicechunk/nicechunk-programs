@@ -72,13 +72,21 @@ import {
   NICECHUNK_CIVILIZATION_PROGRAM_ID,
 } from "../sdk/nicechunk-civilization.ts";
 import {
+  BLOCK_AIR,
+  BLOCK_BEDROCK,
+  BLOCK_CACTUS,
+  BLOCK_SHELL_BED,
   BLOCK_STONE,
+  BLOCK_WATER,
   BATCH_MINE_MODE_DEBUG,
   RANGE_MINE_MAX_BLOCKS,
   RANGE_MINE_MODE_DEBUG,
   CHUNK_BROKEN_HEADER_LEN,
   CHUNK_BROKEN_MAGIC,
   CHUNK_BROKEN_RECORD_LEN,
+  CHUNK_PLACED_HEADER_LEN,
+  CHUNK_PLACED_MAGIC,
+  CHUNK_PLACED_RECORD_LEN,
   FOUNDATION_CHUNK_HEADER_LEN,
   FOUNDATION_CHUNK_INITIAL_CAPACITY,
   FOUNDATION_CHUNK_MAGIC,
@@ -95,13 +103,17 @@ import {
   createInitializeSurfaceDecorationTableInstruction,
   createInitializeResourceDropTableInstruction,
   createMineBlockInstruction,
+  createMinePlacedBlockWithRewardsInstruction,
   createMineBlockWithRewardsInstruction,
+  createPlaceBlockInstruction,
   createBatchMineWithRewardsInstruction,
   createRangeMineWithRewardsInstruction,
   decodeChunkBrokenState,
+  decodeChunkPlacedState,
   decodeFoundationChunkState,
   decodeSurfaceDecorationTable,
   deriveChunkBrokenPda,
+  deriveChunkPlacedPda,
   deriveFoundationChunkPda,
   derivePlayerProgressPda,
   deriveResourceDropTablePda,
@@ -110,7 +122,9 @@ import {
   encodeCivilizationResourceDropRulesPatch,
   foundationChunkAccountLength,
   generatedBlockIdAt,
+  isCanonicalPlaceableBlockId,
   NICECHUNK_CHUNK_PROGRAM_ID,
+  PLACEMENT_SOURCE_EQUIPMENT,
   resolveSurfaceDecorationAt,
 } from "../sdk/nicechunk-chunk.ts";
 import {
@@ -1060,6 +1074,101 @@ describe("nicechunk player and mining SDK", () => {
     assert.equal(decoded.brokenBlocks[0].y, -31);
     assert.equal(decoded.brokenBlocks[0].z, 39);
     assert.equal(decoded.brokenBlocks[0].packed, "7f0100");
+  });
+
+  it("builds and decodes atomic placed-block state", () => {
+    const owner = new PublicKey("6pCaR8qLHvGeU3BAzwzAHMPjDk1ewNtrbAcqAGeMSH2Q");
+    const backpack = new PublicKey("6d8tUqPge3b4Fv7LAQHqsrZLZa9FZn36Y8ugzZeGCc1i");
+    const [globalConfig] = deriveGlobalConfigPda();
+    const [chunkPlaced] = deriveChunkPlacedPda({ globalConfig, chunkX: -1, chunkZ: 2 });
+    const expectedSlot = Buffer.alloc(BACKPACK_SLOT_RECORD_LEN, 0x5a);
+    const place = createPlaceBlockInstruction({
+      payer: owner,
+      owner,
+      block: { worldX: -1, worldY: -31, worldZ: 39 },
+      anchor: { worldX: 0, worldY: -31, worldZ: 39 },
+      backpack,
+      sourceKind: PLACEMENT_SOURCE_EQUIPMENT,
+      sourceIndex: 7,
+      expectedSlot,
+    });
+    assert.equal(place.data.readUInt8(0), 14);
+    assert.equal(place.data.length, 103);
+    assert.equal(place.data.readInt32LE(1), -1);
+    assert.equal(place.data.readInt16LE(5), -31);
+    assert.equal(place.data.readInt32LE(7), 39);
+    assert.equal(place.data.readInt32LE(11), 0);
+    assert.equal(place.data.readInt16LE(15), -31);
+    assert.equal(place.data.readInt32LE(17), 39);
+    assert.equal(place.data.readUInt8(21), PLACEMENT_SOURCE_EQUIPMENT);
+    assert.equal(place.data.readUInt8(22), 7);
+    assert.equal(place.data.subarray(23).toString("hex"), expectedSlot.toString("hex"));
+    assert.equal(place.keys[4].pubkey.toBase58(), chunkPlaced.toBase58());
+    assert.equal(place.keys[5].pubkey.toBase58(), deriveChunkBrokenPda({ globalConfig, chunkX: 0, chunkZ: 2 })[0].toBase58());
+    assert.equal(place.keys[6].pubkey.toBase58(), deriveChunkPlacedPda({ globalConfig, chunkX: 0, chunkZ: 2 })[0].toBase58());
+    assert.equal(place.keys[10].pubkey.toBase58(), backpack.toBase58());
+    assert.equal(place.keys[12].pubkey.toBase58(), NICECHUNK_PLAYER_PROGRAM_ID.toBase58());
+    assert.equal(place.keys[13].pubkey.toBase58(), derivePlayerEquipmentPda(owner)[0].toBase58());
+
+    const mine = createMinePlacedBlockWithRewardsInstruction({
+      payer: owner,
+      owner,
+      block: { worldX: -1, worldY: -31, worldZ: 39, expectedBlockId: BLOCK_STONE },
+      backpack,
+      actionId: 9n,
+    });
+    assert.equal(mine.data.readUInt8(0), 16);
+    assert.equal(mine.data.readBigUInt64LE(1), 9n);
+    assert.equal(mine.keys[4].pubkey.toBase58(), chunkPlaced.toBase58());
+    assert.equal(mine.keys[8].pubkey.toBase58(), backpack.toBase58());
+
+    const capacity = 2;
+    const data = Buffer.alloc(CHUNK_PLACED_HEADER_LEN + capacity * CHUNK_PLACED_RECORD_LEN);
+    data.write(CHUNK_PLACED_MAGIC, 0, "utf8");
+    data.writeUInt8(1, 4);
+    data.writeUInt8(251, 5);
+    data.writeUInt16LE(1, 6);
+    data.writeUInt16LE(capacity, 8);
+    data.writeInt16LE(-32, 10);
+    data.writeUIntLE(0x017f, CHUNK_PLACED_HEADER_LEN, 3);
+    data.writeUInt16LE(BLOCK_STONE, CHUNK_PLACED_HEADER_LEN + 3);
+    data.writeUInt32LE(1_000_000, CHUNK_PLACED_HEADER_LEN + 5);
+    const decoded = decodeChunkPlacedState({
+      data,
+      chunkX: -1,
+      chunkZ: 2,
+      chunkSize: 16,
+      expectedMinY: -32,
+    });
+    assert.equal(decoded.placedBlocks[0].x, -1);
+    assert.equal(decoded.placedBlocks[0].y, -31);
+    assert.equal(decoded.placedBlocks[0].z, 39);
+    assert.equal(decoded.placedBlocks[0].blockId, BLOCK_STONE);
+    assert.equal(decoded.placedBlocks[0].volumeMm3, 1_000_000);
+
+    data.copy(data, CHUNK_PLACED_HEADER_LEN + CHUNK_PLACED_RECORD_LEN, CHUNK_PLACED_HEADER_LEN, CHUNK_PLACED_HEADER_LEN + CHUNK_PLACED_RECORD_LEN);
+    data.writeUInt16LE(2, 6);
+    assert.throws(() => decodeChunkPlacedState({ data, chunkX: -1, chunkZ: 2 }), /Duplicate/);
+  });
+
+  it("rejects liquid, cutout, bedrock, and unknown placed-block records", () => {
+    for (const blockId of [BLOCK_STONE, BLOCK_CACTUS, BLOCK_SHELL_BED]) {
+      assert.equal(isCanonicalPlaceableBlockId(blockId), true);
+    }
+    for (const blockId of [BLOCK_AIR, BLOCK_BEDROCK, BLOCK_WATER, 20, 28, 37, 48, 54, 65_535]) {
+      assert.equal(isCanonicalPlaceableBlockId(blockId), false);
+    }
+
+    const data = Buffer.alloc(CHUNK_PLACED_HEADER_LEN + CHUNK_PLACED_RECORD_LEN);
+    data.write(CHUNK_PLACED_MAGIC, 0, "utf8");
+    data.writeUInt8(1, 4);
+    data.writeUInt16LE(1, 6);
+    data.writeUInt16LE(1, 8);
+    data.writeInt16LE(-32, 10);
+    data.writeUIntLE(0, CHUNK_PLACED_HEADER_LEN, 3);
+    data.writeUInt16LE(20, CHUNK_PLACED_HEADER_LEN + 3);
+    data.writeUInt32LE(1_000_000, CHUNK_PLACED_HEADER_LEN + 5);
+    assert.throws(() => decodeChunkPlacedState({ data, chunkX: 0, chunkZ: 0 }), /Invalid ChunkPlacedState record/);
   });
 
   it("computes canonical block ids in SDK", () => {

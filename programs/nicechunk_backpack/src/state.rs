@@ -987,6 +987,49 @@ impl BackpackAccount {
         Ok(())
     }
 
+    pub fn consume_placement_resource(
+        data: &mut [u8],
+        owner: &Pubkey,
+        index: u8,
+        expected_slot: &[u8; BACKPACK_SLOT_RECORD_LEN],
+        material_physics: &MaterialPhysicsTableView<'_>,
+        updated_slot: u64,
+    ) -> Result<(u16, u32), solana_program::program_error::ProgramError> {
+        Self::validate_owner(data, owner)?;
+        if index >= data[Self::ITEM_COUNT_OFFSET] {
+            return Err(NicechunkBackpackError::InvalidResourceIndex.into());
+        }
+        let offset = Self::RECORDS_OFFSET + index as usize * BACKPACK_SLOT_RECORD_LEN;
+        if &data[offset..offset + BACKPACK_SLOT_RECORD_LEN] != expected_slot {
+            return Err(NicechunkBackpackError::PlacementSlotMismatch.into());
+        }
+
+        let record = BackpackSlotRecord::unpack(expected_slot)?;
+        if record.kind != BACKPACK_SLOT_KIND_BLOCK || record.volume_mm3 == 0 {
+            return Err(NicechunkBackpackError::InvalidPlacementConsumption.into());
+        }
+        let block_id = record.block_id()?;
+        material_physics.validate_mass(&record)?;
+        let consumed_volume_mm3 =
+            proportional_consumed_volume_mm3(record.volume_mm3, record.quantity, 1)
+                .map_err(|_| NicechunkBackpackError::InvalidPlacementConsumption)?;
+
+        if record.quantity == 1 {
+            Self::remove_resource_at(data, owner, index, updated_slot)?;
+        } else {
+            let mut remaining = record;
+            remaining.quantity = remaining.quantity.saturating_sub(1);
+            remaining.volume_mm3 = remaining.volume_mm3.saturating_sub(consumed_volume_mm3);
+            if remaining.volume_mm3 == 0 {
+                return Err(NicechunkBackpackError::InvalidPlacementConsumption.into());
+            }
+            material_physics.apply_mass(&mut remaining)?;
+            Self::replace_slot_at(data, owner, index, &remaining, updated_slot)?;
+        }
+
+        Ok((block_id, consumed_volume_mm3))
+    }
+
     pub fn slot_at(data: &[u8], index: u8) -> Result<BackpackSlotRecord, NicechunkBackpackError> {
         Self::validate(data)?;
         if index >= data[Self::ITEM_COUNT_OFFSET] {
@@ -2855,6 +2898,56 @@ mod tests {
         assert_eq!(remaining.mass_grams().unwrap(), 1_250);
         assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 1_250);
         assert_eq!(data[BackpackAccount::ITEM_COUNT_OFFSET], 1);
+    }
+
+    #[test]
+    fn placement_consumes_one_exact_block_and_preserves_physical_state() {
+        let owner = Pubkey::new_unique();
+        let physics_data = material_physics_fixture();
+        let physics = MaterialPhysicsTableView::new(&physics_data).unwrap();
+        let mut data = empty_backpack(&owner, 2);
+        let mut stack = BackpackSlotRecord::from_block_resource_with_volume_and_metadata(
+            block_resource(3, 0),
+            2_500_001,
+            0,
+        );
+        stack.quantity = 4;
+        physics.apply_mass(&mut stack).unwrap();
+        BackpackAccount::append_item(&mut data, &owner, &stack, 11).unwrap();
+        let expected = packed_slot(&BackpackAccount::slot_at(&data, 0).unwrap());
+
+        let consumed = BackpackAccount::consume_placement_resource(
+            &mut data, &owner, 0, &expected, &physics, 12,
+        )
+        .unwrap();
+
+        assert_eq!(consumed, (3, 625_000));
+        let remaining = BackpackAccount::slot_at(&data, 0).unwrap();
+        assert_eq!(remaining.quantity, 3);
+        assert_eq!(remaining.volume_mm3, 1_875_001);
+        assert_eq!(remaining.mass_grams().unwrap(), 4_875);
+        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 4_875);
+    }
+
+    #[test]
+    fn placement_rejects_a_stale_slot_without_mutating_the_backpack() {
+        let owner = Pubkey::new_unique();
+        let physics_data = material_physics_fixture();
+        let physics = MaterialPhysicsTableView::new(&physics_data).unwrap();
+        let mut data = empty_backpack(&owner, 2);
+        let mut resource =
+            BackpackSlotRecord::from_block_resource_with_volume(block_resource(14, 0), 1_000_000);
+        physics.apply_mass(&mut resource).unwrap();
+        BackpackAccount::append_item(&mut data, &owner, &resource, 11).unwrap();
+        let before = data.clone();
+        let mut stale = packed_slot(&BackpackAccount::slot_at(&data, 0).unwrap());
+        stale[60] ^= 1;
+
+        assert!(BackpackAccount::consume_placement_resource(
+            &mut data, &owner, 0, &stale, &physics, 12,
+        )
+        .is_err());
+        assert_eq!(data, before);
     }
 
     #[test]

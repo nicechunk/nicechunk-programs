@@ -10,6 +10,7 @@ import {
 } from "./nicechunk-core.ts";
 import {
   derivePlayerProfilePda,
+  derivePlayerEquipmentPda,
   derivePlayerSessionPda,
   NICECHUNK_PLAYER_PROGRAM_ID,
 } from "./nicechunk-player.ts";
@@ -33,6 +34,7 @@ export const NICECHUNK_GAME_PROGRAM_ID = new PublicKey(
 );
 const UNIFIED_GAME_CHUNK_NAMESPACE = 2;
 export const CHUNK_BROKEN_SEED = "chunk-broken";
+export const CHUNK_PLACED_SEED = "chunk-placed";
 export const RESOURCE_DROP_TABLE_SEED = "resource-drops-v2";
 export const SURFACE_DECORATION_TABLE_SEED = "surface-decor-v1";
 export const PLAYER_PROGRESS_SEED = "player-progress";
@@ -42,6 +44,16 @@ export const CHUNK_BROKEN_HEADER_LEN = 16;
 export const CHUNK_BROKEN_RECORD_LEN = 3;
 export const CHUNK_BROKEN_INITIAL_CAPACITY = 64;
 export const CHUNK_BROKEN_MAX_CAPACITY = 2048;
+export const CHUNK_PLACED_MAGIC = "NCPB";
+export const CHUNK_PLACED_VERSION = 1;
+export const CHUNK_PLACED_HEADER_LEN = 16;
+export const CHUNK_PLACED_RECORD_LEN = 9;
+export const CHUNK_PLACED_INITIAL_CAPACITY = 64;
+export const CHUNK_PLACED_GROWTH = 64;
+export const CHUNK_PLACED_MAX_CAPACITY = 2048;
+export const BACKPACK_SLOT_RECORD_LEN = 80;
+export const PLACEMENT_SOURCE_BACKPACK = 0;
+export const PLACEMENT_SOURCE_EQUIPMENT = 1;
 export const RESOURCE_DROP_RULE_LEN = 23;
 export const SURFACE_DECORATION_TABLE_MAGIC = "NCKDEC01";
 export const SURFACE_DECORATION_TABLE_VERSION = 1;
@@ -72,6 +84,7 @@ export const BLOCK_MUD = 8;
 export const BLOCK_DRY_DIRT = 9;
 export const BLOCK_SALT_FLAT = 10;
 export const BLOCK_SNOW = 11;
+export const BLOCK_ICE = 12;
 export const BLOCK_FROZEN_SOIL = 13;
 export const BLOCK_BASALT = 14;
 export const BLOCK_ASH = 15;
@@ -82,8 +95,12 @@ export const BLOCK_TRUNK = 22;
 export const BLOCK_LEAVES = 23;
 export const BLOCK_PINE_TRUNK = 24;
 export const BLOCK_PINE_LEAVES = 25;
+export const BLOCK_DEAD_WOOD = 26;
+export const BLOCK_GIANT_ROOT = 27;
 export const BLOCK_CACTUS = 32;
 export const BLOCK_MOSS = 37;
+export const BLOCK_CORAL = 44;
+export const BLOCK_DEAD_CORAL = 45;
 export const BLOCK_SHELL_BED = 46;
 export const BLOCK_COAL = 47;
 export const BATCH_MINE_MAX_BLOCKS = 2;
@@ -93,6 +110,16 @@ export const RANGE_MINE_MODE_DEBUG = 1;
 export const RANGE_MINE_MAX_PALETTE_SIZE = 8;
 const TREE_MAX_LEAF_RADIUS = 2;
 const MAX_WATER_LEVEL_ABOVE_SEA = 6;
+
+export function isCanonicalPlaceableBlockId(blockId: number): boolean {
+  const normalized = Number(blockId);
+  return Number.isInteger(normalized) && (
+    normalized >= BLOCK_GRASS && normalized <= BLOCK_ASH
+    || normalized >= BLOCK_QUICKSAND && normalized <= BLOCK_GIANT_ROOT
+    || normalized === BLOCK_CACTUS
+    || normalized >= BLOCK_CORAL && normalized <= BLOCK_COAL
+  );
+}
 
 export const CANONICAL_CHUNK_WORLD_CONFIG = Object.freeze({
   worldSeedHex: "6e6963656368756e6b2d6d61696e6e65742d3030310000000000000000000000",
@@ -243,6 +270,30 @@ export interface DecodedChunkBrokenState {
   brokenBlocks: DecodedBrokenBlock[];
 }
 
+export interface DecodedPlacedBlock {
+  index: number;
+  x: number;
+  y: number;
+  z: number;
+  localX: number;
+  localZ: number;
+  blockId: number;
+  volumeMm3: number;
+  packed: string;
+}
+
+export interface DecodedChunkPlacedState {
+  magic: string;
+  version: number;
+  bump: number;
+  count: number;
+  capacity: number;
+  minY: number;
+  chunkX: number;
+  chunkZ: number;
+  placedBlocks: DecodedPlacedBlock[];
+}
+
 export function deriveChunkBrokenPda({
   globalConfig,
   chunkX,
@@ -260,6 +311,27 @@ export function deriveChunkBrokenPda({
   chunkZBytes.writeInt32LE(chunkZ, 0);
   return PublicKey.findProgramAddressSync(
     [Buffer.from(CHUNK_BROKEN_SEED), globalConfig.toBuffer(), chunkXBytes, chunkZBytes],
+    programId,
+  );
+}
+
+export function deriveChunkPlacedPda({
+  globalConfig,
+  chunkX,
+  chunkZ,
+  programId = NICECHUNK_CHUNK_PROGRAM_ID,
+}: {
+  globalConfig: PublicKey;
+  chunkX: number;
+  chunkZ: number;
+  programId?: PublicKey;
+}): [PublicKey, number] {
+  const chunkXBytes = Buffer.alloc(4);
+  const chunkZBytes = Buffer.alloc(4);
+  chunkXBytes.writeInt32LE(requireI32(chunkX, "chunkX"), 0);
+  chunkZBytes.writeInt32LE(requireI32(chunkZ, "chunkZ"), 0);
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from(CHUNK_PLACED_SEED), globalConfig.toBuffer(), chunkXBytes, chunkZBytes],
     programId,
   );
 }
@@ -385,6 +457,200 @@ export function createMineBlockInstruction({
       { pubkey: chunkBroken, isSigner: false, isWritable: true },
       { pubkey: foundationChunk, isSigner: false, isWritable: false },
       { pubkey: globalConfig, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data: chunkInstructionData(chunkProgramId, data),
+  });
+}
+
+export function createPlaceBlockInstruction({
+  payer,
+  owner,
+  block,
+  anchor,
+  backpack,
+  sourceKind = PLACEMENT_SOURCE_BACKPACK,
+  sourceIndex,
+  expectedSlot,
+  sessionAuthority = payer,
+  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
+  playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
+  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
+  backpackProgramId = NICECHUNK_BACKPACK_PROGRAM_ID,
+  chunkSize = 16,
+}: {
+  payer: PublicKey;
+  owner: PublicKey;
+  block: Pick<MineBlockInput, "worldX" | "worldY" | "worldZ">;
+  anchor: Pick<MineBlockInput, "worldX" | "worldY" | "worldZ">;
+  backpack: PublicKey;
+  sourceKind?: number | "backpack" | "equipment";
+  sourceIndex: number;
+  expectedSlot: Buffer | Uint8Array;
+  sessionAuthority?: PublicKey;
+  chunkProgramId?: PublicKey;
+  playerProgramId?: PublicKey;
+  coreProgramId?: PublicKey;
+  backpackProgramId?: PublicKey;
+  chunkSize?: number;
+}): TransactionInstruction {
+  const worldX = requireI32(block.worldX, "block.worldX");
+  const worldY = requireI16(block.worldY, "block.worldY");
+  const worldZ = requireI32(block.worldZ, "block.worldZ");
+  const anchorWorldX = requireI32(anchor.worldX, "anchor.worldX");
+  const anchorWorldY = requireI16(anchor.worldY, "anchor.worldY");
+  const anchorWorldZ = requireI32(anchor.worldZ, "anchor.worldZ");
+  const anchorDistance = Math.abs(worldX - anchorWorldX)
+    + Math.abs(worldY - anchorWorldY)
+    + Math.abs(worldZ - anchorWorldZ);
+  if (anchorDistance !== 1) {
+    throw new Error("anchor must be exactly one block face away from block");
+  }
+  const normalizedSourceIndex = requiredInteger(sourceIndex, "sourceIndex");
+  if (normalizedSourceIndex < 0 || normalizedSourceIndex > 0xff) {
+    throw new Error("sourceIndex must be an unsigned 8-bit integer");
+  }
+  const normalizedSourceKind = sourceKind === "backpack"
+    ? PLACEMENT_SOURCE_BACKPACK
+    : sourceKind === "equipment"
+      ? PLACEMENT_SOURCE_EQUIPMENT
+      : requiredInteger(sourceKind, "sourceKind");
+  if (normalizedSourceKind !== PLACEMENT_SOURCE_BACKPACK
+    && normalizedSourceKind !== PLACEMENT_SOURCE_EQUIPMENT) {
+    throw new Error("sourceKind must be backpack or equipment");
+  }
+  const slotBytes = Buffer.from(expectedSlot);
+  if (slotBytes.length !== BACKPACK_SLOT_RECORD_LEN) {
+    throw new Error(`expectedSlot must contain exactly ${BACKPACK_SLOT_RECORD_LEN} bytes`);
+  }
+
+  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
+  const [playerProfile] = derivePlayerProfilePda(owner, playerProgramId);
+  const [playerSession] = derivePlayerSessionPda({
+    owner,
+    sessionAuthority,
+    programId: playerProgramId,
+  });
+  const [playerEquipment] = derivePlayerEquipmentPda(owner, playerProgramId);
+  const chunkX = Math.floor(worldX / chunkSize);
+  const chunkZ = Math.floor(worldZ / chunkSize);
+  const [chunkBroken] = deriveChunkBrokenPda({ globalConfig, chunkX, chunkZ, programId: chunkProgramId });
+  const [chunkPlaced] = deriveChunkPlacedPda({ globalConfig, chunkX, chunkZ, programId: chunkProgramId });
+  const anchorChunkX = Math.floor(anchorWorldX / chunkSize);
+  const anchorChunkZ = Math.floor(anchorWorldZ / chunkSize);
+  const [anchorChunkBroken] = deriveChunkBrokenPda({
+    globalConfig,
+    chunkX: anchorChunkX,
+    chunkZ: anchorChunkZ,
+    programId: chunkProgramId,
+  });
+  const [anchorChunkPlaced] = deriveChunkPlacedPda({
+    globalConfig,
+    chunkX: anchorChunkX,
+    chunkZ: anchorChunkZ,
+    programId: chunkProgramId,
+  });
+  const [foundationChunk] = deriveFoundationChunkPda({ globalConfig, chunkX, chunkZ, programId: chunkProgramId });
+  const [materialPhysics] = deriveMaterialPhysicsPda({ globalConfig, backpackProgramId });
+  const data = Buffer.alloc(1 + 4 + 2 + 4 + 4 + 2 + 4 + 1 + 1 + BACKPACK_SLOT_RECORD_LEN);
+  data.writeUInt8(14, 0);
+  data.writeInt32LE(worldX, 1);
+  data.writeInt16LE(worldY, 5);
+  data.writeInt32LE(worldZ, 7);
+  data.writeInt32LE(anchorWorldX, 11);
+  data.writeInt16LE(anchorWorldY, 15);
+  data.writeInt32LE(anchorWorldZ, 17);
+  data.writeUInt8(normalizedSourceKind, 21);
+  data.writeUInt8(normalizedSourceIndex, 22);
+  slotBytes.copy(data, 23);
+
+  return new TransactionInstruction({
+    programId: chunkProgramId,
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: playerProfile, isSigner: false, isWritable: true },
+      { pubkey: playerSession, isSigner: false, isWritable: false },
+      { pubkey: chunkBroken, isSigner: false, isWritable: false },
+      { pubkey: chunkPlaced, isSigner: false, isWritable: true },
+      { pubkey: anchorChunkBroken, isSigner: false, isWritable: false },
+      { pubkey: anchorChunkPlaced, isSigner: false, isWritable: false },
+      { pubkey: foundationChunk, isSigner: false, isWritable: false },
+      { pubkey: globalConfig, isSigner: false, isWritable: false },
+      { pubkey: backpackProgramId, isSigner: false, isWritable: false },
+      { pubkey: backpack, isSigner: false, isWritable: true },
+      { pubkey: materialPhysics, isSigner: false, isWritable: false },
+      { pubkey: playerProgramId, isSigner: false, isWritable: false },
+      { pubkey: playerEquipment, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data: chunkInstructionData(chunkProgramId, data),
+  });
+}
+
+export function createMinePlacedBlockWithRewardsInstruction({
+  payer,
+  owner,
+  block,
+  backpack,
+  actionId,
+  sessionAuthority = payer,
+  chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
+  playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
+  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
+  backpackProgramId = NICECHUNK_BACKPACK_PROGRAM_ID,
+  chunkSize = 16,
+}: {
+  payer: PublicKey;
+  owner: PublicKey;
+  block: MineBlockInput;
+  backpack: PublicKey;
+  actionId: bigint | number | string;
+  sessionAuthority?: PublicKey;
+  chunkProgramId?: PublicKey;
+  playerProgramId?: PublicKey;
+  coreProgramId?: PublicKey;
+  backpackProgramId?: PublicKey;
+  chunkSize?: number;
+}): TransactionInstruction {
+  const expectedBlockId = requiredInteger(block.expectedBlockId, "block.expectedBlockId");
+  if (expectedBlockId < 1 || expectedBlockId > 0xffff) {
+    throw new Error("block.expectedBlockId must be a nonzero unsigned 16-bit integer");
+  }
+  const worldX = requireI32(block.worldX, "block.worldX");
+  const worldY = requireI16(block.worldY, "block.worldY");
+  const worldZ = requireI32(block.worldZ, "block.worldZ");
+  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
+  const [playerProfile] = derivePlayerProfilePda(owner, playerProgramId);
+  const [playerSession] = derivePlayerSessionPda({ owner, sessionAuthority, programId: playerProgramId });
+  const chunkX = Math.floor(worldX / chunkSize);
+  const chunkZ = Math.floor(worldZ / chunkSize);
+  const [playerProgress] = derivePlayerProgressPda({ globalConfig, owner, programId: chunkProgramId });
+  const [chunkPlaced] = deriveChunkPlacedPda({ globalConfig, chunkX, chunkZ, programId: chunkProgramId });
+  const [foundationChunk] = deriveFoundationChunkPda({ globalConfig, chunkX, chunkZ, programId: chunkProgramId });
+  const [materialPhysics] = deriveMaterialPhysicsPda({ globalConfig, backpackProgramId });
+  const [playerSkills] = derivePlayerSkillsPda({ owner, globalConfig });
+  const data = Buffer.alloc(21);
+  data.writeUInt8(16, 0);
+  data.writeBigUInt64LE(normalizeMiningActionId(actionId), 1);
+  data.writeInt32LE(worldX, 9);
+  data.writeInt16LE(worldY, 13);
+  data.writeInt32LE(worldZ, 15);
+  data.writeUInt16LE(expectedBlockId, 19);
+
+  return new TransactionInstruction({
+    programId: chunkProgramId,
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: playerProfile, isSigner: false, isWritable: false },
+      { pubkey: playerSession, isSigner: false, isWritable: false },
+      { pubkey: playerProgress, isSigner: false, isWritable: true },
+      { pubkey: chunkPlaced, isSigner: false, isWritable: true },
+      { pubkey: foundationChunk, isSigner: false, isWritable: false },
+      { pubkey: globalConfig, isSigner: false, isWritable: false },
+      { pubkey: backpackProgramId, isSigner: false, isWritable: false },
+      { pubkey: backpack, isSigner: false, isWritable: true },
+      { pubkey: materialPhysics, isSigner: false, isWritable: false },
+      { pubkey: playerSkills, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     data: chunkInstructionData(chunkProgramId, data),
@@ -1724,6 +1990,90 @@ export function decodeChunkBrokenState({
     chunkX,
     chunkZ,
     brokenBlocks,
+  };
+}
+
+export function decodeChunkPlacedState({
+  data: dataValue,
+  chunkX,
+  chunkZ,
+  chunkSize = 16,
+  expectedMinY,
+}: {
+  data: Buffer | Uint8Array;
+  chunkX: number;
+  chunkZ: number;
+  chunkSize?: number;
+  expectedMinY?: number;
+}): DecodedChunkPlacedState {
+  const data = Buffer.from(dataValue);
+  const normalizedChunkX = requireI32(chunkX, "chunkX");
+  const normalizedChunkZ = requireI32(chunkZ, "chunkZ");
+  const normalizedChunkSize = requiredInteger(chunkSize, "chunkSize");
+  if (normalizedChunkSize < 1) throw new Error("chunkSize must be positive");
+  if (data.length < CHUNK_PLACED_HEADER_LEN) {
+    throw new Error(`Invalid ChunkPlacedState length: ${data.length}`);
+  }
+  const magic = data.subarray(0, 4).toString("utf8");
+  const version = data.readUInt8(4);
+  const bump = data.readUInt8(5);
+  const count = data.readUInt16LE(6);
+  const capacity = data.readUInt16LE(8);
+  const minY = data.readInt16LE(10);
+  if (magic !== CHUNK_PLACED_MAGIC) throw new Error(`Invalid ChunkPlacedState magic: ${magic}`);
+  if (version !== CHUNK_PLACED_VERSION) throw new Error(`Invalid ChunkPlacedState version: ${version}`);
+  if (capacity < 1 || capacity > CHUNK_PLACED_MAX_CAPACITY || count > capacity) {
+    throw new Error("Invalid ChunkPlacedState count or capacity");
+  }
+  const expectedLength = CHUNK_PLACED_HEADER_LEN + capacity * CHUNK_PLACED_RECORD_LEN;
+  if (data.length !== expectedLength) {
+    throw new Error(`Invalid ChunkPlacedState size: expected ${expectedLength}, got ${data.length}`);
+  }
+  if (expectedMinY !== undefined && minY !== requireI16(expectedMinY, "expectedMinY")) {
+    throw new Error(`Invalid ChunkPlacedState minY: expected ${expectedMinY}, got ${minY}`);
+  }
+
+  const placedBlocks: DecodedPlacedBlock[] = [];
+  const coordinates = new Set<number>();
+  for (let index = 0; index < count; index += 1) {
+    const offset = CHUNK_PLACED_HEADER_LEN + index * CHUNK_PLACED_RECORD_LEN;
+    const packedCoordinate = data.readUIntLE(offset, 3);
+    const blockId = data.readUInt16LE(offset + 3);
+    const volumeMm3 = data.readUInt32LE(offset + 5);
+    if (coordinates.has(packedCoordinate)) throw new Error("Duplicate ChunkPlacedState coordinate");
+    if (!isCanonicalPlaceableBlockId(blockId) || volumeMm3 === 0) {
+      throw new Error("Invalid ChunkPlacedState record");
+    }
+    coordinates.add(packedCoordinate);
+    const localX = packedCoordinate & 0x0f;
+    const localZ = (packedCoordinate >> 4) & 0x0f;
+    const yOffset = (packedCoordinate >> 8) & 0x01ff;
+    if (localX >= normalizedChunkSize || localZ >= normalizedChunkSize) {
+      throw new Error("ChunkPlacedState coordinate exceeds chunk bounds");
+    }
+    placedBlocks.push({
+      index,
+      x: normalizedChunkX * normalizedChunkSize + localX,
+      y: minY + yOffset,
+      z: normalizedChunkZ * normalizedChunkSize + localZ,
+      localX,
+      localZ,
+      blockId,
+      volumeMm3,
+      packed: data.subarray(offset, offset + CHUNK_PLACED_RECORD_LEN).toString("hex"),
+    });
+  }
+
+  return {
+    magic,
+    version,
+    bump,
+    count,
+    capacity,
+    minY,
+    chunkX: normalizedChunkX,
+    chunkZ: normalizedChunkZ,
+    placedBlocks,
   };
 }
 

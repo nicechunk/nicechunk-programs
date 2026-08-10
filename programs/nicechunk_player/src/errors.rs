@@ -57,6 +57,10 @@ pub enum NicechunkPlayerError {
     EquipmentBroken = 6252,
     PlayerSessionExpired = 6253,
     PlayerSessionActionNotAllowed = 6254,
+    InvalidChunkPlacedAuthority = 6255,
+    PlacementSlotMismatch = 6256,
+    InvalidPlacementResource = 6257,
+    InvalidMaterialPhysics = 6258,
 }
 
 impl From<NicechunkPlayerError> for ProgramError {

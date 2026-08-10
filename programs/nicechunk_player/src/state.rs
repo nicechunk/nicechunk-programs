@@ -69,9 +69,12 @@ pub const BACKPACK_OWNER_OFFSET: usize = 20;
 pub const BACKPACK_ITEM_COUNT_OFFSET: usize = 53;
 pub const BACKPACK_SLOT_KIND_BLOCK: u8 = 1;
 pub const BACKPACK_SLOT_KIND_ITEM: u8 = 2;
+pub const BACKPACK_STACK_LIMIT: u32 = 99;
+pub const BACKPACK_ITEM_FLAG_MASS_VALID: u16 = 1 << 15;
 pub const BACKPACK_ITEM_CATEGORY_FORGED: u8 = 2;
 pub const BACKPACK_FORGED_ITEM_CODE: u16 = 8;
 pub const BACKPACK_SLOT_QUANTITY_OFFSET: usize = 4;
+pub const BACKPACK_SLOT_VOLUME_MM3_OFFSET: usize = 60;
 pub const BACKPACK_SLOT_ITEM_ID_OFFSET: usize = 20;
 pub const BACKPACK_SLOT_ITEM_PDA_OFFSET: usize = 28;
 pub const BACKPACK_SLOT_DURABILITY_CURRENT_OFFSET: usize = 64;
@@ -284,6 +287,20 @@ impl PlayerProfile {
         dst[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
             .copy_from_slice(&updated_slot.to_le_bytes());
         Ok(())
+    }
+
+    pub fn owner(data: &[u8]) -> Result<Pubkey, NicechunkPlayerError> {
+        if data.len() != Self::LEN
+            || data[0..8] != PLAYER_PROFILE_MAGIC
+            || read_u16(data, 8) != PLAYER_PROFILE_VERSION
+        {
+            return Err(NicechunkPlayerError::InvalidPlayerProfileData);
+        }
+        Ok(Pubkey::new_from_array(
+            data[Self::OWNER_OFFSET..Self::OWNER_OFFSET + 32]
+                .try_into()
+                .map_err(|_| NicechunkPlayerError::InvalidPlayerProfileData)?,
+        ))
     }
 
     pub fn write_backpack_style(
@@ -648,6 +665,80 @@ impl PlayerEquipment {
         Ok(())
     }
 
+    pub fn consume_placement_resource(
+        dst: &mut [u8],
+        owner: &Pubkey,
+        player_profile: &Pubkey,
+        global_config: &Pubkey,
+        backpack: &Pubkey,
+        slot: u8,
+        expected_slot: &[u8; BACKPACK_SLOT_RECORD_LEN],
+        density_kg_m3: u16,
+        updated_slot: u64,
+    ) -> Result<(u16, u32, Pubkey), solana_program::program_error::ProgramError> {
+        Self::validate_owner_and_config(dst, owner, player_profile, global_config)?;
+        let offset = Self::slot_offset(slot)?;
+        let record_offset = offset + Self::RECORD_BACKPACK_SLOT_OFFSET;
+        if dst[offset + Self::RECORD_STATE_OFFSET] != 1
+            || dst[offset + Self::RECORD_FLAGS_OFFSET] & PLAYER_EQUIPMENT_FLAG_CUSTODY == 0
+            || &dst
+                [offset + Self::RECORD_BACKPACK_OFFSET..offset + Self::RECORD_BACKPACK_OFFSET + 32]
+                != backpack.as_ref()
+        {
+            return Err(NicechunkPlayerError::EquipmentNotCustodied.into());
+        }
+        if &dst[record_offset..record_offset + BACKPACK_SLOT_RECORD_LEN] != expected_slot {
+            return Err(NicechunkPlayerError::PlacementSlotMismatch.into());
+        }
+
+        let flags = read_u16(expected_slot, 2);
+        let quantity = read_u32(expected_slot, BACKPACK_SLOT_QUANTITY_OFFSET);
+        let volume_mm3 = read_u32(expected_slot, BACKPACK_SLOT_VOLUME_MM3_OFFSET);
+        let packed_y = read_u16(expected_slot, 12);
+        let block_id = packed_y >> 9;
+        if expected_slot[0] != BACKPACK_SLOT_KIND_BLOCK
+            || expected_slot[1] != 0
+            || quantity == 0
+            || quantity > BACKPACK_STACK_LIMIT
+            || volume_mm3 == 0
+            || block_id == 0
+            || density_kg_m3 == 0
+            || flags & BACKPACK_ITEM_FLAG_MASS_VALID == 0
+            || read_u32(expected_slot, BACKPACK_SLOT_DURABILITY_CURRENT_OFFSET)
+                != block_mass_grams(volume_mm3, density_kg_m3)?
+        {
+            return Err(NicechunkPlayerError::InvalidPlacementResource.into());
+        }
+        let consumed_volume_mm3 = proportional_consumed_volume_mm3(volume_mm3, quantity)?;
+
+        if quantity == 1 {
+            Self::clear_slot(dst, slot, updated_slot)?;
+        } else {
+            let remaining_quantity = quantity - 1;
+            let remaining_volume = volume_mm3.saturating_sub(consumed_volume_mm3);
+            if remaining_volume == 0 {
+                return Err(NicechunkPlayerError::InvalidPlacementResource.into());
+            }
+            dst[record_offset + BACKPACK_SLOT_QUANTITY_OFFSET
+                ..record_offset + BACKPACK_SLOT_QUANTITY_OFFSET + 4]
+                .copy_from_slice(&remaining_quantity.to_le_bytes());
+            dst[record_offset + BACKPACK_SLOT_VOLUME_MM3_OFFSET
+                ..record_offset + BACKPACK_SLOT_VOLUME_MM3_OFFSET + 4]
+                .copy_from_slice(&remaining_volume.to_le_bytes());
+            let remaining_mass = block_mass_grams(remaining_volume, density_kg_m3)?;
+            dst[record_offset + BACKPACK_SLOT_DURABILITY_CURRENT_OFFSET
+                ..record_offset + BACKPACK_SLOT_DURABILITY_CURRENT_OFFSET + 4]
+                .copy_from_slice(&remaining_mass.to_le_bytes());
+            dst[Self::UPDATED_SLOT_OFFSET..Self::UPDATED_SLOT_OFFSET + 8]
+                .copy_from_slice(&updated_slot.to_le_bytes());
+        }
+        Ok((
+            block_id,
+            consumed_volume_mm3,
+            Self::slot_identity(dst, slot)?,
+        ))
+    }
+
     pub fn swap_slots(
         dst: &mut [u8],
         from_slot: u8,
@@ -747,6 +838,29 @@ impl PlayerEquipment {
         }
         0
     }
+}
+
+fn proportional_consumed_volume_mm3(
+    total_volume_mm3: u32,
+    total_quantity: u32,
+) -> Result<u32, NicechunkPlayerError> {
+    if total_volume_mm3 == 0 || total_quantity == 0 {
+        return Err(NicechunkPlayerError::InvalidPlacementResource);
+    }
+    if total_quantity == 1 {
+        return Ok(total_volume_mm3);
+    }
+    Ok(((total_volume_mm3 as u64 / total_quantity as u64)
+        .max(1)
+        .min(total_volume_mm3.saturating_sub(1) as u64)) as u32)
+}
+
+fn block_mass_grams(volume_mm3: u32, density_kg_m3: u16) -> Result<u32, NicechunkPlayerError> {
+    let numerator = (volume_mm3 as u64)
+        .checked_mul(density_kg_m3 as u64)
+        .and_then(|value| value.checked_add(500_000))
+        .ok_or(NicechunkPlayerError::InvalidPlacementResource)?;
+    u32::try_from(numerator / 1_000_000).map_err(|_| NicechunkPlayerError::InvalidPlacementResource)
 }
 
 pub struct PlayerAppearanceInitArgs<'a> {
@@ -1789,6 +1903,78 @@ mod tests {
         );
         assert_eq!(read_u64(&data, PlayerEquipment::UPDATED_SLOT_OFFSET), 102);
         assert!(PlayerEquipment::consume_forged_durability(&mut data, 3, 114, 103).is_err());
+    }
+
+    #[test]
+    fn player_equipment_placement_consumes_one_physical_block() {
+        let owner = Pubkey::new_unique();
+        let profile = Pubkey::new_unique();
+        let global_config = Pubkey::new_unique();
+        let backpack = Pubkey::new_unique();
+        let mut data = vec![0_u8; PlayerEquipment::LEN];
+        PlayerEquipment::pack_empty(
+            &mut data,
+            &PlayerEquipmentInitArgs {
+                bump: 250,
+                owner: &owner,
+                player_profile: &profile,
+                global_config: &global_config,
+                created_slot: 100,
+            },
+        )
+        .unwrap();
+        let mut record = [0_u8; BACKPACK_SLOT_RECORD_LEN];
+        record[0] = BACKPACK_SLOT_KIND_BLOCK;
+        record[2..4].copy_from_slice(&BACKPACK_ITEM_FLAG_MASS_VALID.to_le_bytes());
+        record[4..8].copy_from_slice(&4_u32.to_le_bytes());
+        record[12..14].copy_from_slice(&(3_u16 << 9).to_le_bytes());
+        record[BACKPACK_SLOT_VOLUME_MM3_OFFSET..BACKPACK_SLOT_VOLUME_MM3_OFFSET + 4]
+            .copy_from_slice(&2_500_001_u32.to_le_bytes());
+        record
+            [BACKPACK_SLOT_DURABILITY_CURRENT_OFFSET..BACKPACK_SLOT_DURABILITY_CURRENT_OFFSET + 4]
+            .copy_from_slice(&6_500_u32.to_le_bytes());
+        PlayerEquipment::write_custodied_slot(&mut data, 4, 7, &backpack, &record, &[], 101)
+            .unwrap();
+
+        let consumed = PlayerEquipment::consume_placement_resource(
+            &mut data,
+            &owner,
+            &profile,
+            &global_config,
+            &backpack,
+            4,
+            &record,
+            2_600,
+            102,
+        )
+        .unwrap();
+        assert_eq!((consumed.0, consumed.1), (3, 625_000));
+        assert_ne!(consumed.2, Pubkey::default());
+        let remaining = PlayerEquipment::slot_record(&data, 4).ok().unwrap();
+        assert_eq!(read_u32(&remaining, BACKPACK_SLOT_QUANTITY_OFFSET), 3);
+        assert_eq!(
+            read_u32(&remaining, BACKPACK_SLOT_VOLUME_MM3_OFFSET),
+            1_875_001
+        );
+        assert_eq!(
+            read_u32(&remaining, BACKPACK_SLOT_DURABILITY_CURRENT_OFFSET),
+            4_875
+        );
+
+        let before = data.clone();
+        assert!(PlayerEquipment::consume_placement_resource(
+            &mut data,
+            &owner,
+            &profile,
+            &global_config,
+            &backpack,
+            4,
+            &record,
+            2_600,
+            103,
+        )
+        .is_err());
+        assert_eq!(data, before);
     }
 
     #[test]

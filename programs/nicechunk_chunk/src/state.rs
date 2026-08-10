@@ -11,6 +11,16 @@ pub const CHUNK_BROKEN_INITIAL_CAPACITY: u16 = 64;
 pub const CHUNK_BROKEN_GROW_BY: u16 = 64;
 pub const CHUNK_BROKEN_MAX_CAPACITY: u16 = 2048;
 pub const CHUNK_BROKEN_MAX_Y_OFFSET: i32 = 511;
+pub const CHUNK_PLACED_MAGIC: [u8; 4] = *b"NCPB";
+pub const CHUNK_PLACED_VERSION: u8 = 1;
+pub const CHUNK_PLACED_SEED: &[u8] = b"chunk-placed";
+pub const CHUNK_PLACED_HEADER_LEN: usize = 16;
+pub const CHUNK_PLACED_RECORD_LEN: usize = 9;
+pub const CHUNK_PLACED_INITIAL_CAPACITY: u16 = 64;
+pub const CHUNK_PLACED_GROW_BY: u16 = 64;
+pub const CHUNK_PLACED_MAX_CAPACITY: u16 = 2048;
+pub const PLACEMENT_SOURCE_BACKPACK: u8 = 0;
+pub const PLACEMENT_SOURCE_EQUIPMENT: u8 = 1;
 pub const RESOURCE_DROP_TABLE_MAGIC: [u8; 8] = *b"NCKDRP02";
 pub const RESOURCE_DROP_TABLE_VERSION: u8 = 2;
 pub const RESOURCE_DROP_TABLE_SEED: &[u8] = b"resource-drops-v2";
@@ -70,6 +80,7 @@ pub const BLOCK_MUD: u16 = 8;
 pub const BLOCK_DRY_DIRT: u16 = 9;
 pub const BLOCK_SALT_FLAT: u16 = 10;
 pub const BLOCK_SNOW: u16 = 11;
+pub const BLOCK_ICE: u16 = 12;
 pub const BLOCK_FROZEN_SOIL: u16 = 13;
 pub const BLOCK_BASALT: u16 = 14;
 pub const BLOCK_ASH: u16 = 15;
@@ -80,7 +91,12 @@ pub const BLOCK_TRUNK: u16 = 22;
 pub const BLOCK_LEAVES: u16 = 23;
 pub const BLOCK_PINE_TRUNK: u16 = 24;
 pub const BLOCK_PINE_LEAVES: u16 = 25;
+pub const BLOCK_DEAD_WOOD: u16 = 26;
+pub const BLOCK_GIANT_ROOT: u16 = 27;
+pub const BLOCK_CACTUS: u16 = 32;
 pub const BLOCK_MOSS: u16 = 37;
+pub const BLOCK_CORAL: u16 = 44;
+pub const BLOCK_DEAD_CORAL: u16 = 45;
 pub const BLOCK_SHELL_BED: u16 = 46;
 pub const BLOCK_COAL: u16 = 47;
 const TREE_MAX_LEAF_RADIUS: i32 = 2;
@@ -127,6 +143,7 @@ pub const PLAYER_SESSION_GLOBAL_CONFIG_OFFSET: usize = 108;
 pub const PLAYER_SESSION_ALLOWED_ACTIONS_OFFSET: usize = 142;
 pub const PLAYER_SESSION_EXPIRES_AT_OFFSET: usize = 144;
 pub const SESSION_ACTION_BREAK_BLOCK: u8 = 1;
+pub const SESSION_ACTION_PLACE_BLOCK: u8 = 2;
 pub const PLAYER_PROGRESS_MAGIC: [u8; 8] = *b"NCKPRG01";
 pub const PLAYER_PROGRESS_VERSION: u16 = 1;
 pub const PLAYER_PROGRESS_SEED: &[u8] = b"player-progress";
@@ -341,6 +358,17 @@ pub fn is_tree_trunk_block(block_id: u16) -> bool {
 
 pub fn is_tree_leaf_block(block_id: u16) -> bool {
     block_id == BLOCK_LEAVES || block_id == BLOCK_PINE_LEAVES
+}
+
+// Keep this in lockstep with Chunk.js isBlockingBlock(), excluding bedrock.
+pub fn is_placeable_block(block_id: u16) -> bool {
+    matches!(
+        block_id,
+        BLOCK_GRASS..=BLOCK_ASH
+            | BLOCK_QUICKSAND..=BLOCK_GIANT_ROOT
+            | BLOCK_CACTUS
+            | BLOCK_CORAL..=BLOCK_COAL
+    )
 }
 
 pub fn generated_tree_fell_blocks(
@@ -1529,6 +1557,73 @@ pub struct RewardMineArgs {
     pub block: MineBlockArgs,
 }
 
+#[derive(Clone, Copy)]
+pub struct PlaceBlockArgs {
+    pub world_x: i32,
+    pub world_y: i16,
+    pub world_z: i32,
+    pub anchor_world_x: i32,
+    pub anchor_world_y: i16,
+    pub anchor_world_z: i32,
+    pub source_kind: u8,
+    pub source_index: u8,
+    pub expected_slot: [u8; 80],
+}
+
+impl PlaceBlockArgs {
+    pub const LEN: usize = 4 + 2 + 4 + 4 + 2 + 4 + 1 + 1 + 80;
+
+    pub fn unpack(data: &[u8]) -> Result<Self, NicechunkChunkError> {
+        if data.len() != Self::LEN {
+            return Err(NicechunkChunkError::InvalidInstruction);
+        }
+        let args = Self {
+            world_x: read_i32(data, 0),
+            world_y: read_i16(data, 4),
+            world_z: read_i32(data, 6),
+            anchor_world_x: read_i32(data, 10),
+            anchor_world_y: read_i16(data, 14),
+            anchor_world_z: read_i32(data, 16),
+            source_kind: data[20],
+            source_index: data[21],
+            expected_slot: data[22..102]
+                .try_into()
+                .map_err(|_| NicechunkChunkError::InvalidInstruction)?,
+        };
+        if !matches!(
+            args.source_kind,
+            PLACEMENT_SOURCE_BACKPACK | PLACEMENT_SOURCE_EQUIPMENT
+        ) {
+            return Err(NicechunkChunkError::InvalidPlacementSource);
+        }
+        let anchor_distance = (i64::from(args.world_x) - i64::from(args.anchor_world_x)).abs()
+            + (i64::from(args.world_y) - i64::from(args.anchor_world_y)).abs()
+            + (i64::from(args.world_z) - i64::from(args.anchor_world_z)).abs();
+        if anchor_distance != 1 {
+            return Err(NicechunkChunkError::InvalidPlacementAnchor);
+        }
+        Ok(args)
+    }
+
+    pub fn block(&self) -> MineBlockArgs {
+        MineBlockArgs {
+            world_x: self.world_x,
+            world_y: self.world_y,
+            world_z: self.world_z,
+            expected_block_id: BLOCK_AIR,
+        }
+    }
+
+    pub fn anchor(&self) -> MineBlockArgs {
+        MineBlockArgs {
+            world_x: self.anchor_world_x,
+            world_y: self.anchor_world_y,
+            world_z: self.anchor_world_z,
+            expected_block_id: BLOCK_AIR,
+        }
+    }
+}
+
 impl RewardMineArgs {
     pub const LEN: usize = 8 + MineBlockArgs::LEN;
 
@@ -2280,6 +2375,170 @@ impl ChunkBrokenState {
         }
         data[6..8].copy_from_slice(&(next_count as u16).to_le_bytes());
         Ok(())
+    }
+}
+
+pub struct ChunkPlacedInitArgs {
+    pub bump: u8,
+    pub min_y: i16,
+    pub capacity: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkPlacedRecord {
+    pub packed: [u8; 3],
+    pub block_id: u16,
+    pub volume_mm3: u32,
+}
+
+impl ChunkPlacedRecord {
+    pub fn pack(&self, dst: &mut [u8]) -> ProgramResult {
+        if dst.len() != CHUNK_PLACED_RECORD_LEN
+            || !is_placeable_block(self.block_id)
+            || self.volume_mm3 == 0
+        {
+            return Err(NicechunkChunkError::InvalidChunkPlacedData.into());
+        }
+        dst[0..3].copy_from_slice(&self.packed);
+        dst[3..5].copy_from_slice(&self.block_id.to_le_bytes());
+        dst[5..9].copy_from_slice(&self.volume_mm3.to_le_bytes());
+        Ok(())
+    }
+
+    pub fn unpack(data: &[u8]) -> Result<Self, NicechunkChunkError> {
+        if data.len() != CHUNK_PLACED_RECORD_LEN {
+            return Err(NicechunkChunkError::InvalidChunkPlacedData);
+        }
+        let record = Self {
+            packed: data[0..3]
+                .try_into()
+                .map_err(|_| NicechunkChunkError::InvalidChunkPlacedData)?,
+            block_id: read_u16(data, 3),
+            volume_mm3: read_u32(data, 5),
+        };
+        if !is_placeable_block(record.block_id) || record.volume_mm3 == 0 {
+            return Err(NicechunkChunkError::InvalidChunkPlacedData);
+        }
+        Ok(record)
+    }
+}
+
+pub struct ChunkPlacedState;
+
+impl ChunkPlacedState {
+    pub fn len_for_capacity(capacity: u16) -> usize {
+        CHUNK_PLACED_HEADER_LEN + capacity as usize * CHUNK_PLACED_RECORD_LEN
+    }
+
+    pub fn pack_empty(dst: &mut [u8], args: &ChunkPlacedInitArgs) -> ProgramResult {
+        if args.capacity == 0
+            || args.capacity > CHUNK_PLACED_MAX_CAPACITY
+            || dst.len() != Self::len_for_capacity(args.capacity)
+        {
+            return Err(NicechunkChunkError::InvalidChunkPlacedData.into());
+        }
+        dst.fill(0);
+        dst[0..4].copy_from_slice(&CHUNK_PLACED_MAGIC);
+        dst[4] = CHUNK_PLACED_VERSION;
+        dst[5] = args.bump;
+        dst[6..8].copy_from_slice(&0_u16.to_le_bytes());
+        dst[8..10].copy_from_slice(&args.capacity.to_le_bytes());
+        dst[10..12].copy_from_slice(&args.min_y.to_le_bytes());
+        Ok(())
+    }
+
+    pub fn validate_header(data: &[u8], min_y: i16) -> Result<(u16, u16), NicechunkChunkError> {
+        if data.len() < CHUNK_PLACED_HEADER_LEN
+            || data[0..4] != CHUNK_PLACED_MAGIC
+            || data[4] != CHUNK_PLACED_VERSION
+        {
+            return Err(NicechunkChunkError::InvalidChunkPlacedData);
+        }
+        let count = read_u16(data, 6);
+        let capacity = read_u16(data, 8);
+        if capacity == 0
+            || capacity > CHUNK_PLACED_MAX_CAPACITY
+            || read_i16(data, 10) != min_y
+            || count > capacity
+            || data.len() != Self::len_for_capacity(capacity)
+        {
+            return Err(NicechunkChunkError::InvalidChunkPlacedData);
+        }
+        Ok((count, capacity))
+    }
+
+    pub fn find(
+        data: &[u8],
+        min_y: i16,
+        packed: [u8; 3],
+    ) -> Result<Option<(usize, ChunkPlacedRecord)>, NicechunkChunkError> {
+        let (count, _) = Self::validate_header(data, min_y)?;
+        let mut match_value = None;
+        for index in 0..count as usize {
+            let record = Self::record_at(data, index)?;
+            if record.packed != packed {
+                continue;
+            }
+            if match_value.is_some() {
+                return Err(NicechunkChunkError::InvalidChunkPlacedData);
+            }
+            match_value = Some((index, record));
+        }
+        Ok(match_value)
+    }
+
+    pub fn records(data: &[u8], min_y: i16) -> Result<Vec<ChunkPlacedRecord>, NicechunkChunkError> {
+        let (count, _) = Self::validate_header(data, min_y)?;
+        let mut records = Vec::with_capacity(count as usize);
+        for index in 0..count as usize {
+            let record = Self::record_at(data, index)?;
+            if records
+                .iter()
+                .any(|existing: &ChunkPlacedRecord| existing.packed == record.packed)
+            {
+                return Err(NicechunkChunkError::InvalidChunkPlacedData);
+            }
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    pub fn append(data: &mut [u8], min_y: i16, record: ChunkPlacedRecord) -> ProgramResult {
+        let (count, capacity) = Self::validate_header(data, min_y)?;
+        if count >= capacity {
+            return Err(NicechunkChunkError::ChunkPlacedCapacityExceeded.into());
+        }
+        if Self::find(data, min_y, record.packed)?.is_some() {
+            return Err(NicechunkChunkError::PlacementOccupied.into());
+        }
+        let offset = CHUNK_PLACED_HEADER_LEN + count as usize * CHUNK_PLACED_RECORD_LEN;
+        record.pack(&mut data[offset..offset + CHUNK_PLACED_RECORD_LEN])?;
+        data[6..8].copy_from_slice(&count.saturating_add(1).to_le_bytes());
+        Ok(())
+    }
+
+    pub fn remove(
+        data: &mut [u8],
+        min_y: i16,
+        packed: [u8; 3],
+    ) -> Result<ChunkPlacedRecord, solana_program::program_error::ProgramError> {
+        let (count, _) = Self::validate_header(data, min_y)?;
+        let (index, record) =
+            Self::find(data, min_y, packed)?.ok_or(NicechunkChunkError::PlacedBlockNotFound)?;
+        let last_index = count.saturating_sub(1) as usize;
+        let offset = CHUNK_PLACED_HEADER_LEN + index * CHUNK_PLACED_RECORD_LEN;
+        let last_offset = CHUNK_PLACED_HEADER_LEN + last_index * CHUNK_PLACED_RECORD_LEN;
+        if index != last_index {
+            data.copy_within(last_offset..last_offset + CHUNK_PLACED_RECORD_LEN, offset);
+        }
+        data[last_offset..last_offset + CHUNK_PLACED_RECORD_LEN].fill(0);
+        data[6..8].copy_from_slice(&count.saturating_sub(1).to_le_bytes());
+        Ok(record)
+    }
+
+    fn record_at(data: &[u8], index: usize) -> Result<ChunkPlacedRecord, NicechunkChunkError> {
+        let offset = CHUNK_PLACED_HEADER_LEN + index * CHUNK_PLACED_RECORD_LEN;
+        ChunkPlacedRecord::unpack(&data[offset..offset + CHUNK_PLACED_RECORD_LEN])
     }
 }
 
@@ -3849,6 +4108,147 @@ mod tests {
     fn packed_broken_coord_rejects_out_of_range_y() {
         assert!(pack_broken_coord(0, -33, 0, -32).is_err());
         assert!(pack_broken_coord(0, 480, 0, -32).is_err());
+    }
+
+    #[test]
+    fn chunk_placed_records_preserve_block_identity_and_volume() {
+        assert_eq!(ChunkPlacedState::len_for_capacity(64), 592);
+        let mut data = vec![0_u8; ChunkPlacedState::len_for_capacity(2)];
+        ChunkPlacedState::pack_empty(
+            &mut data,
+            &ChunkPlacedInitArgs {
+                bump: 249,
+                min_y: -32,
+                capacity: 2,
+            },
+        )
+        .unwrap();
+        let first = ChunkPlacedRecord {
+            packed: pack_broken_coord(3, 80, 4, -32).unwrap(),
+            block_id: BLOCK_STONE,
+            volume_mm3: 625_000,
+        };
+        let second = ChunkPlacedRecord {
+            packed: pack_broken_coord(7, 81, 8, -32).unwrap(),
+            block_id: BLOCK_BASALT,
+            volume_mm3: 1_250_000,
+        };
+        ChunkPlacedState::append(&mut data, -32, first).unwrap();
+        ChunkPlacedState::append(&mut data, -32, second).unwrap();
+        assert_eq!(
+            ChunkPlacedState::records(&data, -32).unwrap(),
+            vec![first, second]
+        );
+        assert_eq!(
+            ChunkPlacedState::find(&data, -32, first.packed).unwrap(),
+            Some((0, first))
+        );
+    }
+
+    #[test]
+    fn chunk_placed_rejects_duplicates_and_swap_removes_records() {
+        let mut data = vec![0_u8; ChunkPlacedState::len_for_capacity(3)];
+        ChunkPlacedState::pack_empty(
+            &mut data,
+            &ChunkPlacedInitArgs {
+                bump: 249,
+                min_y: -32,
+                capacity: 3,
+            },
+        )
+        .unwrap();
+        let first = ChunkPlacedRecord {
+            packed: pack_broken_coord(1, 40, 2, -32).unwrap(),
+            block_id: BLOCK_DIRT,
+            volume_mm3: 500_000,
+        };
+        let second = ChunkPlacedRecord {
+            packed: pack_broken_coord(2, 41, 3, -32).unwrap(),
+            block_id: BLOCK_GRAVEL,
+            volume_mm3: 700_000,
+        };
+        ChunkPlacedState::append(&mut data, -32, first).unwrap();
+        assert!(ChunkPlacedState::append(&mut data, -32, first).is_err());
+        ChunkPlacedState::append(&mut data, -32, second).unwrap();
+        assert_eq!(
+            ChunkPlacedState::remove(&mut data, -32, first.packed).unwrap(),
+            first
+        );
+        assert_eq!(ChunkPlacedState::records(&data, -32).unwrap(), vec![second]);
+        assert!(ChunkPlacedState::remove(&mut data, -32, first.packed).is_err());
+    }
+
+    #[test]
+    fn place_block_args_require_one_face_adjacent_anchor() {
+        let mut payload = vec![0_u8; PlaceBlockArgs::LEN];
+        payload[0..4].copy_from_slice(&15_i32.to_le_bytes());
+        payload[4..6].copy_from_slice(&80_i16.to_le_bytes());
+        payload[6..10].copy_from_slice(&0_i32.to_le_bytes());
+        payload[10..14].copy_from_slice(&16_i32.to_le_bytes());
+        payload[14..16].copy_from_slice(&80_i16.to_le_bytes());
+        payload[16..20].copy_from_slice(&0_i32.to_le_bytes());
+        payload[20] = PLACEMENT_SOURCE_BACKPACK;
+
+        let args = PlaceBlockArgs::unpack(&payload).unwrap();
+        assert_eq!(args.block().world_x, 15);
+        assert_eq!(args.anchor().world_x, 16);
+
+        payload[10..14].copy_from_slice(&17_i32.to_le_bytes());
+        assert!(matches!(
+            PlaceBlockArgs::unpack(&payload),
+            Err(NicechunkChunkError::InvalidPlacementAnchor)
+        ));
+        payload[10..14].copy_from_slice(&15_i32.to_le_bytes());
+        payload[14..16].copy_from_slice(&81_i16.to_le_bytes());
+        payload[16..20].copy_from_slice(&1_i32.to_le_bytes());
+        assert!(matches!(
+            PlaceBlockArgs::unpack(&payload),
+            Err(NicechunkChunkError::InvalidPlacementAnchor)
+        ));
+    }
+
+    #[test]
+    fn placement_accepts_only_canonical_blocking_resources() {
+        for block_id in [
+            BLOCK_GRASS,
+            BLOCK_ICE,
+            BLOCK_ASH,
+            BLOCK_QUICKSAND,
+            BLOCK_LEAVES,
+            BLOCK_GIANT_ROOT,
+            BLOCK_CACTUS,
+            BLOCK_CORAL,
+            BLOCK_DEAD_CORAL,
+            BLOCK_SHELL_BED,
+            BLOCK_COAL,
+        ] {
+            assert!(
+                is_placeable_block(block_id),
+                "block {block_id} should be placeable"
+            );
+        }
+        for block_id in [
+            BLOCK_AIR,
+            BLOCK_BEDROCK,
+            BLOCK_WATER,
+            18,
+            19,
+            20,
+            28,
+            31,
+            33,
+            BLOCK_MOSS,
+            43,
+            48,
+            53,
+            54,
+            u16::MAX,
+        ] {
+            assert!(
+                !is_placeable_block(block_id),
+                "block {block_id} should be rejected"
+            );
+        }
     }
 
     fn surface_decoration_payload(rules: &[SurfaceDecorationRule]) -> Vec<u8> {

@@ -6,7 +6,7 @@ use solana_program::{
     declare_id,
     entrypoint::ProgramResult,
     instruction::{AccountMeta, Instruction},
-    program::invoke_signed,
+    program::{invoke_signed, set_return_data},
     pubkey::Pubkey,
     rent::Rent,
     system_instruction, system_program,
@@ -42,6 +42,12 @@ declare_id!("FwTrMDGyRg653L9svvt5aoGii9ZjX1WekSFWcwByjxqt");
 const CHUNK_BROKEN_MAGIC: [u8; 4] = *b"NCBK";
 const CHUNK_BROKEN_VERSION: u8 = 1;
 const CHUNK_BROKEN_SEED: &[u8] = b"chunk-broken";
+const CHUNK_PLACED_MAGIC: [u8; 4] = *b"NCPB";
+const CHUNK_PLACED_VERSION: u8 = 1;
+const CHUNK_PLACED_SEED: &[u8] = b"chunk-placed";
+const CHUNK_PLACED_HEADER_LEN: usize = 16;
+const CHUNK_PLACED_RECORD_LEN: usize = 9;
+const CHUNK_PLACED_MAX_CAPACITY: u16 = 2048;
 const GLOBAL_CONFIG_MAGIC: [u8; 8] = *b"NCKCFG01";
 const GLOBAL_CONFIG_SEED: &[u8] = b"global-config";
 const GLOBAL_CONFIG_DEVELOPMENT_WALLET_OFFSET: usize = 53;
@@ -85,6 +91,8 @@ pub fn process_instruction(
         12 => configure_material_physics(program_id, accounts, payload),
         13 => record_mining_action(program_id, accounts, payload),
         14 => consume_smelting_resources(program_id, accounts, payload),
+        15 => consume_placement_resource(program_id, accounts, payload),
+        16 => append_placed_resource(program_id, accounts, payload),
         _ => Err(NicechunkBackpackError::InvalidInstruction.into()),
     }
 }
@@ -173,6 +181,119 @@ fn consume_smelting_resources(
         &input_quantities,
         &fuel_indexes,
         &physics,
+        clock.slot,
+    )
+}
+
+fn consume_placement_resource(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    payload: &[u8],
+) -> ProgramResult {
+    const PAYLOAD_LEN: usize = 4 + 4 + 1 + state::BACKPACK_SLOT_RECORD_LEN;
+    if accounts.len() != 5 || payload.len() != PAYLOAD_LEN {
+        return Err(NicechunkBackpackError::InvalidInstruction.into());
+    }
+    let chunk_x = i32::from_le_bytes(
+        payload[0..4]
+            .try_into()
+            .map_err(|_| NicechunkBackpackError::InvalidInstruction)?,
+    );
+    let chunk_z = i32::from_le_bytes(
+        payload[4..8]
+            .try_into()
+            .map_err(|_| NicechunkBackpackError::InvalidInstruction)?,
+    );
+    let source_index = payload[8];
+    let expected_slot: [u8; state::BACKPACK_SLOT_RECORD_LEN] = payload[9..]
+        .try_into()
+        .map_err(|_| NicechunkBackpackError::InvalidInstruction)?;
+
+    let account_info_iter = &mut accounts.iter();
+    let chunk_placed = next_account_info(account_info_iter)?;
+    let global_config = next_account_info(account_info_iter)?;
+    let player_profile = next_account_info(account_info_iter)?;
+    let backpack = next_account_info(account_info_iter)?;
+    let material_physics = next_account_info(account_info_iter)?;
+    let owner = validate_chunk_placed_authority(
+        program_id,
+        chunk_placed,
+        global_config,
+        player_profile,
+        backpack,
+        chunk_x,
+        chunk_z,
+    )?;
+    validate_material_physics_pda(program_id, material_physics)?;
+
+    let physics_data = material_physics.try_borrow_data()?;
+    let physics = MaterialPhysicsTableView::new(&physics_data)?;
+    let clock = Clock::get()?;
+    let mut backpack_data = backpack.try_borrow_mut_data()?;
+    let (block_id, volume_mm3) = BackpackAccount::consume_placement_resource(
+        &mut backpack_data,
+        &owner,
+        source_index,
+        &expected_slot,
+        &physics,
+        clock.slot,
+    )?;
+    let mut return_data = [0_u8; 6];
+    return_data[0..2].copy_from_slice(&block_id.to_le_bytes());
+    return_data[2..6].copy_from_slice(&volume_mm3.to_le_bytes());
+    set_return_data(&return_data);
+    Ok(())
+}
+
+fn append_placed_resource(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    payload: &[u8],
+) -> ProgramResult {
+    const PAYLOAD_LEN: usize = BackpackResourceRecord::LEN + 4 + 8;
+    if accounts.len() != 5 || payload.len() != PAYLOAD_LEN {
+        return Err(NicechunkBackpackError::InvalidInstruction.into());
+    }
+    let record = BackpackResourceRecord::unpack(&payload[..BackpackResourceRecord::LEN])?;
+    let volume_mm3 = read_u32(payload, BackpackResourceRecord::LEN);
+    let action_id = read_u64(payload, BackpackResourceRecord::LEN + 4);
+    if volume_mm3 == 0 || action_id == 0 {
+        return Err(NicechunkBackpackError::InvalidPlacementConsumption.into());
+    }
+
+    let account_info_iter = &mut accounts.iter();
+    let chunk_placed = next_account_info(account_info_iter)?;
+    let global_config = next_account_info(account_info_iter)?;
+    let player_profile = next_account_info(account_info_iter)?;
+    let backpack = next_account_info(account_info_iter)?;
+    let material_physics = next_account_info(account_info_iter)?;
+    let (chunk_x, chunk_z) = chunk_coordinates_for_record(global_config, &record)?;
+    let owner = validate_chunk_placed_authority(
+        program_id,
+        chunk_placed,
+        global_config,
+        player_profile,
+        backpack,
+        chunk_x,
+        chunk_z,
+    )?;
+    validate_material_physics_pda(program_id, material_physics)?;
+
+    let physics_data = material_physics.try_borrow_data()?;
+    let physics = MaterialPhysicsTableView::new(&physics_data)?;
+    let slot = BackpackSlotRecord::from_block_resource_with_volume(record, volume_mm3);
+    let mass_grams = physics.block_mass_grams(slot.block_id()?, volume_mm3)?;
+    drop(physics_data);
+
+    let clock = Clock::get()?;
+    let mut backpack_data = backpack.try_borrow_mut_data()?;
+    BackpackAccount::record_mining_action(&mut backpack_data, &owner, action_id, clock.slot)?;
+    BackpackAccount::append_resource_with_volume(
+        &mut backpack_data,
+        &owner,
+        &record,
+        volume_mm3,
+        mass_grams,
         clock.slot,
     )
 }
@@ -1362,6 +1483,103 @@ fn validate_chunk_reward_authority(
 
     validate_chunk_broken_pda_for_record(chunk_broken, global_config, record)?;
     validate_existing_backpack_pda(program_id, backpack, &owner)?;
+    Ok(owner)
+}
+
+fn chunk_coordinates_for_record(
+    global_config: &AccountInfo,
+    record: &BackpackResourceRecord,
+) -> Result<(i32, i32), solana_program::program_error::ProgramError> {
+    let data = global_config.try_borrow_data()?;
+    if data.len() != GLOBAL_CONFIG_LEN || data[0..8] != GLOBAL_CONFIG_MAGIC {
+        return Err(NicechunkBackpackError::InvalidGlobalConfig.into());
+    }
+    let chunk_size = i32::from(read_u16(&data, GLOBAL_CONFIG_CHUNK_SIZE_OFFSET));
+    if chunk_size <= 0 {
+        return Err(NicechunkBackpackError::InvalidGlobalConfig.into());
+    }
+    Ok((
+        record.world_x.div_euclid(chunk_size),
+        record.world_z.div_euclid(chunk_size),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_chunk_placed_authority(
+    program_id: &Pubkey,
+    chunk_placed: &AccountInfo,
+    global_config: &AccountInfo,
+    player_profile: &AccountInfo,
+    backpack: &AccountInfo,
+    chunk_x: i32,
+    chunk_z: i32,
+) -> Result<Pubkey, solana_program::program_error::ProgramError> {
+    if !chunk_placed.is_signer {
+        return Err(NicechunkBackpackError::InvalidChunkPlacedAuthority.into());
+    }
+    if !backpack.is_writable {
+        return Err(NicechunkBackpackError::InvalidWritableAccount.into());
+    }
+    require_key_eq(
+        chunk_placed.owner,
+        &NICECHUNK_CHUNK_PROGRAM_ID,
+        NicechunkBackpackError::InvalidChunkPlacedAuthority,
+    )?;
+    require_key_eq(
+        player_profile.owner,
+        &NICECHUNK_PLAYER_PROGRAM_ID,
+        NicechunkBackpackError::InvalidPlayerProgram,
+    )?;
+    require_key_eq(
+        backpack.owner,
+        program_id,
+        NicechunkBackpackError::InvalidBackpackOwner,
+    )?;
+    validate_global_config(global_config)?;
+
+    let profile_data = player_profile.try_borrow_data()?;
+    let (owner, profile_global_config) = PlayerProfileView::owner_and_global_config(&profile_data)?;
+    drop(profile_data);
+    require_key_eq(
+        global_config.key,
+        &profile_global_config,
+        NicechunkBackpackError::InvalidGlobalConfig,
+    )?;
+    validate_existing_backpack_pda(program_id, backpack, &owner)?;
+
+    let chunk_x_bytes = chunk_x.to_le_bytes();
+    let chunk_z_bytes = chunk_z.to_le_bytes();
+    let (expected, bump) = Pubkey::find_program_address(
+        &[
+            CHUNK_PLACED_SEED,
+            global_config.key.as_ref(),
+            &chunk_x_bytes,
+            &chunk_z_bytes,
+        ],
+        &NICECHUNK_CHUNK_PROGRAM_ID,
+    );
+    require_key_eq(
+        chunk_placed.key,
+        &expected,
+        NicechunkBackpackError::InvalidChunkPlacedAuthority,
+    )?;
+    let data = chunk_placed.try_borrow_data()?;
+    if data.len() < CHUNK_PLACED_HEADER_LEN
+        || data[0..4] != CHUNK_PLACED_MAGIC
+        || data[4] != CHUNK_PLACED_VERSION
+        || data[5] != bump
+    {
+        return Err(NicechunkBackpackError::InvalidChunkPlacedAuthority.into());
+    }
+    let count = read_u16(&data, 6);
+    let capacity = read_u16(&data, 8);
+    if capacity == 0
+        || capacity > CHUNK_PLACED_MAX_CAPACITY
+        || count > capacity
+        || data.len() != CHUNK_PLACED_HEADER_LEN + capacity as usize * CHUNK_PLACED_RECORD_LEN
+    {
+        return Err(NicechunkBackpackError::InvalidChunkPlacedAuthority.into());
+    }
     Ok(owner)
 }
 
