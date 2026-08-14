@@ -30,8 +30,7 @@ use building::{
     CHUNK_AUTHORITY_SEED, LAND_CONTRACT_TYPE_BLANK,
 };
 use cluster_config::{
-    GUARDIAN_BLUEPRINT_PUBLISHER_WALLET, GUARDIAN_TREASURY_WALLET, NICECHUNK_CHUNK_PROGRAM_ID,
-    NICECHUNK_CORE_PROGRAM_ID, NICECHUNK_GUARDIAN_PROGRAM_ID, NICECHUNK_MARKET_PROGRAM_ID,
+    NICECHUNK_CHUNK_PROGRAM_ID, NICECHUNK_CORE_PROGRAM_ID, NICECHUNK_MARKET_PROGRAM_ID,
     NICECHUNK_PLAYER_PROGRAM_ID,
 };
 use errors::{require_key_eq, NicechunkBuildingError};
@@ -47,8 +46,6 @@ const MARKET_RESERVE_LAND_CONTRACT_INSTRUCTION: u8 = 5;
 const MARKET_CONSUME_RESERVED_LAND_CONTRACT_INSTRUCTION: u8 = 6;
 const MARKET_RELEASE_RESERVED_LAND_CONTRACT_INSTRUCTION: u8 = 7;
 const LAND_CONTRACT_AUTHORITY_SEED: &[u8] = b"land-contract-authority-v1";
-const GUARDIAN_BLUEPRINT_AUTHORITY_SEED: &[u8] = b"guardian-blueprint";
-const GUARDIAN_UPDATE_BLUEPRINT_INSTRUCTION: u8 = 6;
 
 #[cfg(not(feature = "no-entrypoint"))]
 entrypoint!(process_instruction);
@@ -69,90 +66,8 @@ pub fn process_instruction(
         4 => finalize_building(program_id, accounts, payload),
         5 => cancel_building_upload(program_id, accounts, payload),
         6 => cancel_build_site_indexing(program_id, accounts, payload),
-        8 => publish_guardian_blueprint(program_id, accounts, payload),
         _ => Err(NicechunkBuildingError::InvalidInstruction.into()),
     }
-}
-
-fn publish_guardian_blueprint(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    payload: &[u8],
-) -> ProgramResult {
-    if accounts.len() != 5 || payload.len() != 36 {
-        return Err(NicechunkBuildingError::InvalidInstruction.into());
-    }
-    let publisher = &accounts[0];
-    let blueprint_authority = &accounts[1];
-    let guardian_region = &accounts[2];
-    let global_config = &accounts[3];
-    let guardian_program = &accounts[4];
-
-    if !publisher.is_signer {
-        return Err(NicechunkBuildingError::InvalidGuardianBlueprintPublisher.into());
-    }
-    validate_guardian_blueprint_publisher(publisher.key)?;
-    if !guardian_region.is_writable {
-        return Err(NicechunkBuildingError::InvalidWritableAccount.into());
-    }
-    validate_global_config(global_config)?;
-    require_key_eq(
-        guardian_program.key,
-        &NICECHUNK_GUARDIAN_PROGRAM_ID,
-        NicechunkBuildingError::InvalidGuardianProgram,
-    )?;
-    if !guardian_program.executable {
-        return Err(NicechunkBuildingError::InvalidGuardianProgram.into());
-    }
-
-    let (expected_authority, authority_bump) = Pubkey::find_program_address(
-        &[
-            GUARDIAN_BLUEPRINT_AUTHORITY_SEED,
-            global_config.key.as_ref(),
-        ],
-        program_id,
-    );
-    require_key_eq(
-        blueprint_authority.key,
-        &expected_authority,
-        NicechunkBuildingError::InvalidGuardianBlueprintAuthority,
-    )?;
-
-    let mut data = Vec::with_capacity(1 + payload.len());
-    data.push(GUARDIAN_UPDATE_BLUEPRINT_INSTRUCTION);
-    data.extend_from_slice(payload);
-    let instruction = Instruction {
-        program_id: *guardian_program.key,
-        accounts: vec![
-            AccountMeta::new_readonly(*blueprint_authority.key, true),
-            AccountMeta::new(*guardian_region.key, false),
-            AccountMeta::new_readonly(*global_config.key, false),
-        ],
-        data,
-    };
-    let bump_seed = [authority_bump];
-    let authority_seeds = [
-        GUARDIAN_BLUEPRINT_AUTHORITY_SEED,
-        global_config.key.as_ref(),
-        bump_seed.as_ref(),
-    ];
-    invoke_signed(
-        &instruction,
-        &[
-            blueprint_authority.clone(),
-            guardian_region.clone(),
-            global_config.clone(),
-            guardian_program.clone(),
-        ],
-        &[&authority_seeds],
-    )
-}
-
-fn validate_guardian_blueprint_publisher(publisher: &Pubkey) -> ProgramResult {
-    if publisher != &GUARDIAN_TREASURY_WALLET && publisher != &GUARDIAN_BLUEPRINT_PUBLISHER_WALLET {
-        return Err(NicechunkBuildingError::InvalidGuardianBlueprintPublisher.into());
-    }
-    Ok(())
 }
 
 struct PlayerActionContext {
@@ -763,31 +678,6 @@ fn register_chunk_instruction(
     }
 }
 
-#[cfg(test)]
-mod guardian_blueprint_tests {
-    use super::*;
-
-    #[test]
-    fn only_governance_and_index_publisher_can_request_blueprint_cpi() {
-        assert!(validate_guardian_blueprint_publisher(&GUARDIAN_TREASURY_WALLET).is_ok());
-        assert!(
-            validate_guardian_blueprint_publisher(&GUARDIAN_BLUEPRINT_PUBLISHER_WALLET).is_ok()
-        );
-        assert!(validate_guardian_blueprint_publisher(&Pubkey::new_unique()).is_err());
-    }
-
-    #[test]
-    fn blueprint_cpi_authority_is_an_off_curve_building_pda() {
-        let global_config = Pubkey::new_unique();
-        let (authority, _) = Pubkey::find_program_address(
-            &[GUARDIAN_BLUEPRINT_AUTHORITY_SEED, global_config.as_ref()],
-            &crate::id(),
-        );
-        assert!(!authority.is_on_curve());
-        assert_ne!(authority, GUARDIAN_TREASURY_WALLET);
-        assert_ne!(authority, GUARDIAN_BLUEPRINT_PUBLISHER_WALLET);
-    }
-}
 fn begin_building_upload(
     program_id: &Pubkey,
     accounts: &[AccountInfo],

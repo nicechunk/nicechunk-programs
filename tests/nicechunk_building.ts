@@ -21,7 +21,6 @@ import {
   createCancelBuildSiteIndexingInstruction,
   createCancelBuildingUploadInstruction,
   createFinalizeBuildingInstruction,
-  createPublishGuardianBlueprintInstruction,
   createRegisterBuildSiteChunksInstruction,
   createWriteBuildingShardInstruction,
   decodeBuildingManifest,
@@ -30,13 +29,10 @@ import {
   deriveBuildingManifestPda,
   deriveBuildingShardPda,
   deriveBuildSitePda,
-  deriveGuardianBlueprintAuthorityPda,
   deriveLandContractAuthorityPda,
   deriveMarketUserPda,
   foundationIndexBatch,
   foundationRollbackBatch,
-  GUARDIAN_BLUEPRINT_PUBLISHER_WALLET,
-  GUARDIAN_TREASURY_WALLET,
   MAX_LAND_CONTRACTS_PER_SITE,
   NICECHUNK_BUILDING_PROGRAM_ID,
 } from "../sdk/nicechunk-building.ts";
@@ -153,30 +149,6 @@ describe("nicechunk building SDK", () => {
     assert.equal(finalize.keys.length, 9);
     assert.equal(finalize.keys.at(-1)?.isWritable, false);
     assert.equal(cancel.keys.at(-1)?.isWritable, true);
-  });
-
-  it("routes Guardian blueprint writes through the Building Program PDA", () => {
-    const instruction = createPublishGuardianBlueprintInstruction({
-      publisher: GUARDIAN_BLUEPRINT_PUBLISHER_WALLET,
-      regionX: -2,
-      regionY: 3,
-      blueprintHash: "25232284e49cf2cb4201bb072e27626c",
-      blueprintRevision: 7n,
-      blueprintRecordCount: 4,
-    });
-    const globalConfig = instruction.keys[3].pubkey;
-    const [authority] = deriveGuardianBlueprintAuthorityPda({ globalConfig });
-
-    assert.equal(instruction.programId.toBase58(), NICECHUNK_BUILDING_PROGRAM_ID.toBase58());
-    assert.equal(instruction.data.readUInt8(0), 8);
-    assert.equal(instruction.data.readInt32LE(1), -2);
-    assert.equal(instruction.data.readInt32LE(5), 3);
-    assert.equal(instruction.keys.length, 5);
-    assert.equal(instruction.keys[0].pubkey.toBase58(), GUARDIAN_BLUEPRINT_PUBLISHER_WALLET.toBase58());
-    assert.equal(instruction.keys[0].isSigner, true);
-    assert.equal(instruction.keys[1].pubkey.toBase58(), authority.toBase58());
-    assert.equal(instruction.keys[1].isSigner, false);
-    assert.equal(GUARDIAN_TREASURY_WALLET.toBase58(), "9XuoVVwqP2jipt3jpJVXCSS2N2jr9vDuV3d6K73FKVud");
   });
 
   it("decodes immutable chunk-aligned BuildSite V3 land state", () => {

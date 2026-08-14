@@ -22,17 +22,6 @@ import {
 export const NICECHUNK_BUILDING_PROGRAM_ID = new PublicKey(
   "39UMTUWXQkuomkFNbDPF5NGZnJmG6pDkJHVSkZyqVwWx",
 );
-export const NICECHUNK_GUARDIAN_PROGRAM_ID = new PublicKey(
-  "RQQZKA1fGELBxtxCQ6q7P26GJH4whWmPjH9XqmihVRK",
-);
-export const GUARDIAN_TREASURY_WALLET = new PublicKey(
-  "9XuoVVwqP2jipt3jpJVXCSS2N2jr9vDuV3d6K73FKVud",
-);
-export const GUARDIAN_BLUEPRINT_PUBLISHER_WALLET = new PublicKey(
-  "2nRdri2u7VeQtHP7y6WsFq51vWDcXBuHBB5UahZJ9K4p",
-);
-export const GUARDIAN_BLUEPRINT_AUTHORITY_SEED = "guardian-blueprint";
-export const GUARDIAN_REGION_SEED = "guardian-region";
 export const NICECHUNK_MARKET_PROGRAM_ID = new PublicKey(
   "6CurnvneezBuHwPUnrCiFg1QMWeUF67ufQxYebyr2UP7",
 );
@@ -243,91 +232,6 @@ export function deriveLandContractAuthorityPda({
     [Buffer.from(LAND_CONTRACT_AUTHORITY_SEED), new PublicKey(globalConfig).toBuffer()],
     new PublicKey(programId),
   );
-}
-
-export function deriveGuardianBlueprintAuthorityPda({
-  globalConfig,
-  programId = NICECHUNK_BUILDING_PROGRAM_ID,
-}: {
-  globalConfig: PublicKeyInitData;
-  programId?: PublicKeyInitData;
-}): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync(
-    [
-      Buffer.from(GUARDIAN_BLUEPRINT_AUTHORITY_SEED),
-      new PublicKey(globalConfig).toBuffer(),
-    ],
-    new PublicKey(programId),
-  );
-}
-
-export function createPublishGuardianBlueprintInstruction({
-  publisher,
-  regionX,
-  regionY,
-  blueprintHash,
-  blueprintRevision,
-  blueprintRecordCount,
-  buildingProgramId = NICECHUNK_BUILDING_PROGRAM_ID,
-  guardianProgramId = NICECHUNK_GUARDIAN_PROGRAM_ID,
-  coreProgramId = NICECHUNK_CORE_PROGRAM_ID,
-}: {
-  publisher: PublicKey;
-  regionX: number;
-  regionY: number;
-  blueprintHash: string | Uint8Array;
-  blueprintRevision: bigint | number | string;
-  blueprintRecordCount: number;
-  buildingProgramId?: PublicKey;
-  guardianProgramId?: PublicKey;
-  coreProgramId?: PublicKey;
-}): TransactionInstruction {
-  assertI32(regionX, "regionX");
-  assertI32(regionY, "regionY");
-  const revision = BigInt(blueprintRevision);
-  if (revision < 0n || revision > 0xffff_ffff_ffff_ffffn) {
-    throw new Error("Guardian blueprint revision must fit in a uint64");
-  }
-  if (!Number.isInteger(blueprintRecordCount)
-    || blueprintRecordCount < 0
-    || blueprintRecordCount > 0xffff_ffff) {
-    throw new Error("Guardian blueprint record count must fit in a uint32");
-  }
-
-  const [globalConfig] = deriveGlobalConfigPda(coreProgramId);
-  const [blueprintAuthority] = deriveGuardianBlueprintAuthorityPda({
-    globalConfig,
-    programId: buildingProgramId,
-  });
-  const regionXBytes = i32Buffer(regionX);
-  const regionYBytes = i32Buffer(regionY);
-  const [guardianRegion] = PublicKey.findProgramAddressSync(
-    [
-      Buffer.from(GUARDIAN_REGION_SEED),
-      globalConfig.toBuffer(),
-      regionXBytes,
-      regionYBytes,
-    ],
-    guardianProgramId,
-  );
-  const data = Buffer.alloc(37);
-  data.writeUInt8(8, 0);
-  regionXBytes.copy(data, 1);
-  regionYBytes.copy(data, 5);
-  guardianBlueprintHashBytes(blueprintHash).copy(data, 9);
-  data.writeBigUInt64LE(revision, 25);
-  data.writeUInt32LE(blueprintRecordCount, 33);
-  return new TransactionInstruction({
-    programId: buildingProgramId,
-    keys: [
-      { pubkey: publisher, isSigner: true, isWritable: false },
-      { pubkey: blueprintAuthority, isSigner: false, isWritable: false },
-      { pubkey: guardianRegion, isSigner: false, isWritable: true },
-      { pubkey: globalConfig, isSigner: false, isWritable: false },
-      { pubkey: guardianProgramId, isSigner: false, isWritable: false },
-    ],
-    data,
-  });
 }
 
 export function createBuildSiteInstruction({
@@ -1039,24 +943,8 @@ function signedInteger(value: number, bits: 16 | 32, name: string): number {
   return boundedInteger(value, min, max, name);
 }
 
-function guardianBlueprintHashBytes(value: string | Uint8Array): Buffer {
-  if (value instanceof Uint8Array) {
-    if (value.byteLength !== 16) throw new Error("Guardian blueprint hash must be 16 bytes");
-    return Buffer.from(value);
-  }
-  const hex = String(value || "").trim().toLowerCase().replace(/^0x/, "");
-  if (!/^[0-9a-f]{32}$/.test(hex)) throw new Error("Guardian blueprint hash must be 16-byte hex");
-  return Buffer.from(hex, "hex");
-}
-
 function assertI32(value: number, name: string): void {
   if (!Number.isInteger(value) || value < -0x8000_0000 || value > 0x7fff_ffff) {
     throw new Error(`${name} must fit in a signed int32`);
   }
-}
-
-function i32Buffer(value: number): Buffer {
-  const bytes = Buffer.alloc(4);
-  bytes.writeInt32LE(value);
-  return bytes;
 }
