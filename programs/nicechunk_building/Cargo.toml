@@ -1,0 +1,19 @@
+[package]
+name = "nicechunk_building"
+version = "0.1.0"
+description = "NiceChunk land contract, foundation, and NCM3 building program"
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "nicechunk_building"
+
+[features]
+default = ["devnet"]
+devnet = []
+testnet = []
+mainnet = []
+no-entrypoint = []
+
+[dependencies]
+solana-program.workspace = true

@@ -22,11 +22,8 @@ export const NICECHUNK_BACKPACK_PROGRAM_ID = new PublicKey(
 export const NICECHUNK_GAME_PROGRAM_ID = new PublicKey(
   env.NICECHUNK_GAME_PROGRAM_ID ?? "6CurnvneezBuHwPUnrCiFg1QMWeUF67ufQxYebyr2UP7",
 );
-export const NICECHUNK_BLUEPRINT_ISSUER = new PublicKey(
-  env.NICECHUNK_BLUEPRINT_ISSUER ?? "9XuoVVwqP2jipt3jpJVXCSS2N2jr9vDuV3d6K73FKVud",
-);
 export const NICECHUNK_BOOTSTRAP_AUTHORITY = new PublicKey(
-  env.NICECHUNK_BOOTSTRAP_AUTHORITY ?? NICECHUNK_BLUEPRINT_ISSUER.toBase58(),
+  env.NICECHUNK_BOOTSTRAP_AUTHORITY ?? "9XuoVVwqP2jipt3jpJVXCSS2N2jr9vDuV3d6K73FKVud",
 );
 const UNIFIED_GAME_BACKPACK_NAMESPACE = 1;
 export const BACKPACK_SEED = "backpack";
@@ -44,9 +41,7 @@ export const BACKPACK_SLOT_KIND_BLOCK = 1;
 export const BACKPACK_SLOT_KIND_ITEM = 2;
 export const BACKPACK_ITEM_CATEGORY_MATERIAL = 1;
 export const BACKPACK_ITEM_CATEGORY_FORGED = 2;
-export const BACKPACK_ITEM_CATEGORY_BLUEPRINT = 3;
 export const BACKPACK_FORGED_ITEM_CODE = 8;
-export const BACKPACK_BLUEPRINT_ITEM_CODE = 9;
 export const BACKPACK_ITEM_FLAG_UNIQUE = 1;
 export const BACKPACK_ITEM_FLAG_MASS_VALID = 1 << 15;
 export const BACKPACK_FLAG_MASS_STATE_VALID = 1;
@@ -64,11 +59,7 @@ export const MATERIAL_PHYSICS_MAX_RULES = 128;
 export const MATERIAL_PHYSICS_LEN = MATERIAL_PHYSICS_HEADER_LEN
   + MATERIAL_PHYSICS_MAX_RULES * MATERIAL_PHYSICS_RULE_LEN;
 export const MATERIAL_PHYSICS_ITEM_KEY_MASK = 1 << 15;
-export const BLUEPRINT_ITEM_SEED = "blueprint-item";
 export const FORGED_ITEM_SEED = "forged-item-v1";
-export const BLUEPRINT_ITEM_MAGIC = "NCKBPT01";
-export const BLUEPRINT_ITEM_VERSION = 1;
-export const BLUEPRINT_ITEM_LEN = 96;
 export const BACKPACK_DECORATION_METADATA_MASK = 0xffff;
 export const VERIFIED_FORGE_CODE_MAX_BYTES = 640;
 
@@ -165,17 +156,6 @@ export interface BackpackDecorationMetadata {
   decorationId: number;
 }
 
-export interface DecodedBlueprintItem {
-  magic: string;
-  version: number;
-  bump: number;
-  initialized: boolean;
-  itemId: bigint;
-  owner: PublicKey;
-  issuer: PublicKey;
-  createdSlot: bigint;
-}
-
 export function encodeBackpackDecorationMetadata({
   ruleId,
   decorationId,
@@ -206,21 +186,6 @@ export function deriveBackpackPda({
   backpackIdBytes.writeBigUInt64LE(BigInt(backpackId), 0);
   return PublicKey.findProgramAddressSync(
     [Buffer.from(BACKPACK_SEED), creator.toBuffer(), backpackIdBytes],
-    programId,
-  );
-}
-
-export function deriveBlueprintItemPda({
-  itemId,
-  programId = NICECHUNK_BACKPACK_PROGRAM_ID,
-}: {
-  itemId: bigint | number;
-  programId?: PublicKey;
-}): [PublicKey, number] {
-  const itemIdBytes = Buffer.alloc(8);
-  itemIdBytes.writeBigUInt64LE(BigInt(itemId), 0);
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from(BLUEPRINT_ITEM_SEED), itemIdBytes],
     programId,
   );
 }
@@ -343,40 +308,6 @@ export function createAppendSmeltingItemInstruction({
       { pubkey: materialPhysics, isSigner: false, isWritable: false },
     ],
     data: backpackInstructionData(backpackProgramId, Buffer.concat([Buffer.from([5]), encodeBackpackSlotRecord(slot)])),
-  });
-}
-
-export function createIssueBlueprintInstruction({
-  issuer,
-  recipient,
-  backpack,
-  itemId,
-  backpackProgramId = NICECHUNK_BACKPACK_PROGRAM_ID,
-}: {
-  issuer: PublicKey;
-  recipient: PublicKey;
-  backpack: PublicKey;
-  itemId: bigint | number;
-  backpackProgramId?: PublicKey;
-}): TransactionInstruction {
-  const normalizedItemId = BigInt(itemId);
-  if (normalizedItemId <= 0n || normalizedItemId > 0xffffffffffffffffn) {
-    throw new Error("Blueprint item ID must be an unsigned non-zero 64-bit integer.");
-  }
-  const [blueprintItem] = deriveBlueprintItemPda({ itemId: normalizedItemId, programId: backpackProgramId });
-  const data = Buffer.alloc(9);
-  data.writeUInt8(9, 0);
-  data.writeBigUInt64LE(normalizedItemId, 1);
-  return new TransactionInstruction({
-    programId: backpackProgramId,
-    keys: [
-      { pubkey: issuer, isSigner: true, isWritable: true },
-      { pubkey: recipient, isSigner: false, isWritable: false },
-      { pubkey: backpack, isSigner: false, isWritable: true },
-      { pubkey: blueprintItem, isSigner: false, isWritable: true },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
-    data: backpackInstructionData(backpackProgramId, data),
   });
 }
 
@@ -542,30 +473,6 @@ export function materialPhysicsMassGrams(
   const mass = (BigInt(volume) * BigInt(density) + 500_000n) / 1_000_000n;
   if (mass > 0xffffffffn) throw new Error("MaterialPhysics mass exceeds u32.");
   return Number(mass);
-}
-
-export function decodeBlueprintItem(data: Buffer): DecodedBlueprintItem {
-  if (data.length !== BLUEPRINT_ITEM_LEN) {
-    throw new Error(`Invalid Blueprint item length: expected ${BLUEPRINT_ITEM_LEN}, got ${data.length}`);
-  }
-  const magic = data.subarray(0, 8).toString("utf8");
-  if (magic !== BLUEPRINT_ITEM_MAGIC) throw new Error(`Invalid Blueprint item magic: ${magic}`);
-  const version = data.readUInt16LE(8);
-  if (version !== BLUEPRINT_ITEM_VERSION) {
-    throw new Error(`Invalid Blueprint item version: expected ${BLUEPRINT_ITEM_VERSION}, got ${version}`);
-  }
-  const itemId = data.readBigUInt64LE(12);
-  if (!itemId) throw new Error("Invalid zero Blueprint item ID.");
-  return {
-    magic,
-    version,
-    bump: data.readUInt8(10),
-    initialized: data.readUInt8(11) === 1,
-    itemId,
-    owner: new PublicKey(data.subarray(20, 52)),
-    issuer: new PublicKey(data.subarray(52, 84)),
-    createdSlot: data.readBigUInt64LE(84),
-  };
 }
 
 export function backpackSlotFromResource(resource: BackpackResourceRecord): BackpackSlotRecord {

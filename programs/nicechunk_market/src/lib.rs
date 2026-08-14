@@ -22,10 +22,13 @@ pub mod membership;
 pub mod state;
 
 use cluster_config::{
-    MARKET_TREASURY, NCK_MINT, NICECHUNK_BACKPACK_PROGRAM_ID, NICECHUNK_PLAYER_PROGRAM_ID,
+    MARKET_TREASURY, NCK_MINT, NICECHUNK_BACKPACK_PROGRAM_ID, NICECHUNK_BUILDING_PROGRAM_ID,
+    NICECHUNK_CORE_PROGRAM_ID, NICECHUNK_PLAYER_PROGRAM_ID,
 };
 use errors::{require_key_eq, NicechunkMarketError};
-use membership::{MarketUserState, MARKET_USER_SEED};
+use membership::{
+    MarketUserState, CONTRACT_TYPE_BLANK_LAND, MARKET_USER_SEED, MAX_CONTRACT_PURCHASE_QUANTITY,
+};
 use state::{
     CreateListingArgs, ListingAccount, ListingInitArgs, LISTING_SEED, MARKET_AUTHORITY_SEED,
     SOURCE_BACKPACK, SOURCE_EQUIPMENT,
@@ -78,6 +81,9 @@ const PLAYER_EQUIPMENT_RECORD_BACKPACK_SLOT_OFFSET: usize = 40;
 const PLAYER_EQUIPMENT_FLAG_CUSTODY: u8 = 1 << 1;
 const MARKET_FEE_BPS: u16 = 100;
 const BPS_DENOMINATOR: u64 = 10_000;
+pub const BLANK_LAND_CONTRACT_PRICE_BASE_UNITS: u64 = 1_000_000;
+pub const LAND_CONTRACT_AUTHORITY_SEED: &[u8] = b"land-contract-authority-v1";
+const GLOBAL_CONFIG_SEED: &[u8] = b"global-config";
 
 declare_id!("1PwPzFtdJ5gQqku5gBo4b6Wvo48Qe8NuXSogUP8TWpR");
 
@@ -98,7 +104,231 @@ pub fn process_instruction(
         1 => cancel_listing(program_id, accounts),
         2 => buy_listing(program_id, accounts),
         3 => join_market(program_id, accounts),
+        4 => buy_treasury_contract(program_id, accounts, payload),
+        5 => update_land_contract_reservation(
+            program_id,
+            accounts,
+            payload,
+            LandContractReservationOperation::Reserve,
+        ),
+        6 => update_land_contract_reservation(
+            program_id,
+            accounts,
+            payload,
+            LandContractReservationOperation::Consume,
+        ),
+        7 => update_land_contract_reservation(
+            program_id,
+            accounts,
+            payload,
+            LandContractReservationOperation::Release,
+        ),
         _ => Err(NicechunkMarketError::InvalidInstruction.into()),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ContractAmountArgs {
+    contract_type: u8,
+    quantity: u32,
+}
+
+impl ContractAmountArgs {
+    const LEN: usize = 5;
+
+    fn unpack(payload: &[u8], maximum: Option<u32>) -> Result<Self, NicechunkMarketError> {
+        if payload.len() != Self::LEN {
+            return Err(NicechunkMarketError::InvalidInstruction);
+        }
+        let args = Self {
+            contract_type: payload[0],
+            quantity: u32::from_le_bytes(
+                payload[1..5]
+                    .try_into()
+                    .map_err(|_| NicechunkMarketError::InvalidInstruction)?,
+            ),
+        };
+        if args.contract_type != CONTRACT_TYPE_BLANK_LAND {
+            return Err(NicechunkMarketError::InvalidContractType);
+        }
+        if args.quantity == 0 || maximum.is_some_and(|limit| args.quantity > limit) {
+            return Err(NicechunkMarketError::InvalidContractQuantity);
+        }
+        Ok(args)
+    }
+}
+
+fn buy_treasury_contract(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    payload: &[u8],
+) -> ProgramResult {
+    let args = ContractAmountArgs::unpack(payload, Some(MAX_CONTRACT_PURCHASE_QUANTITY))?;
+    if accounts.len() != 6 {
+        return Err(NicechunkMarketError::InvalidAccountCount.into());
+    }
+    let buyer = &accounts[0];
+    let market_user = &accounts[1];
+    let buyer_nck_token = &accounts[2];
+    let treasury_nck_token = &accounts[3];
+    let nck_mint = &accounts[4];
+    let token_program = &accounts[5];
+    if !buyer.is_signer {
+        return Err(NicechunkMarketError::InvalidBuyer.into());
+    }
+    if !market_user.is_writable || !buyer_nck_token.is_writable || !treasury_nck_token.is_writable {
+        return Err(NicechunkMarketError::InvalidWritableAccount.into());
+    }
+    require_key_eq(
+        nck_mint.key,
+        &NCK_MINT,
+        NicechunkMarketError::InvalidNckMint,
+    )?;
+    require_key_eq(
+        token_program.key,
+        &spl_token::ID,
+        NicechunkMarketError::InvalidTokenProgram,
+    )?;
+    validate_existing_market_user(program_id, market_user, buyer.key)?;
+    validate_token_account(buyer_nck_token, &NCK_MINT, buyer.key)?;
+    validate_token_account(treasury_nck_token, &NCK_MINT, &MARKET_TREASURY)?;
+    let payment = BLANK_LAND_CONTRACT_PRICE_BASE_UNITS
+        .checked_mul(u64::from(args.quantity))
+        .ok_or(NicechunkMarketError::InvalidContractQuantity)?;
+    transfer_nck(
+        buyer_nck_token,
+        treasury_nck_token,
+        nck_mint,
+        buyer,
+        token_program,
+        payment,
+    )?;
+    let clock = Clock::get()?;
+    let mut data = market_user.try_borrow_mut_data()?;
+    MarketUserState::validate(&data, buyer.key)?;
+    MarketUserState::credit_blank_land_contracts(&mut data, args.quantity, clock.slot)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LandContractReservationOperation {
+    Reserve,
+    Consume,
+    Release,
+}
+
+fn update_land_contract_reservation(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    payload: &[u8],
+    operation: LandContractReservationOperation,
+) -> ProgramResult {
+    let args = ContractAmountArgs::unpack(payload, None)?;
+    if accounts.len() != 4 {
+        return Err(NicechunkMarketError::InvalidAccountCount.into());
+    }
+    let contract_authority = &accounts[0];
+    let market_user = &accounts[1];
+    let owner = &accounts[2];
+    let global_config = &accounts[3];
+    if !contract_authority.is_signer {
+        return Err(NicechunkMarketError::InvalidContractAuthority.into());
+    }
+    if !market_user.is_writable {
+        return Err(NicechunkMarketError::InvalidWritableAccount.into());
+    }
+    let (expected_global_config, _) =
+        Pubkey::find_program_address(&[GLOBAL_CONFIG_SEED], &NICECHUNK_CORE_PROGRAM_ID);
+    require_key_eq(
+        global_config.key,
+        &expected_global_config,
+        NicechunkMarketError::InvalidGlobalConfig,
+    )?;
+    require_key_eq(
+        global_config.owner,
+        &NICECHUNK_CORE_PROGRAM_ID,
+        NicechunkMarketError::InvalidGlobalConfig,
+    )?;
+    let (expected_authority, _) = Pubkey::find_program_address(
+        &[LAND_CONTRACT_AUTHORITY_SEED, global_config.key.as_ref()],
+        &NICECHUNK_BUILDING_PROGRAM_ID,
+    );
+    require_key_eq(
+        contract_authority.key,
+        &expected_authority,
+        NicechunkMarketError::InvalidContractAuthority,
+    )?;
+    validate_existing_market_user(program_id, market_user, owner.key)?;
+    let clock = Clock::get()?;
+    let mut data = market_user.try_borrow_mut_data()?;
+    MarketUserState::validate(&data, owner.key)?;
+    match operation {
+        LandContractReservationOperation::Reserve => {
+            MarketUserState::reserve_blank_land_contracts(&mut data, args.quantity, clock.slot)
+        }
+        LandContractReservationOperation::Consume => {
+            MarketUserState::consume_reserved_blank_land_contracts(
+                &mut data,
+                args.quantity,
+                clock.slot,
+            )
+        }
+        LandContractReservationOperation::Release => {
+            MarketUserState::release_reserved_blank_land_contracts(
+                &mut data,
+                args.quantity,
+                clock.slot,
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod land_contract_tests {
+    use super::*;
+
+    #[test]
+    fn contract_payload_is_typed_and_bounded_for_treasury_sales() {
+        let mut payload = [0_u8; ContractAmountArgs::LEN];
+        payload[0] = CONTRACT_TYPE_BLANK_LAND;
+        payload[1..5].copy_from_slice(&12_u32.to_le_bytes());
+        assert_eq!(
+            ContractAmountArgs::unpack(&payload, Some(MAX_CONTRACT_PURCHASE_QUANTITY)).unwrap(),
+            ContractAmountArgs {
+                contract_type: CONTRACT_TYPE_BLANK_LAND,
+                quantity: 12,
+            }
+        );
+        payload[0] = CONTRACT_TYPE_BLANK_LAND + 1;
+        assert!(matches!(
+            ContractAmountArgs::unpack(&payload, None),
+            Err(NicechunkMarketError::InvalidContractType)
+        ));
+        payload[0] = CONTRACT_TYPE_BLANK_LAND;
+        payload[1..5].copy_from_slice(&(MAX_CONTRACT_PURCHASE_QUANTITY + 1).to_le_bytes());
+        assert!(matches!(
+            ContractAmountArgs::unpack(&payload, Some(MAX_CONTRACT_PURCHASE_QUANTITY)),
+            Err(NicechunkMarketError::InvalidContractQuantity)
+        ));
+    }
+
+    #[test]
+    fn blank_land_contract_price_is_exactly_one_nck() {
+        assert_eq!(
+            BLANK_LAND_CONTRACT_PRICE_BASE_UNITS,
+            10_u64.pow(NCK_DECIMALS as u32)
+        );
+    }
+
+    #[test]
+    fn land_contract_reservation_operations_are_distinct() {
+        assert_ne!(
+            LandContractReservationOperation::Reserve,
+            LandContractReservationOperation::Consume
+        );
+        assert_ne!(
+            LandContractReservationOperation::Consume,
+            LandContractReservationOperation::Release
+        );
     }
 }
 

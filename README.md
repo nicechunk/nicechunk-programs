@@ -12,7 +12,7 @@ GitHub: [https://github.com/nicechunk/nicechunk-programs](https://github.com/nic
 
 This repository contains the native Solana program layer for NiceChunk. It is intentionally separated from the browser client so protocol work can be reviewed, tested, audited, and forked without pulling in frontend assets or deployment concerns.
 
-The current program set covers the global genesis configuration, player profile and session authority, chunk mutation and generated-block verification, Guardian registry and region staking, transferable backpack storage, and marketplace listings. These programs are small, explicit, and account-layout driven.
+The current program set covers the global genesis configuration, player profile and session authority, chunk mutation and generated-block verification, Guardian registry and region staking, transferable backpack storage, marketplace settlement, land contracts, and NCM3 buildings. These programs are small, explicit, and account-layout driven.
 
 The repository also includes operational scripts and TypeScript helpers used to derive PDAs, initialize devnet state, inspect generated blocks, mine blocks, register Guardians, and validate global configuration accounts.
 
@@ -20,7 +20,7 @@ The repository also includes operational scripts and TypeScript helpers used to 
 
 ![Program domain mesh](docs/diagrams/program-domain-mesh.svg)
 
-The program set is deliberately split by gameplay domain. Core stores sealed world and economy configuration. Player owns identity, position, equipment, and session authority. Chunk owns generated-block verification, block deltas, mining, and delegation hooks. Guardian owns region registration and proof state. Backpack owns portable resource records. Market owns listings and settlement state.
+The program set is deliberately split by gameplay domain. Core stores sealed world and economy configuration. Player owns identity, position, equipment, and session authority. Chunk owns generated-block verification, block deltas, mining, land indexes, and delegation hooks. Guardian owns region registration and proof state. Backpack owns portable resource records. Market owns listings, treasury-issued contract balances, and settlement state. Building reserves and consumes contracts while registering chunk-aligned land, then stores versioned NCM3 building manifests and shards.
 
 This layout keeps account review small. A change to marketplace listing state should not require a reviewer to re-audit player sessions. A change to chunk verification should stay visible next to the SDK decoder and tests that depend on the same byte layout.
 
@@ -36,7 +36,7 @@ That is the review path future contributors should follow. The repository should
 
 - Immutable public configuration: the core program stores fixed world and economy parameters, including hashes for terrain and resource rules, so clients can compare runtime behavior against public configuration.
 - Native Solana account layouts: each program uses compact byte layouts and explicit PDA seeds rather than framework-generated account metadata.
-- Program boundaries mirror gameplay domains: player identity, chunk state, Guardian coverage, backpack inventory, and market listings are isolated so future upgrades can target the smallest possible surface.
+- Program boundaries mirror gameplay domains: player identity, chunk state, Guardian coverage, backpack inventory, market settlement, and building storage are isolated so future upgrades can target the smallest possible surface.
 - Frontend compatibility is treated as a contract: SDK decoders and scripts are kept near program sources so layout changes are visible during development.
 
 ## How It Works
@@ -45,6 +45,18 @@ That is the review path future contributors should follow. The repository should
 - Use the scripts directory to derive PDAs and initialize chain state from the same constants used by the SDK.
 - Run focused tests for layout and instruction behavior before publishing new program IDs or account layout changes.
 - When a layout changes, update the matching SDK decoder and the contract directory page in the same development cycle.
+
+## Land Contract Lifecycle
+
+- A player joins the market once to create the owner-funded `market-user-v1` PDA.
+- The Market program sells blank land contracts from the NICECHUNK treasury at a fixed price of `1 NCK` each. Treasury sales do not create Listing PDAs.
+- One blank land contract represents one complete `16 x 16` horizontal chunk. A rectangular parcel consumes `chunksX * chunksZ` contracts, with a protocol limit of `4,096` contracts per parcel.
+- Creating a `build-site-v3` PDA moves the required balance into a reserved counter before any chunk index is committed.
+- The Building program registers `foundation-chunk-v3` indexes in deterministic batches. The final batch consumes the reservation atomically with BuildSite activation.
+- If indexing cannot finish, cancellation removes committed indexes in reverse order and restores the complete reservation before closing the incomplete BuildSite.
+- Active land cannot be resized or canceled. Buildings use the separate `building-v3` manifest namespace and remain bound to one active parcel.
+
+The retired Blueprint inventory and v2 foundation/building namespaces are not accepted by the new flow. Legacy Blueprint backpack records are filtered and compacted during later inventory writes; old v2 accounts remain historical chain data but are not loaded as active land or buildings.
 
 ## Why This Project Matters
 

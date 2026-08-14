@@ -55,6 +55,7 @@ use state::{
 declare_id!("GnVKn442KDTDgCyjVG7SEtCQQLjaCiLvrEZDWSU13wbj");
 
 const PLAYER_SKILLS_SEED: &[u8] = b"player-skills-v2";
+const GLOBAL_CONFIG_SEED: &[u8] = b"global-config";
 const PLAYER_SKILLS_MAGIC: [u8; 8] = *b"NCKSKL02";
 const PLAYER_SKILLS_VERSION: u16 = 2;
 const PLAYER_SKILLS_LEN: usize = 480;
@@ -1920,7 +1921,7 @@ fn reject_foundation_protected_blocks(
     Ok(())
 }
 
-const BUILDING_CHUNK_AUTHORITY_SEED: &[u8] = b"chunk-authority-v1";
+const BUILDING_CHUNK_AUTHORITY_SEED: &[u8] = b"chunk-authority-v2";
 const FOUNDATION_REGISTRATION_LEN: usize = 67;
 const FOUNDATION_OPERATION_UPSERT: u8 = 0;
 const FOUNDATION_OPERATION_REMOVE: u8 = 1;
@@ -1988,8 +1989,12 @@ impl FoundationRegistrationArgs {
         let operation = payload[66];
         if record.owner == Pubkey::default()
             || record.foundation_id == 0
-            || record.width < 2
-            || record.depth < 2
+            || record.width < 16
+            || record.depth < 16
+            || record.width % 16 != 0
+            || record.depth % 16 != 0
+            || record.min_x.rem_euclid(16) != 0
+            || record.min_z.rem_euclid(16) != 0
             || record.max_x().is_none()
             || record.max_z().is_none()
             || operation != FOUNDATION_OPERATION_UPSERT && operation != FOUNDATION_OPERATION_REMOVE
@@ -2491,6 +2496,13 @@ fn validate_global_config(
         global_config.owner,
         &NICECHUNK_CORE_PROGRAM_ID,
         NicechunkChunkError::InvalidGlobalConfigOwner,
+    )?;
+    let (expected, _) =
+        Pubkey::find_program_address(&[GLOBAL_CONFIG_SEED], &NICECHUNK_CORE_PROGRAM_ID);
+    require_key_eq(
+        global_config.key,
+        &expected,
+        NicechunkChunkError::InvalidGlobalConfigData,
     )?;
     let data = global_config.try_borrow_data()?;
     GlobalConfigView::unpack(&data).map_err(Into::into)

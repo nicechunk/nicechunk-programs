@@ -9,6 +9,7 @@ members = [
   "programs/nicechunk_market",
   "programs/nicechunk_smelting",
   "programs/nicechunk_skills",
+  "programs/nicechunk_building",
 ]
 resolver = "2"
 

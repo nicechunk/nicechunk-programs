@@ -21,18 +21,16 @@ pub mod errors;
 pub mod state;
 
 use cluster_config::{
-    NICECHUNK_BLUEPRINT_ISSUER, NICECHUNK_BOOTSTRAP_AUTHORITY, NICECHUNK_CHUNK_PROGRAM_ID,
-    NICECHUNK_CORE_PROGRAM_ID, NICECHUNK_MARKET_PROGRAM_ID, NICECHUNK_PLAYER_PROGRAM_ID,
-    NICECHUNK_SKILLS_PROGRAM_ID, NICECHUNK_SMELTING_PROGRAM_ID,
+    NICECHUNK_BOOTSTRAP_AUTHORITY, NICECHUNK_CHUNK_PROGRAM_ID, NICECHUNK_CORE_PROGRAM_ID,
+    NICECHUNK_MARKET_PROGRAM_ID, NICECHUNK_PLAYER_PROGRAM_ID, NICECHUNK_SKILLS_PROGRAM_ID,
+    NICECHUNK_SMELTING_PROGRAM_ID,
 };
 use errors::{require_key_eq, NicechunkBackpackError};
 use state::{
     verified_forge_design, BackpackAccount, BackpackInitArgs, BackpackResourceRecord,
-    BackpackSlotRecord, BlueprintItemAccount, ForgeMaterialRequirements, ForgedItemAccount,
-    ForgedItemInitArgs, MaterialPhysicsTableState, MaterialPhysicsTableView, PlayerEquipmentView,
-    PlayerProfileView, PlayerSessionView, BACKPACK_BLUEPRINT_ITEM_CODE, BACKPACK_DEFAULT_CAPACITY,
-    BACKPACK_ITEM_CATEGORY_BLUEPRINT, BACKPACK_ITEM_FLAG_UNIQUE, BACKPACK_SEED,
-    BACKPACK_SLOT_KIND_ITEM, BLUEPRINT_ITEM_SEED, EQUIPMENT_TRANSFER_AUTHORITY_SEED,
+    BackpackSlotRecord, ForgeMaterialRequirements, ForgedItemAccount, ForgedItemInitArgs,
+    MaterialPhysicsTableState, MaterialPhysicsTableView, PlayerEquipmentView, PlayerProfileView,
+    PlayerSessionView, BACKPACK_DEFAULT_CAPACITY, BACKPACK_SEED, EQUIPMENT_TRANSFER_AUTHORITY_SEED,
     FORGED_ITEM_SEED, MATERIAL_PHYSICS_SEED, MAX_VERIFIED_FORGE_CODE_BYTES,
     SESSION_ACTION_BREAK_BLOCK,
 };
@@ -85,7 +83,7 @@ pub fn process_instruction(
         6 => append_mined_resources_batch(program_id, accounts, payload),
         7 => Err(NicechunkBackpackError::UnverifiedForgeInstructionDisabled.into()),
         8 => forge_equipment_with_material_verification(program_id, accounts, payload),
-        9 => issue_blueprint(program_id, accounts, payload),
+        9 => Err(NicechunkBackpackError::InvalidInstruction.into()),
         10 => transfer_backpack_item_to_equipment(program_id, accounts, payload),
         11 => transfer_equipment_item_to_backpack(program_id, accounts, payload),
         12 => configure_material_physics(program_id, accounts, payload),
@@ -470,6 +468,9 @@ fn transfer_backpack_item_to_equipment(
     };
     let clock = Clock::get()?;
     let mut backpack_data = backpack.try_borrow_mut_data()?;
+    if BackpackAccount::slot_at(&backpack_data, backpack_index)?.is_retired_blueprint() {
+        return Err(NicechunkBackpackError::InvalidInventoryItem.into());
+    }
     if let Some(previous) = previous_equipment {
         let physics_data = material_physics.try_borrow_data()?;
         MaterialPhysicsTableView::new(&physics_data)?.validate_mass(&previous)?;
@@ -564,108 +565,6 @@ fn validate_equipment_transfer_accounts(
     let equipment_data = player_equipment.try_borrow_data()?;
     PlayerEquipmentView::validate(&equipment_data, player_equipment.key, owner.key)
         .map_err(Into::into)
-}
-
-fn issue_blueprint(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8]) -> ProgramResult {
-    if accounts.len() != 5 || payload.len() != 8 {
-        return Err(NicechunkBackpackError::InvalidInstruction.into());
-    }
-    let item_id = read_u64(payload, 0);
-    if item_id == 0 {
-        return Err(NicechunkBackpackError::InvalidBlueprintItem.into());
-    }
-
-    let account_info_iter = &mut accounts.iter();
-    let issuer = next_account_info(account_info_iter)?;
-    let recipient = next_account_info(account_info_iter)?;
-    let backpack = next_account_info(account_info_iter)?;
-    let blueprint_item = next_account_info(account_info_iter)?;
-    let system_program_account = next_account_info(account_info_iter)?;
-
-    validate_blueprint_issuer(issuer)?;
-    if !backpack.is_writable || !blueprint_item.is_writable {
-        return Err(NicechunkBackpackError::InvalidWritableAccount.into());
-    }
-    require_key_eq(
-        system_program_account.key,
-        &system_program::ID,
-        NicechunkBackpackError::InvalidSystemProgram,
-    )?;
-    require_key_eq(
-        backpack.owner,
-        program_id,
-        NicechunkBackpackError::InvalidBackpackOwner,
-    )?;
-    validate_existing_backpack_pda(program_id, backpack, recipient.key)?;
-
-    let item_id_bytes = item_id.to_le_bytes();
-    let (expected_blueprint, bump) =
-        Pubkey::find_program_address(&[BLUEPRINT_ITEM_SEED, &item_id_bytes], program_id);
-    require_key_eq(
-        blueprint_item.key,
-        &expected_blueprint,
-        NicechunkBackpackError::InvalidBlueprintPda,
-    )?;
-    if blueprint_item.owner == program_id {
-        return Err(NicechunkBackpackError::BlueprintAlreadyIssued.into());
-    }
-    if blueprint_item.owner != &system_program::ID || blueprint_item.data_len() != 0 {
-        return Err(NicechunkBackpackError::InvalidSystemAccount.into());
-    }
-
-    create_blueprint_item_pda(
-        issuer,
-        blueprint_item,
-        system_program_account,
-        program_id,
-        item_id,
-        bump,
-    )?;
-
-    let clock = Clock::get()?;
-    {
-        let mut data = blueprint_item.try_borrow_mut_data()?;
-        BlueprintItemAccount::pack(
-            &mut data,
-            bump,
-            item_id,
-            recipient.key,
-            issuer.key,
-            clock.slot,
-        )?;
-    }
-
-    let mut record = BackpackSlotRecord {
-        kind: BACKPACK_SLOT_KIND_ITEM,
-        category: BACKPACK_ITEM_CATEGORY_BLUEPRINT,
-        flags: BACKPACK_ITEM_FLAG_UNIQUE,
-        quantity: 1,
-        resource: BackpackResourceRecord::default(),
-        item_code: BACKPACK_BLUEPRINT_ITEM_CODE,
-        item_id,
-        item_pda: *blueprint_item.key,
-        volume_mm3: 1,
-        durability_current: 1,
-        durability_max: 1,
-        grade: 1,
-        item_level: 1,
-        quality_bps: 10_000,
-        metadata: 0,
-    };
-    record.set_mass_grams(0)?;
-    let mut backpack_data = backpack.try_borrow_mut_data()?;
-    BackpackAccount::append_issued_item(&mut backpack_data, recipient.key, &record, clock.slot)
-}
-
-fn validate_blueprint_issuer(issuer: &AccountInfo) -> ProgramResult {
-    if !issuer.is_signer || !issuer.is_writable {
-        return Err(NicechunkBackpackError::InvalidBlueprintIssuer.into());
-    }
-    require_key_eq(
-        issuer.key,
-        &NICECHUNK_BLUEPRINT_ISSUER,
-        NicechunkBackpackError::InvalidBlueprintIssuer,
-    )
 }
 
 fn initialize_backpack(
@@ -1699,35 +1598,6 @@ fn create_material_physics_pda<'a>(
         &[
             authority.clone(),
             material_physics.clone(),
-            system_program_account.clone(),
-        ],
-        &[seeds],
-    )
-}
-
-fn create_blueprint_item_pda<'a>(
-    issuer: &AccountInfo<'a>,
-    blueprint_item: &AccountInfo<'a>,
-    system_program_account: &AccountInfo<'a>,
-    program_id: &Pubkey,
-    item_id: u64,
-    bump: u8,
-) -> ProgramResult {
-    let item_id_bytes = item_id.to_le_bytes();
-    let seeds = &[BLUEPRINT_ITEM_SEED, &item_id_bytes, &[bump]];
-    let rent = Rent::get()?;
-    let create = system_instruction::create_account(
-        issuer.key,
-        blueprint_item.key,
-        rent.minimum_balance(BlueprintItemAccount::LEN),
-        BlueprintItemAccount::LEN as u64,
-        program_id,
-    );
-    invoke_signed(
-        &create,
-        &[
-            issuer.clone(),
-            blueprint_item.clone(),
             system_program_account.clone(),
         ],
         &[seeds],

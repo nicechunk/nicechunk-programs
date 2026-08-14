@@ -45,9 +45,9 @@ pub const BACKPACK_VERSION: u16 = 4;
 pub const BACKPACK_LEN: usize = 8_048;
 pub const BACKPACK_OWNER_OFFSET: usize = 20;
 pub const BACKPACK_LAST_MINE_ACTION_ID_OFFSET: usize = 106;
-pub const FOUNDATION_CHUNK_MAGIC: [u8; 8] = *b"NCKFCI02";
-pub const FOUNDATION_CHUNK_VERSION: u8 = 2;
-pub const FOUNDATION_CHUNK_SEED: &[u8] = b"foundation-chunk-v2";
+pub const FOUNDATION_CHUNK_MAGIC: [u8; 8] = *b"NCKFCI03";
+pub const FOUNDATION_CHUNK_VERSION: u8 = 3;
+pub const FOUNDATION_CHUNK_SEED: &[u8] = b"foundation-chunk-v3";
 pub const FOUNDATION_CHUNK_HEADER_LEN: usize = 56;
 pub const FOUNDATION_CHUNK_RECORD_LEN: usize = 58;
 pub const FOUNDATION_CHUNK_INITIAL_CAPACITY: u16 = 4;
@@ -1994,11 +1994,12 @@ pub struct FoundationRecord {
 }
 
 impl FoundationRecord {
+    const LAND_CHUNK_SIZE: u32 = 16;
+
     pub fn pack(&self, dst: &mut [u8]) -> ProgramResult {
         if dst.len() != FOUNDATION_CHUNK_RECORD_LEN
             || self.foundation_id == 0
-            || self.width < 2
-            || self.depth < 2
+            || !self.is_chunk_aligned()
             || self.max_x().is_none()
             || self.max_z().is_none()
         {
@@ -2033,8 +2034,7 @@ impl FoundationRecord {
             depth: read_u32(src, 54),
         };
         if record.foundation_id == 0
-            || record.width < 2
-            || record.depth < 2
+            || !record.is_chunk_aligned()
             || record.max_x().is_none()
             || record.max_z().is_none()
         {
@@ -2049,6 +2049,15 @@ impl FoundationRecord {
 
     pub fn max_z(&self) -> Option<i32> {
         checked_u32_axis_end(self.min_z, self.depth)
+    }
+
+    fn is_chunk_aligned(&self) -> bool {
+        self.width >= Self::LAND_CHUNK_SIZE
+            && self.depth >= Self::LAND_CHUNK_SIZE
+            && self.width % Self::LAND_CHUNK_SIZE == 0
+            && self.depth % Self::LAND_CHUNK_SIZE == 0
+            && self.min_x.rem_euclid(Self::LAND_CHUNK_SIZE as i32) == 0
+            && self.min_z.rem_euclid(Self::LAND_CHUNK_SIZE as i32) == 0
     }
 
     pub fn protects(&self, world_x: i32, world_y: i16, world_z: i32) -> bool {
@@ -2145,6 +2154,9 @@ impl FoundationChunkState {
             }
         }
         if let Some(index) = existing_index {
+            if Self::record_at(data, index)? != *record {
+                return Err(NicechunkChunkError::InvalidFoundationChunkData.into());
+            }
             let offset = FOUNDATION_CHUNK_HEADER_LEN + index * FOUNDATION_CHUNK_RECORD_LEN;
             return record.pack(&mut data[offset..offset + FOUNDATION_CHUNK_RECORD_LEN]);
         }
@@ -3924,26 +3936,26 @@ mod tests {
         let record = FoundationRecord {
             owner: Pubkey::new_unique(),
             foundation_id: 901,
-            min_x: -300,
-            min_z: 700,
+            min_x: -304,
+            min_z: 688,
             surface_y: 140,
             width: 1_024,
-            depth: 513,
+            depth: 528,
         };
         let mut data = vec![0_u8; FoundationChunkState::len(4).unwrap()];
         FoundationChunkState::pack_empty(&mut data, 9, &global_config, -19, 43, 4).unwrap();
         FoundationChunkState::append(&mut data, &global_config, -19, 43, &record).unwrap();
 
         assert!(
-            FoundationChunkState::protects(&data, &global_config, -19, 43, 723, 139, 1_212,)
+            FoundationChunkState::protects(&data, &global_config, -19, 43, 719, 139, 1_212,)
                 .unwrap()
         );
         assert!(
-            !FoundationChunkState::protects(&data, &global_config, -19, 43, 723, 140, 1_212,)
+            !FoundationChunkState::protects(&data, &global_config, -19, 43, 719, 140, 1_212,)
                 .unwrap()
         );
         assert!(
-            !FoundationChunkState::protects(&data, &global_config, -19, 43, 724, 139, 1_212,)
+            !FoundationChunkState::protects(&data, &global_config, -19, 43, 720, 139, 1_212,)
                 .unwrap()
         );
     }
@@ -3970,23 +3982,23 @@ mod tests {
             (1, 4)
         );
 
-        let resized = FoundationRecord {
+        let changed_geometry = FoundationRecord {
             width: 16,
             depth: 16,
             ..original
         };
-        FoundationChunkState::append(&mut data, &global_config, 0, 0, &resized).unwrap();
         assert_eq!(
-            FoundationChunkState::records(&data, &global_config, 0, 0).unwrap(),
-            vec![resized]
+            FoundationChunkState::append(&mut data, &global_config, 0, 0, &changed_geometry)
+                .unwrap_err(),
+            NicechunkChunkError::InvalidFoundationChunkData.into()
         );
 
         let overlap = FoundationRecord {
             foundation_id: 11,
-            min_x: 15,
-            min_z: 15,
-            width: 2,
-            depth: 2,
+            min_x: 16,
+            min_z: 16,
+            width: 16,
+            depth: 16,
             ..original
         };
         assert_eq!(
@@ -3996,10 +4008,10 @@ mod tests {
 
         let adjacent = FoundationRecord {
             foundation_id: 12,
-            min_x: 16,
+            min_x: 32,
             min_z: 0,
-            width: 2,
-            depth: 2,
+            width: 16,
+            depth: 16,
             ..original
         };
         FoundationChunkState::append(&mut data, &global_config, 0, 0, &adjacent).unwrap();

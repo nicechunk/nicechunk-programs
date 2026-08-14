@@ -885,6 +885,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nicechunk_building"
+version = "0.1.0"
+dependencies = [
+ "solana-program",
+]
+
+[[package]]
 name = "nicechunk_chunk"
 version = "0.1.0"
 dependencies = [

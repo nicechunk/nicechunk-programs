@@ -4,8 +4,6 @@ pub const NICECHUNK_CORE_PROGRAM_ID: Pubkey =
     pubkey!("9EhMCRYMJej1F21KzaA5Zao3khGGc5aJbDGbnxaogQHu");
 pub const NICECHUNK_PLAYER_PROGRAM_ID: Pubkey =
     pubkey!("CHZHsBCGn58ih2WrPfKSYhvCEjMPGhArTiYCH7AWWBkB");
-pub const NICECHUNK_BLUEPRINT_ISSUER: Pubkey =
-    pubkey!("9XuoVVwqP2jipt3jpJVXCSS2N2jr9vDuV3d6K73FKVud");
 pub const NICECHUNK_BOOTSTRAP_AUTHORITY: Pubkey =
     pubkey!("9XuoVVwqP2jipt3jpJVXCSS2N2jr9vDuV3d6K73FKVud");
 pub const NICECHUNK_SKILLS_PROGRAM_ID: Pubkey =
