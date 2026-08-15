@@ -49,7 +49,7 @@ That is the review path future contributors should follow. The repository should
 ## Land Contract Lifecycle
 
 - A player joins the market once to create the owner-funded `market-user-v1` PDA.
-- The Market program sells blank land contracts from the NICECHUNK treasury at a fixed price of `1 NCK` each. Treasury sales do not create Listing PDAs.
+- The Market program sells blank land contracts from the NICECHUNK treasury at a fixed price of `10 NCK` each. Treasury sales do not create Listing PDAs.
 - One blank land contract represents one complete `16 x 16` horizontal chunk. A rectangular parcel consumes `chunksX * chunksZ` contracts, with a protocol limit of `4,096` contracts per parcel.
 - Creating a `build-site-v3` PDA moves the required balance into a reserved counter before any chunk index is committed.
 - The Building program registers `foundation-chunk-v3` indexes in deterministic batches. The final batch consumes the reservation atomically with BuildSite activation.

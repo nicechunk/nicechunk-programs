@@ -81,7 +81,7 @@ const PLAYER_EQUIPMENT_RECORD_BACKPACK_SLOT_OFFSET: usize = 40;
 const PLAYER_EQUIPMENT_FLAG_CUSTODY: u8 = 1 << 1;
 const MARKET_FEE_BPS: u16 = 100;
 const BPS_DENOMINATOR: u64 = 10_000;
-pub const BLANK_LAND_CONTRACT_PRICE_BASE_UNITS: u64 = 1_000_000;
+pub const BLANK_LAND_CONTRACT_PRICE_BASE_UNITS: u64 = 10_000_000;
 pub const LAND_CONTRACT_AUTHORITY_SEED: &[u8] = b"land-contract-authority-v1";
 const GLOBAL_CONFIG_SEED: &[u8] = b"global-config";
 
@@ -192,9 +192,7 @@ fn buy_treasury_contract(
     validate_existing_market_user(program_id, market_user, buyer.key)?;
     validate_token_account(buyer_nck_token, &NCK_MINT, buyer.key)?;
     validate_token_account(treasury_nck_token, &NCK_MINT, &MARKET_TREASURY)?;
-    let payment = BLANK_LAND_CONTRACT_PRICE_BASE_UNITS
-        .checked_mul(u64::from(args.quantity))
-        .ok_or(NicechunkMarketError::InvalidContractQuantity)?;
+    let payment = blank_land_contract_payment(args.quantity)?;
     transfer_nck(
         buyer_nck_token,
         treasury_nck_token,
@@ -207,6 +205,12 @@ fn buy_treasury_contract(
     let mut data = market_user.try_borrow_mut_data()?;
     MarketUserState::validate(&data, buyer.key)?;
     MarketUserState::credit_blank_land_contracts(&mut data, args.quantity, clock.slot)
+}
+
+fn blank_land_contract_payment(quantity: u32) -> Result<u64, NicechunkMarketError> {
+    BLANK_LAND_CONTRACT_PRICE_BASE_UNITS
+        .checked_mul(u64::from(quantity))
+        .ok_or(NicechunkMarketError::InvalidContractQuantity)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -312,10 +316,15 @@ mod land_contract_tests {
     }
 
     #[test]
-    fn blank_land_contract_price_is_exactly_one_nck() {
+    fn blank_land_contract_price_is_exactly_ten_nck() {
         assert_eq!(
             BLANK_LAND_CONTRACT_PRICE_BASE_UNITS,
-            10_u64.pow(NCK_DECIMALS as u32)
+            10 * 10_u64.pow(NCK_DECIMALS as u32)
+        );
+        assert_eq!(blank_land_contract_payment(1).unwrap(), 10_000_000);
+        assert_eq!(
+            blank_land_contract_payment(MAX_CONTRACT_PURCHASE_QUANTITY).unwrap(),
+            40_960_000_000
         );
     }
 

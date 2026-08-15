@@ -21,7 +21,7 @@ NiceChunk Solana native programs and chain operation scripts.
 ### Current Status
 
 - Generated from the main NiceChunk working tree.
-- Added treasury-issued blank land contracts at a fixed `1 NCK` price, with available and reserved balances in `market-user-v1`.
+- Added treasury-issued blank land contracts, now priced at a fixed `10 NCK`, with available and reserved balances in `market-user-v1`.
 - Added recoverable chunk-aligned land registration through `build-site-v3` and `foundation-chunk-v3`, capped at `4,096` contracts per parcel.
 - Added versioned NCM3 building manifests and shards bound to active land while retiring Blueprint inventory issuance and v2 construction discovery.
 - Apache-2.0 license metadata is included in `LICENSE`, `NOTICE`, and `docs/license-status.md`.
