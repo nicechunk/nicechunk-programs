@@ -58,6 +58,12 @@ That is the review path future contributors should follow. The repository should
 
 The retired Blueprint inventory and v2 foundation/building namespaces are not accepted by the new flow. Legacy Blueprint backpack records are filtered and compacted during later inventory writes; old v2 accounts remain historical chain data but are not loaded as active land or buildings.
 
+## Treasury Swap
+
+The Market domain also includes an opt-in fixed-rate `SOL <-> NCK` treasury exchange. User trades settle atomically against program-controlled SOL and NCK reserve PDAs; only the fixed NICECHUNK treasury wallet may configure, pause, fund, or withdraw those reserves. Every trade commits to a configuration revision, deadline slot, and minimum output, and all value math uses checked integer arithmetic with conservative rounding.
+
+Initialization is deliberately paused and contains no guessed exchange rate. Reserve withdrawals require a paused exchange, and activation verifies that both PDA reserves cover the configured maximum single trade. See [Treasury Swap](docs/treasury-swap.md) for the custody model, account seeds, formulas, dry-run administrator workflow, and activation checklist. TypeScript account decoding and instruction builders are in [`sdk/nicechunk-market.ts`](sdk/nicechunk-market.ts).
+
 ## Why This Project Matters
 
 NiceChunk depends on verifiable game state. This repository provides the part of the system that cannot be replaced by UI code: public account ownership, deterministic PDAs, explicit state transitions, and economic settlement primitives.

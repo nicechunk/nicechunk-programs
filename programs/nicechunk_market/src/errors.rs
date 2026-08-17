@@ -45,6 +45,23 @@ pub enum NicechunkMarketError {
     InvalidContractAuthority = 6642,
     InsufficientReservedLandContracts = 6643,
     InvalidGlobalConfig = 6644,
+    InvalidSwapState = 6645,
+    InvalidSwapAuthority = 6646,
+    InvalidSwapSolVault = 6647,
+    InvalidSwapNckVault = 6648,
+    SwapAlreadyInitialized = 6649,
+    InvalidSwapConfig = 6650,
+    SwapPaused = 6651,
+    SwapConfigRevisionMismatch = 6652,
+    SwapDeadlineExpired = 6653,
+    SwapAmountOutTooLow = 6654,
+    SwapAmountOutsideLimits = 6655,
+    InsufficientSwapLiquidity = 6656,
+    SwapMathOverflow = 6657,
+    UnauthorizedSwapAdmin = 6658,
+    InvalidSwapAmount = 6659,
+    SwapStateOverflow = 6660,
+    SwapMustBePaused = 6661,
 }
 
 impl From<NicechunkMarketError> for ProgramError {

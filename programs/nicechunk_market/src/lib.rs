@@ -20,6 +20,7 @@ pub mod cluster_config;
 pub mod errors;
 pub mod membership;
 pub mod state;
+pub mod treasury_swap;
 
 use cluster_config::{
     MARKET_TREASURY, NCK_MINT, NICECHUNK_BACKPACK_PROGRAM_ID, NICECHUNK_BUILDING_PROGRAM_ID,
@@ -34,7 +35,7 @@ use state::{
     SOURCE_BACKPACK, SOURCE_EQUIPMENT,
 };
 
-const NCK_DECIMALS: u8 = 6;
+pub(crate) const NCK_DECIMALS: u8 = 6;
 const TOKEN_ACCOUNT_MIN_LEN: usize = 165;
 const TOKEN_ACCOUNT_MINT_OFFSET: usize = 0;
 const TOKEN_ACCOUNT_OWNER_OFFSET: usize = 32;
@@ -123,6 +124,14 @@ pub fn process_instruction(
             payload,
             LandContractReservationOperation::Release,
         ),
+        8 => treasury_swap::initialize_treasury_swap(program_id, accounts, payload),
+        9 => treasury_swap::configure_treasury_swap(program_id, accounts, payload),
+        10 => treasury_swap::deposit_treasury_swap_sol(program_id, accounts, payload),
+        11 => treasury_swap::withdraw_treasury_swap_sol(program_id, accounts, payload),
+        12 => treasury_swap::deposit_treasury_swap_nck(program_id, accounts, payload),
+        13 => treasury_swap::withdraw_treasury_swap_nck(program_id, accounts, payload),
+        14 => treasury_swap::swap_sol_for_nck(program_id, accounts, payload),
+        15 => treasury_swap::swap_nck_for_sol(program_id, accounts, payload),
         _ => Err(NicechunkMarketError::InvalidInstruction.into()),
     }
 }
