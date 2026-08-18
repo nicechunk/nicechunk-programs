@@ -6,7 +6,8 @@ import {
   Connection,
   Keypair,
   PublicKey,
-  Transaction,
+  TransactionMessage,
+  VersionedTransaction,
   type TransactionInstruction,
 } from "@solana/web3.js";
 import {
@@ -210,12 +211,13 @@ if (!admin.publicKey.equals(NICECHUNK_MARKET_TREASURY)) {
 
 const signatures: Array<{ phase: string; signature: string }> = [];
 for (const phase of phases) {
-  const transaction = new Transaction().add(...phase.instructions);
-  transaction.feePayer = admin.publicKey;
   const latest = await connection.getLatestBlockhash("confirmed");
-  transaction.recentBlockhash = latest.blockhash;
-  transaction.lastValidBlockHeight = latest.lastValidBlockHeight;
-  transaction.sign(admin);
+  const transaction = new VersionedTransaction(new TransactionMessage({
+    payerKey: admin.publicKey,
+    recentBlockhash: latest.blockhash,
+    instructions: phase.instructions,
+  }).compileToV0Message());
+  transaction.sign([admin]);
   const simulation = await connection.simulateTransaction(transaction, {
     commitment: "confirmed",
     sigVerify: true,
