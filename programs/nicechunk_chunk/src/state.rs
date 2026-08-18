@@ -2060,12 +2060,20 @@ impl FoundationRecord {
             && self.min_z.rem_euclid(Self::LAND_CHUNK_SIZE as i32) == 0
     }
 
-    pub fn protects(&self, world_x: i32, world_y: i16, world_z: i32) -> bool {
-        world_y == self.surface_y.saturating_sub(1)
-            && world_x >= self.min_x
+    pub fn contains_column(&self, world_x: i32, world_z: i32) -> bool {
+        world_x >= self.min_x
             && self.max_x().map(|max| world_x <= max).unwrap_or(false)
             && world_z >= self.min_z
             && self.max_z().map(|max| world_z <= max).unwrap_or(false)
+    }
+
+    pub fn rejects_modification_by(
+        &self,
+        actor_owner: &Pubkey,
+        world_x: i32,
+        world_z: i32,
+    ) -> bool {
+        self.owner != *actor_owner && self.contains_column(world_x, world_z)
     }
 
     pub fn overlaps(&self, other: &Self) -> bool {
@@ -2225,38 +2233,39 @@ impl FoundationChunkState {
         Ok(())
     }
 
-    pub fn protects(
+    pub fn rejects_modification_by(
         data: &[u8],
         global_config: &Pubkey,
         chunk_x: i32,
         chunk_z: i32,
+        actor_owner: &Pubkey,
         world_x: i32,
-        world_y: i16,
         world_z: i32,
     ) -> Result<bool, NicechunkChunkError> {
         let (count, _) = Self::validate(data, global_config, chunk_x, chunk_z)?;
         for index in 0..count as usize {
-            if Self::record_at(data, index)?.protects(world_x, world_y, world_z) {
+            if Self::record_at(data, index)?.rejects_modification_by(actor_owner, world_x, world_z)
+            {
                 return Ok(true);
             }
         }
         Ok(false)
     }
 
-    pub fn protects_any(
+    pub fn rejects_any_modification_by(
         data: &[u8],
         global_config: &Pubkey,
         chunk_x: i32,
         chunk_z: i32,
+        actor_owner: &Pubkey,
         blocks: &[MineBlockArgs],
     ) -> Result<bool, NicechunkChunkError> {
         let (count, _) = Self::validate(data, global_config, chunk_x, chunk_z)?;
         for index in 0..count as usize {
             let record = Self::record_at(data, index)?;
-            if blocks
-                .iter()
-                .any(|block| record.protects(block.world_x, block.world_y, block.world_z))
-            {
+            if blocks.iter().any(|block| {
+                record.rejects_modification_by(actor_owner, block.world_x, block.world_z)
+            }) {
                 return Ok(true);
             }
         }
@@ -3931,10 +3940,12 @@ mod tests {
     }
 
     #[test]
-    fn foundation_chunk_supports_large_footprints_and_only_protects_the_base_layer() {
+    fn foundation_chunk_allows_owner_and_rejects_other_wallets_across_the_full_column() {
         let global_config = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let other_wallet = Pubkey::new_unique();
         let record = FoundationRecord {
-            owner: Pubkey::new_unique(),
+            owner,
             foundation_id: 901,
             min_x: -304,
             min_z: 688,
@@ -3946,18 +3957,88 @@ mod tests {
         FoundationChunkState::pack_empty(&mut data, 9, &global_config, -19, 43, 4).unwrap();
         FoundationChunkState::append(&mut data, &global_config, -19, 43, &record).unwrap();
 
-        assert!(
-            FoundationChunkState::protects(&data, &global_config, -19, 43, 719, 139, 1_212,)
-                .unwrap()
-        );
-        assert!(
-            !FoundationChunkState::protects(&data, &global_config, -19, 43, 719, 140, 1_212,)
-                .unwrap()
-        );
-        assert!(
-            !FoundationChunkState::protects(&data, &global_config, -19, 43, 720, 139, 1_212,)
-                .unwrap()
-        );
+        assert!(FoundationChunkState::rejects_modification_by(
+            &data,
+            &global_config,
+            -19,
+            43,
+            &other_wallet,
+            719,
+            1_212,
+        )
+        .unwrap());
+        assert!(!FoundationChunkState::rejects_modification_by(
+            &data,
+            &global_config,
+            -19,
+            43,
+            &owner,
+            719,
+            1_212,
+        )
+        .unwrap());
+        assert!(!FoundationChunkState::rejects_modification_by(
+            &data,
+            &global_config,
+            -19,
+            43,
+            &other_wallet,
+            720,
+            1_212,
+        )
+        .unwrap());
+
+        let blocks = [
+            MineBlockArgs {
+                world_x: 719,
+                world_y: -20,
+                world_z: 1_212,
+                expected_block_id: BLOCK_STONE,
+            },
+            MineBlockArgs {
+                world_x: -304,
+                world_y: 255,
+                world_z: 688,
+                expected_block_id: BLOCK_STONE,
+            },
+        ];
+        assert!(FoundationChunkState::rejects_any_modification_by(
+            &data,
+            &global_config,
+            -19,
+            43,
+            &other_wallet,
+            &blocks,
+        )
+        .unwrap());
+        assert!(!FoundationChunkState::rejects_any_modification_by(
+            &data,
+            &global_config,
+            -19,
+            43,
+            &owner,
+            &blocks,
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn empty_foundation_chunk_allows_modification_at_negative_coordinates() {
+        let global_config = Pubkey::new_unique();
+        let actor = Pubkey::new_unique();
+        let mut data = vec![0_u8; FoundationChunkState::len(2).unwrap()];
+        FoundationChunkState::pack_empty(&mut data, 4, &global_config, -2, -3, 2).unwrap();
+
+        assert!(!FoundationChunkState::rejects_modification_by(
+            &data,
+            &global_config,
+            -2,
+            -3,
+            &actor,
+            -17,
+            -33,
+        )
+        .unwrap());
     }
 
     #[test]

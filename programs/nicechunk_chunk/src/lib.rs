@@ -379,6 +379,7 @@ fn mine_block(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8]) -> 
         global_config,
         chunk_x,
         chunk_z,
+        &context.owner,
         &args,
     )?;
     let bump = validate_chunk_broken_pda(
@@ -475,6 +476,7 @@ fn place_block(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8]) ->
         global_config,
         chunk_x,
         chunk_z,
+        &context.owner,
         &block,
     )?;
     let packed = pack_broken_coord(local_x, block.world_y, local_z, context.config.min_build_y)?;
@@ -646,6 +648,7 @@ fn mine_placed_block(
         global_config,
         chunk_x,
         chunk_z,
+        &context.owner,
         &args,
     )?;
     let bump = validate_chunk_placed_pda(
@@ -765,6 +768,7 @@ fn mine_block_with_rewards(
         global_config,
         chunk_x,
         chunk_z,
+        &context.owner,
         &args,
     )?;
     let bump = validate_chunk_broken_pda(
@@ -1065,6 +1069,7 @@ fn batch_mine_with_rewards(
             global_config,
             chunk_x,
             chunk_z,
+            &context.owner,
             block,
         )?;
 
@@ -1297,6 +1302,7 @@ fn range_mine_with_rewards(
         global_config,
         chunk_x,
         chunk_z,
+        &context.owner,
         &args.blocks,
     )?;
 
@@ -1599,7 +1605,10 @@ fn fell_tree_with_rewards(
     accounts: &[AccountInfo],
     payload: &[u8],
 ) -> ProgramResult {
-    if accounts.len() < 11 || accounts.len() > 10 + TREE_FELL_MAX_CHUNKS {
+    if accounts.len() < 12
+        || accounts.len() > 10 + TREE_FELL_MAX_CHUNKS.saturating_mul(2)
+        || (accounts.len() - 10) % 2 != 0
+    {
         return Err(NicechunkChunkError::InvalidAccountCount.into());
     }
 
@@ -1616,11 +1625,16 @@ fn fell_tree_with_rewards(
     let material_physics = &accounts[7];
     let system_program_account = &accounts[8];
     let player_skills = &accounts[9];
-    let chunk_accounts = &accounts[10..];
+    let chunk_accounts = accounts[10..]
+        .chunks_exact(2)
+        .map(|pair| (&pair[0], &pair[1]))
+        .collect::<Vec<_>>();
 
     if !player_progress.is_writable
         || !backpack.is_writable
-        || chunk_accounts.iter().any(|account| !account.is_writable)
+        || chunk_accounts
+            .iter()
+            .any(|(chunk_broken, _)| !chunk_broken.is_writable)
     {
         return Err(NicechunkChunkError::InvalidWritableAccount.into());
     }
@@ -1658,7 +1672,7 @@ fn fell_tree_with_rewards(
     let blocks =
         generated_tree_fell_blocks(global_config_view, args.world_x, args.world_y, args.world_z)?;
     let chunks = tree_fell_chunks(global_config_view, &blocks)?;
-    if chunks.len() > chunk_accounts.len() {
+    if chunks.len() != chunk_accounts.len() {
         return Err(NicechunkChunkError::InvalidAccountCount.into());
     }
 
@@ -1666,13 +1680,13 @@ fn fell_tree_with_rewards(
     let mut chunk_account_indexes = Vec::with_capacity(chunks.len());
     for (chunk_x, chunk_z) in &chunks {
         let mut matched: Option<usize> = None;
-        for (index, account) in chunk_accounts.iter().enumerate() {
+        for (index, (chunk_broken, _)) in chunk_accounts.iter().enumerate() {
             if used_accounts[index] {
                 continue;
             }
             if validate_chunk_broken_pda(
                 program_id,
-                account.key,
+                chunk_broken.key,
                 global_config.key,
                 *chunk_x,
                 *chunk_z,
@@ -1688,9 +1702,35 @@ fn fell_tree_with_rewards(
         chunk_account_indexes.push(index);
     }
 
+    for ((chunk_x, chunk_z), account_index) in chunks.iter().zip(chunk_account_indexes.iter()) {
+        let (_, foundation_chunk) = chunk_accounts[*account_index];
+        let modification_blocks = blocks
+            .iter()
+            .filter_map(|block| {
+                let (block_chunk_x, block_chunk_z, _, _) =
+                    tree_block_chunk_coords(global_config_view, block).ok()?;
+                (block_chunk_x == *chunk_x && block_chunk_z == *chunk_z).then_some(MineBlockArgs {
+                    world_x: block.world_x,
+                    world_y: block.world_y,
+                    world_z: block.world_z,
+                    expected_block_id: block.block_id,
+                })
+            })
+            .collect::<Vec<_>>();
+        reject_foundation_protected_blocks(
+            program_id,
+            foundation_chunk,
+            global_config,
+            *chunk_x,
+            *chunk_z,
+            &context.owner,
+            &modification_blocks,
+        )?;
+    }
+
     let mut explored_chunk_count_delta = 0_u32;
     for ((chunk_x, chunk_z), account_index) in chunks.iter().zip(chunk_account_indexes.iter()) {
-        let account = &chunk_accounts[*account_index];
+        let (account, _) = chunk_accounts[*account_index];
         let bump = validate_chunk_broken_pda(
             program_id,
             account.key,
@@ -1723,7 +1763,7 @@ fn fell_tree_with_rewards(
             .iter()
             .position(|(x, z)| *x == chunk_x && *z == chunk_z)
             .ok_or(NicechunkChunkError::InvalidChunkBrokenPda)?;
-        let account = &chunk_accounts[chunk_account_indexes[chunk_index]];
+        let (account, _) = chunk_accounts[chunk_account_indexes[chunk_index]];
         let packed = pack_broken_coord(
             local_x,
             block.world_y,
@@ -1814,7 +1854,7 @@ fn fell_tree_with_rewards(
     for ((chunk_x, chunk_z), account_index) in chunks.iter().zip(chunk_account_indexes.iter()) {
         let bump = validate_chunk_broken_pda(
             program_id,
-            chunk_accounts[*account_index].key,
+            chunk_accounts[*account_index].0.key,
             global_config.key,
             *chunk_x,
             *chunk_z,
@@ -1837,7 +1877,7 @@ fn fell_tree_with_rewards(
         append_backpack_block_resources_lossy(
             program_id,
             backpack_program,
-            &chunk_accounts[*account_index],
+            chunk_accounts[*account_index].0,
             global_config,
             player_profile,
             backpack,
@@ -1879,6 +1919,7 @@ fn reject_foundation_protected_block(
     global_config: &AccountInfo,
     chunk_x: i32,
     chunk_z: i32,
+    actor_owner: &Pubkey,
     args: &MineBlockArgs,
 ) -> ProgramResult {
     reject_foundation_protected_blocks(
@@ -1887,6 +1928,7 @@ fn reject_foundation_protected_block(
         global_config,
         chunk_x,
         chunk_z,
+        actor_owner,
         core::slice::from_ref(args),
     )
 }
@@ -1897,6 +1939,7 @@ fn reject_foundation_protected_blocks(
     global_config: &AccountInfo,
     chunk_x: i32,
     chunk_z: i32,
+    actor_owner: &Pubkey,
     blocks: &[MineBlockArgs],
 ) -> ProgramResult {
     validate_foundation_chunk_pda(
@@ -1915,7 +1958,14 @@ fn reject_foundation_protected_blocks(
         NicechunkChunkError::InvalidFoundationChunkData,
     )?;
     let data = foundation_chunk.try_borrow_data()?;
-    if FoundationChunkState::protects_any(&data, global_config.key, chunk_x, chunk_z, blocks)? {
+    if FoundationChunkState::rejects_any_modification_by(
+        &data,
+        global_config.key,
+        chunk_x,
+        chunk_z,
+        actor_owner,
+        blocks,
+    )? {
         return Err(NicechunkChunkError::FoundationProtected.into());
     }
     Ok(())
