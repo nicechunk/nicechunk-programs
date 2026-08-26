@@ -1,4 +1,10 @@
-import { ComputeBudgetProgram, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
+import {
+  ComputeBudgetProgram,
+  PublicKey,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
+  SystemProgram,
+  Transaction,
+} from "@solana/web3.js";
 import assert from "node:assert";
 import { readFileSync } from "node:fs";
 import {
@@ -79,6 +85,8 @@ import {
   BATCH_MINE_MODE_DEBUG,
   RANGE_MINE_MAX_BLOCKS,
   RANGE_MINE_MODE_DEBUG,
+  RANGE_MINE_MODE_SUPPORT_COLLAPSE,
+  RANGE_MINE_MODE_SUPPORT_PRIMARY,
   CHUNK_BROKEN_HEADER_LEN,
   CHUNK_BROKEN_MAGIC,
   CHUNK_BROKEN_RECORD_LEN,
@@ -695,6 +703,48 @@ describe("nicechunk player and mining SDK", () => {
     assert.equal(rangeMineIx.keys[4].pubkey.toBase58(), chunkBroken.toBase58());
     assert.equal(rangeMineIx.keys[11].pubkey.toBase58(), deriveMaterialPhysicsPda({ globalConfig })[0].toBase58());
     assert.equal(rangeMineIx.keys[12].pubkey.toBase58(), playerSkills.toBase58());
+
+    const supportPrimaryIx = createRangeMineWithRewardsInstruction({
+      payer: owner,
+      owner,
+      blocks: [rangeBlocks[0]],
+      backpack,
+      actionId: miningActionId,
+      mode: RANGE_MINE_MODE_SUPPORT_PRIMARY,
+    });
+    assert.equal(supportPrimaryIx.data.readUInt8(9), RANGE_MINE_MODE_SUPPORT_PRIMARY);
+
+    const supportCollapseIx = createRangeMineWithRewardsInstruction({
+      payer: owner,
+      owner,
+      blocks: rangeBlocks.slice(1),
+      backpack,
+      actionId: miningActionId,
+      mode: RANGE_MINE_MODE_SUPPORT_COLLAPSE,
+      supportAnchor: rangeBlocks[0],
+    });
+    assert.equal(supportCollapseIx.data.readUInt8(9), RANGE_MINE_MODE_SUPPORT_COLLAPSE);
+    assert.equal(supportCollapseIx.data.readInt32LE(supportCollapseIx.data.length - 10), 0);
+    assert.equal(supportCollapseIx.data.readInt16LE(supportCollapseIx.data.length - 6), 20);
+    assert.equal(supportCollapseIx.data.readInt32LE(supportCollapseIx.data.length - 4), 0);
+    assert.equal(supportCollapseIx.keys.length, 15);
+    assert.equal(supportCollapseIx.keys[14].pubkey.toBase58(), SYSVAR_INSTRUCTIONS_PUBKEY.toBase58());
+    assert.throws(() => createRangeMineWithRewardsInstruction({
+      payer: owner,
+      owner,
+      blocks: rangeBlocks.slice(1),
+      backpack,
+      actionId: miningActionId,
+      mode: RANGE_MINE_MODE_SUPPORT_COLLAPSE,
+    }), /prior support anchor/);
+    assert.throws(() => createRangeMineWithRewardsInstruction({
+      payer: owner,
+      owner,
+      blocks: rangeBlocks.slice(0, 2),
+      backpack,
+      actionId: miningActionId,
+      mode: RANGE_MINE_MODE_SUPPORT_PRIMARY,
+    }), /exactly one block/);
     const syncSkillsIx = createSyncPlayerSkillsInstruction({
       payer: sessionAuthority,
       owner,

@@ -87,6 +87,9 @@ pub enum NicechunkChunkError {
     InvalidPlacementBlock = 6392,
     InvalidPlacementSource = 6393,
     InvalidPlacementAnchor = 6394,
+    InvalidInstructionsSysvar = 6395,
+    InvalidSupportCollapseProof = 6396,
+    InvalidSupportCollapseConnectivity = 6397,
 }
 
 impl From<NicechunkChunkError> for ProgramError {

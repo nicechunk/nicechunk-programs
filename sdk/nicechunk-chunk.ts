@@ -1,5 +1,6 @@
 import {
   PublicKey,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
   SystemProgram,
   TransactionInstruction,
 } from "@solana/web3.js";
@@ -107,6 +108,8 @@ export const BATCH_MINE_MAX_BLOCKS = 2;
 export const BATCH_MINE_MODE_DEBUG = 1;
 export const RANGE_MINE_MAX_BLOCKS = 640;
 export const RANGE_MINE_MODE_DEBUG = 1;
+export const RANGE_MINE_MODE_SUPPORT_PRIMARY = 2;
+export const RANGE_MINE_MODE_SUPPORT_COLLAPSE = 3;
 export const RANGE_MINE_MAX_PALETTE_SIZE = 8;
 const TREE_MAX_LEAF_RADIUS = 2;
 const MAX_WATER_LEVEL_ABOVE_SEA = 6;
@@ -851,6 +854,7 @@ export function createRangeMineWithRewardsInstruction({
   backpack,
   actionId,
   mode = RANGE_MINE_MODE_DEBUG,
+  supportAnchor = null,
   sessionAuthority = payer,
   chunkProgramId = NICECHUNK_CHUNK_PROGRAM_ID,
   playerProgramId = NICECHUNK_PLAYER_PROGRAM_ID,
@@ -863,6 +867,7 @@ export function createRangeMineWithRewardsInstruction({
   backpack: PublicKey;
   actionId: bigint | number | string;
   mode?: number;
+  supportAnchor?: Pick<MineBlockInput, "worldX" | "worldY" | "worldZ"> | null;
   sessionAuthority?: PublicKey;
   chunkProgramId?: PublicKey;
   playerProgramId?: PublicKey;
@@ -871,8 +876,8 @@ export function createRangeMineWithRewardsInstruction({
 }): TransactionInstruction {
   if (!owner) throw new Error("owner is required for range mining");
   if (!backpack) throw new Error("backpack is required for range mining");
-  if (mode !== RANGE_MINE_MODE_DEBUG) throw new Error("unsupported range mining mode");
-  const data = encodeRangeMineInstructionData(blocks, actionId, mode);
+  if (!isRangeMineMode(mode)) throw new Error("unsupported range mining mode");
+  const data = encodeRangeMineInstructionData(blocks, actionId, mode, supportAnchor);
   const firstChunkX = Math.floor(blocks[0].worldX / chunkSize);
   const firstChunkZ = Math.floor(blocks[0].worldZ / chunkSize);
   for (const block of blocks) {
@@ -922,6 +927,9 @@ export function createRangeMineWithRewardsInstruction({
       { pubkey: materialPhysics, isSigner: false, isWritable: false },
       { pubkey: playerSkills, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ...(mode === RANGE_MINE_MODE_SUPPORT_COLLAPSE
+        ? [{ pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false }]
+        : []),
     ],
     data: chunkInstructionData(chunkProgramId, data),
   });
@@ -931,8 +939,9 @@ export function encodeRangeMineInstructionData(
   sourceBlocks: MineBlockInput[],
   actionId: bigint | number | string,
   mode = RANGE_MINE_MODE_DEBUG,
+  supportAnchor: Pick<MineBlockInput, "worldX" | "worldY" | "worldZ"> | null = null,
 ): Buffer {
-  if (mode !== RANGE_MINE_MODE_DEBUG) throw new Error("unsupported range mining mode");
+  if (!isRangeMineMode(mode)) throw new Error("unsupported range mining mode");
   const blocks = sourceBlocks.map((block) => ({
     worldX: requiredInteger(block.worldX, "worldX"),
     worldY: requiredInteger(block.worldY, "worldY"),
@@ -941,6 +950,15 @@ export function encodeRangeMineInstructionData(
   }));
   if (!blocks.length || blocks.length > RANGE_MINE_MAX_BLOCKS) {
     throw new Error(`range mining requires 1-${RANGE_MINE_MAX_BLOCKS} selected blocks`);
+  }
+  if (mode === RANGE_MINE_MODE_SUPPORT_PRIMARY && blocks.length !== 1) {
+    throw new Error("support-collapse primary range requires exactly one block");
+  }
+  const normalizedSupportAnchor = mode === RANGE_MINE_MODE_SUPPORT_COLLAPSE
+    ? normalizeSupportAnchor(supportAnchor)
+    : null;
+  if (mode === RANGE_MINE_MODE_SUPPORT_COLLAPSE && !normalizedSupportAnchor) {
+    throw new Error("support-collapse range requires a prior support anchor");
   }
   const minX = Math.min(...blocks.map((block) => block.worldX));
   const maxX = Math.max(...blocks.map((block) => block.worldX));
@@ -998,7 +1016,8 @@ export function encodeRangeMineInstructionData(
   });
   const paletteOffset = 24 + bitmap.length;
   const packedIndexesOffset = paletteOffset + 1 + palette.length;
-  const data = Buffer.alloc(packedIndexesOffset + packedIndexes.length);
+  const anchorOffset = packedIndexesOffset + packedIndexes.length;
+  const data = Buffer.alloc(anchorOffset + (normalizedSupportAnchor ? 10 : 0));
   const normalizedActionId = normalizeMiningActionId(actionId);
   data.writeUInt8(21, 0);
   data.writeBigUInt64LE(normalizedActionId, 1);
@@ -1013,12 +1032,36 @@ export function encodeRangeMineInstructionData(
   data.writeUInt8(palette.length, paletteOffset);
   Buffer.from(palette).copy(data, paletteOffset + 1);
   packedIndexes.copy(data, packedIndexesOffset);
+  if (normalizedSupportAnchor) {
+    data.writeInt32LE(normalizedSupportAnchor.worldX, anchorOffset);
+    data.writeInt16LE(normalizedSupportAnchor.worldY, anchorOffset + 4);
+    data.writeInt32LE(normalizedSupportAnchor.worldZ, anchorOffset + 6);
+  }
   return data;
+}
+
+function normalizeSupportAnchor(
+  source: Pick<MineBlockInput, "worldX" | "worldY" | "worldZ"> | null,
+): Pick<MineBlockInput, "worldX" | "worldY" | "worldZ"> | null {
+  if (!source) return null;
+  const worldX = requiredInteger(source.worldX, "support anchor worldX");
+  const worldY = requiredInteger(source.worldY, "support anchor worldY");
+  const worldZ = requiredInteger(source.worldZ, "support anchor worldZ");
+  if (worldY < -0x8000 || worldY > 0x7fff) {
+    throw new Error("support anchor worldY must fit a signed 16-bit integer");
+  }
+  return { worldX, worldY, worldZ };
 }
 
 function rangePaletteIndexBits(paletteSize: number): number {
   if (paletteSize <= 1) return 0;
   return Math.ceil(Math.log2(paletteSize));
+}
+
+function isRangeMineMode(mode: number): boolean {
+  return mode === RANGE_MINE_MODE_DEBUG
+    || mode === RANGE_MINE_MODE_SUPPORT_PRIMARY
+    || mode === RANGE_MINE_MODE_SUPPORT_COLLAPSE;
 }
 
 function normalizeMiningActionId(value: bigint | number | string): bigint {

@@ -10,7 +10,10 @@ use solana_program::{
     pubkey::Pubkey,
     rent::Rent,
     system_program,
-    sysvar::Sysvar,
+    sysvar::{
+        instructions::{load_current_index_checked, load_instruction_at_checked},
+        Sysvar,
+    },
 };
 
 #[cfg(not(feature = "no-entrypoint"))]
@@ -46,7 +49,9 @@ use state::{
     FOUNDATION_CHUNK_MAX_CAPACITY, FOUNDATION_CHUNK_SEED, PLACEMENT_SOURCE_BACKPACK,
     PLACEMENT_SOURCE_EQUIPMENT, PLAYER_PROGRESS_LEN, PLAYER_PROGRESS_SEED,
     PRECISION_GATHERING_XP_PER_ACTION, RANGE_MINE_BASE_DROP_CHANCE_BPS, RANGE_MINE_MAX_REWARDS,
+    RANGE_MINE_MODE_SUPPORT_COLLAPSE, RANGE_MINE_MODE_SUPPORT_PRIMARY,
     RANGE_MINE_SECONDARY_CANDIDATE_CHANCE_BPS, RANGE_MINE_SECONDARY_PROOF_LIMIT,
+    RANGE_MINE_SUPPORT_COLLAPSE_DROP_CHANCE_BPS, RANGE_MINE_SUPPORT_PRIMARY_DROP_CHANCE_BPS,
     RESOURCE_DROP_TABLE_SEED, SESSION_ACTION_BREAK_BLOCK, SESSION_ACTION_PLACE_BLOCK,
     SURFACE_DECORATION_FLAG_MINEABLE, SURFACE_DECORATION_TABLE_LEN, SURFACE_DECORATION_TABLE_SEED,
     TREE_FELL_MAX_CHUNKS,
@@ -1246,11 +1251,16 @@ fn range_mine_with_rewards(
     accounts: &[AccountInfo],
     payload: &[u8],
 ) -> ProgramResult {
-    if accounts.len() != 14 {
+    let args = RangeMineArgs::unpack(payload)?;
+    let expected_account_count = if args.mode == RANGE_MINE_MODE_SUPPORT_COLLAPSE {
+        15
+    } else {
+        14
+    };
+    if accounts.len() != expected_account_count {
         return Err(NicechunkChunkError::InvalidAccountCount.into());
     }
 
-    let args = RangeMineArgs::unpack(payload)?;
     let account_info_iter = &mut accounts.iter();
     let session_authority = next_account_info(account_info_iter)?;
     let player_profile = next_account_info(account_info_iter)?;
@@ -1266,6 +1276,11 @@ fn range_mine_with_rewards(
     let material_physics = next_account_info(account_info_iter)?;
     let player_skills = next_account_info(account_info_iter)?;
     let system_program_account = next_account_info(account_info_iter)?;
+    let instructions_sysvar = if args.mode == RANGE_MINE_MODE_SUPPORT_COLLAPSE {
+        Some(next_account_info(account_info_iter)?)
+    } else {
+        None
+    };
 
     if !player_progress.is_writable || !chunk_broken.is_writable || !backpack.is_writable {
         return Err(NicechunkChunkError::InvalidWritableAccount.into());
@@ -1282,6 +1297,32 @@ fn range_mine_with_rewards(
     let global_config_view = &context.config;
     let action_id = args.action_id;
     let is_new_action = is_new_backpack_mining_action(backpack, &context.owner, action_id)?;
+    let strict_selection = matches!(
+        args.mode,
+        RANGE_MINE_MODE_SUPPORT_PRIMARY | RANGE_MINE_MODE_SUPPORT_COLLAPSE
+    );
+    if args.mode == RANGE_MINE_MODE_SUPPORT_PRIMARY && !is_new_action {
+        return Err(NicechunkChunkError::InvalidMiningActionId.into());
+    }
+    if args.mode == RANGE_MINE_MODE_SUPPORT_COLLAPSE && is_new_action {
+        return Err(NicechunkChunkError::InvalidMiningActionId.into());
+    }
+    if args.mode == RANGE_MINE_MODE_SUPPORT_COLLAPSE {
+        if !args.is_face_connected_to_support_anchor() {
+            return Err(NicechunkChunkError::InvalidSupportCollapseConnectivity.into());
+        }
+        validate_support_collapse_proof(
+            program_id,
+            instructions_sysvar.ok_or(NicechunkChunkError::InvalidInstructionsSysvar)?,
+            session_authority.key,
+            player_profile.key,
+            player_session.key,
+            player_progress.key,
+            global_config.key,
+            backpack.key,
+            &args,
+        )?;
+    }
     let chunk_size = i32::from(global_config_view.chunk_size);
     let max_x = args
         .min_x
@@ -1381,6 +1422,9 @@ fn range_mine_with_rewards(
         )?;
         let packed_value = u32::from_le_bytes([packed[0], packed[1], packed[2], 0]);
         if existing.binary_search(&packed_value).is_ok() {
+            if strict_selection {
+                return Err(NicechunkChunkError::BlockAlreadyMined.into());
+            }
             continue;
         }
         accepted.push((block, packed));
@@ -1446,13 +1490,18 @@ fn range_mine_with_rewards(
     let mut secondary_rewards = Vec::with_capacity(RANGE_MINE_SECONDARY_PROOF_LIMIT * 2);
     let mut secondary_proofs = 0_usize;
     let mut extra_drop_count = 0_u64;
+    let base_drop_chance_bps = match args.mode {
+        RANGE_MINE_MODE_SUPPORT_PRIMARY => RANGE_MINE_SUPPORT_PRIMARY_DROP_CHANCE_BPS,
+        RANGE_MINE_MODE_SUPPORT_COLLAPSE => RANGE_MINE_SUPPORT_COLLAPSE_DROP_CHANCE_BPS,
+        _ => RANGE_MINE_BASE_DROP_CHANCE_BPS,
+    };
     for (block, _) in &accepted {
         if primary_rewards.len() < RANGE_MINE_MAX_REWARDS
             && range_mine_reward_passes(
                 global_config_view,
                 block,
                 u32::from(block.expected_block_id),
-                RANGE_MINE_BASE_DROP_CHANCE_BPS,
+                base_drop_chance_bps,
             )
         {
             primary_rewards.push(BackpackBlockReward {
@@ -1466,6 +1515,13 @@ fn range_mine_with_rewards(
                 volume_mm3: gathered_volume_mm3,
                 metadata: 0,
             });
+        }
+
+        // A structural collapse only returns the selected terrain resources.
+        // Exploration and decoration rolls remain exclusive to deliberate
+        // mining so one collapse cannot amplify secondary drops.
+        if strict_selection {
+            continue;
         }
 
         if secondary_proofs >= RANGE_MINE_SECONDARY_PROOF_LIMIT
@@ -1598,6 +1654,105 @@ fn range_mine_with_rewards(
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_support_collapse_proof(
+    program_id: &Pubkey,
+    instructions_sysvar: &AccountInfo,
+    session_authority: &Pubkey,
+    player_profile: &Pubkey,
+    player_session: &Pubkey,
+    player_progress: &Pubkey,
+    global_config: &Pubkey,
+    backpack: &Pubkey,
+    args: &RangeMineArgs,
+) -> ProgramResult {
+    require_key_eq(
+        instructions_sysvar.key,
+        &solana_program::sysvar::instructions::ID,
+        NicechunkChunkError::InvalidInstructionsSysvar,
+    )?;
+    let anchor = args
+        .support_anchor
+        .ok_or(NicechunkChunkError::InvalidSupportCollapseProof)?;
+    let current_index = load_current_index_checked(instructions_sysvar)
+        .map_err(|_| NicechunkChunkError::InvalidInstructionsSysvar)?;
+    for index in (0..current_index as usize).rev() {
+        let instruction = load_instruction_at_checked(index, instructions_sysvar)
+            .map_err(|_| NicechunkChunkError::InvalidInstructionsSysvar)?;
+        if instruction.program_id != *program_id
+            || !support_instruction_accounts_match(
+                &instruction,
+                session_authority,
+                player_profile,
+                player_session,
+                player_progress,
+                global_config,
+                backpack,
+            )
+        {
+            continue;
+        }
+        let Some(payload) = support_range_instruction_payload(&instruction.data) else {
+            continue;
+        };
+        let Ok(previous) = RangeMineArgs::unpack(payload) else {
+            continue;
+        };
+        if previous.action_id != args.action_id
+            || !matches!(
+                previous.mode,
+                RANGE_MINE_MODE_SUPPORT_PRIMARY | RANGE_MINE_MODE_SUPPORT_COLLAPSE
+            )
+        {
+            continue;
+        }
+        if previous.blocks.iter().any(|block| {
+            block.world_x == anchor.world_x
+                && block.world_y == anchor.world_y
+                && block.world_z == anchor.world_z
+        }) {
+            return Ok(());
+        }
+    }
+    Err(NicechunkChunkError::InvalidSupportCollapseProof.into())
+}
+
+fn support_instruction_accounts_match(
+    instruction: &Instruction,
+    session_authority: &Pubkey,
+    player_profile: &Pubkey,
+    player_session: &Pubkey,
+    player_progress: &Pubkey,
+    global_config: &Pubkey,
+    backpack: &Pubkey,
+) -> bool {
+    [
+        (0, session_authority),
+        (1, player_profile),
+        (2, player_session),
+        (3, player_progress),
+        (6, global_config),
+        (10, backpack),
+    ]
+    .into_iter()
+    .all(|(index, expected)| {
+        instruction
+            .accounts
+            .get(index)
+            .is_some_and(|account| account.pubkey == *expected)
+    })
+}
+
+fn support_range_instruction_payload(data: &[u8]) -> Option<&[u8]> {
+    if data.first() == Some(&21) {
+        return data.get(1..);
+    }
+    if data.first() == Some(&2) && data.get(1) == Some(&21) {
+        return data.get(2..);
+    }
+    None
 }
 
 fn fell_tree_with_rewards(
@@ -3978,7 +4133,14 @@ fn fund_account_to_rent_exempt<'a>(
 #[cfg(test)]
 mod instruction_encoding_tests {
     use super::*;
-    use solana_program::system_instruction;
+    use crate::state::BLOCK_STONE;
+    use solana_program::{
+        system_instruction,
+        sysvar::instructions::{
+            construct_instructions_data, store_current_index, BorrowedAccountMeta,
+            BorrowedInstruction,
+        },
+    };
 
     #[test]
     fn compact_system_instruction_encoding_matches_solana_abi() {
@@ -4009,5 +4171,142 @@ mod instruction_encoding_tests {
         let metadata = pack_surface_decoration_metadata(0x1234, 0xabcd);
         assert_eq!(metadata >> 16, 0x1234);
         assert_eq!(metadata & 0xffff, 0xabcd);
+    }
+
+    #[test]
+    fn support_collapse_proof_is_scoped_to_the_same_transaction_and_actor() {
+        let program_id = Pubkey::new_unique();
+        let mut account_keys = (0..14).map(|_| Pubkey::new_unique()).collect::<Vec<_>>();
+        let session_authority = Pubkey::new_unique();
+        let player_profile = Pubkey::new_unique();
+        let player_session = Pubkey::new_unique();
+        let player_progress = Pubkey::new_unique();
+        let global_config = Pubkey::new_unique();
+        let backpack = Pubkey::new_unique();
+        account_keys[0] = session_authority;
+        account_keys[1] = player_profile;
+        account_keys[2] = player_session;
+        account_keys[3] = player_progress;
+        account_keys[6] = global_config;
+        account_keys[10] = backpack;
+
+        let action_id = 77;
+        let primary_data =
+            support_range_instruction_data(action_id, RANGE_MINE_MODE_SUPPORT_PRIMARY, 0, 80, None);
+        let collapse_data = support_range_instruction_data(
+            action_id,
+            RANGE_MINE_MODE_SUPPORT_COLLAPSE,
+            0,
+            81,
+            Some((0, 80, 0)),
+        );
+        let account_metas = || {
+            account_keys
+                .iter()
+                .map(|pubkey| BorrowedAccountMeta {
+                    pubkey,
+                    is_signer: false,
+                    is_writable: false,
+                })
+                .collect::<Vec<_>>()
+        };
+        let instructions = [
+            BorrowedInstruction {
+                program_id: &program_id,
+                accounts: account_metas(),
+                data: &primary_data,
+            },
+            BorrowedInstruction {
+                program_id: &program_id,
+                accounts: account_metas(),
+                data: &collapse_data,
+            },
+        ];
+        let mut instructions_data = construct_instructions_data(&instructions);
+        store_current_index(&mut instructions_data, 1);
+        let instructions_key = solana_program::sysvar::instructions::ID;
+        let instructions_owner = solana_program::sysvar::ID;
+        let mut instructions_lamports = 0;
+        let instructions_account = AccountInfo::new(
+            &instructions_key,
+            false,
+            false,
+            &mut instructions_lamports,
+            &mut instructions_data,
+            &instructions_owner,
+            false,
+            0,
+        );
+        let args = RangeMineArgs::unpack(&collapse_data[1..]).unwrap();
+
+        assert!(validate_support_collapse_proof(
+            &program_id,
+            &instructions_account,
+            &session_authority,
+            &player_profile,
+            &player_session,
+            &player_progress,
+            &global_config,
+            &backpack,
+            &args,
+        )
+        .is_ok());
+        assert_eq!(
+            validate_support_collapse_proof(
+                &program_id,
+                &instructions_account,
+                &Pubkey::new_unique(),
+                &player_profile,
+                &player_session,
+                &player_progress,
+                &global_config,
+                &backpack,
+                &args,
+            ),
+            Err(NicechunkChunkError::InvalidSupportCollapseProof.into())
+        );
+
+        store_current_index(&mut instructions_account.try_borrow_mut_data().unwrap(), 0);
+        assert_eq!(
+            validate_support_collapse_proof(
+                &program_id,
+                &instructions_account,
+                &session_authority,
+                &player_profile,
+                &player_session,
+                &player_progress,
+                &global_config,
+                &backpack,
+                &args,
+            ),
+            Err(NicechunkChunkError::InvalidSupportCollapseProof.into())
+        );
+    }
+
+    fn support_range_instruction_data(
+        action_id: u64,
+        mode: u8,
+        world_x: i32,
+        world_y: i16,
+        support_anchor: Option<(i32, i16, i32)>,
+    ) -> Vec<u8> {
+        let mut data = vec![21];
+        data.extend_from_slice(&action_id.to_le_bytes());
+        data.push(mode);
+        data.extend_from_slice(&world_x.to_le_bytes());
+        data.extend_from_slice(&world_y.to_le_bytes());
+        data.extend_from_slice(&0_i32.to_le_bytes());
+        data.push(1);
+        data.extend_from_slice(&1_u16.to_le_bytes());
+        data.push(1);
+        data.push(1);
+        data.push(1);
+        data.push(BLOCK_STONE as u8);
+        if let Some((anchor_x, anchor_y, anchor_z)) = support_anchor {
+            data.extend_from_slice(&anchor_x.to_le_bytes());
+            data.extend_from_slice(&anchor_y.to_le_bytes());
+            data.extend_from_slice(&anchor_z.to_le_bytes());
+        }
+        data
     }
 }

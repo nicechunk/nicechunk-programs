@@ -117,8 +117,11 @@ pub const BATCH_MINE_EXTRA_DROP_CHANCE_BPS: u16 = 5_000;
 pub const RANGE_MINE_MAX_BLOCKS: usize = 640;
 pub const RANGE_MINE_MAX_PALETTE_SIZE: usize = 8;
 pub const RANGE_MINE_MODE_DEBUG: u8 = 1;
-pub const RANGE_MINE_MODE_EXPLOSIVE: u8 = 2;
+pub const RANGE_MINE_MODE_SUPPORT_PRIMARY: u8 = 2;
+pub const RANGE_MINE_MODE_SUPPORT_COLLAPSE: u8 = 3;
 pub const RANGE_MINE_BASE_DROP_CHANCE_BPS: u16 = 500;
+pub const RANGE_MINE_SUPPORT_PRIMARY_DROP_CHANCE_BPS: u16 = 10_000;
+pub const RANGE_MINE_SUPPORT_COLLAPSE_DROP_CHANCE_BPS: u16 = 3_000;
 pub const RANGE_MINE_SECONDARY_CANDIDATE_CHANCE_BPS: u16 = 100;
 pub const RANGE_MINE_SECONDARY_PROOF_LIMIT: usize = 2;
 pub const RANGE_MINE_MAX_REWARDS: usize = 16;
@@ -1698,14 +1701,25 @@ pub struct RangeMineArgs {
     pub action_id: u64,
     pub mode: u8,
     pub min_x: i32,
+    pub min_y: i16,
     pub min_z: i32,
     pub size_x: u8,
+    pub size_y: u16,
     pub size_z: u8,
     pub blocks: Vec<MineBlockArgs>,
+    pub support_anchor: Option<SupportAnchor>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SupportAnchor {
+    pub world_x: i32,
+    pub world_y: i16,
+    pub world_z: i32,
 }
 
 impl RangeMineArgs {
     const HEADER_LEN: usize = 23;
+    const SUPPORT_ANCHOR_LEN: usize = 10;
 
     pub fn unpack(data: &[u8]) -> Result<Self, NicechunkChunkError> {
         if data.len() < Self::HEADER_LEN {
@@ -1713,7 +1727,12 @@ impl RangeMineArgs {
         }
         let action_id = read_mining_action_id(data, 0)?;
         let mode = data[8];
-        if mode != RANGE_MINE_MODE_DEBUG || cfg!(feature = "mainnet") {
+        let supported_mode = match mode {
+            RANGE_MINE_MODE_DEBUG => !cfg!(feature = "mainnet"),
+            RANGE_MINE_MODE_SUPPORT_PRIMARY | RANGE_MINE_MODE_SUPPORT_COLLAPSE => true,
+            _ => false,
+        };
+        if !supported_mode {
             return Err(NicechunkChunkError::InvalidRangeMine);
         }
 
@@ -1752,6 +1771,9 @@ impl RangeMineArgs {
         if selected_count == 0 || selected_count > RANGE_MINE_MAX_BLOCKS {
             return Err(NicechunkChunkError::InvalidRangeMine);
         }
+        if mode == RANGE_MINE_MODE_SUPPORT_PRIMARY && selected_count != 1 {
+            return Err(NicechunkChunkError::InvalidRangeMine);
+        }
 
         let palette_offset = Self::HEADER_LEN + bitmap_len;
         let palette_count = data[palette_offset] as usize;
@@ -1781,14 +1803,25 @@ impl RangeMineArgs {
 
         let palette_index_bits = palette_index_bits(palette_count);
         let palette_index_len = (selected_count * palette_index_bits).div_ceil(8);
-        let expected_len = palette_end + palette_index_len;
+        let palette_indexes_end = palette_end + palette_index_len;
+        let support_anchor_len = if mode == RANGE_MINE_MODE_SUPPORT_COLLAPSE {
+            Self::SUPPORT_ANCHOR_LEN
+        } else {
+            0
+        };
+        let expected_len = palette_indexes_end + support_anchor_len;
         if data.len() != expected_len {
             return Err(NicechunkChunkError::InvalidRangeMine);
         }
-        let palette_indexes = &data[palette_end..];
+        let palette_indexes = &data[palette_end..palette_indexes_end];
         if !unused_high_bits_are_zero(palette_indexes, selected_count * palette_index_bits) {
             return Err(NicechunkChunkError::InvalidRangeMine);
         }
+        let support_anchor = (mode == RANGE_MINE_MODE_SUPPORT_COLLAPSE).then(|| SupportAnchor {
+            world_x: read_i32(data, palette_indexes_end),
+            world_y: read_i16(data, palette_indexes_end + 4),
+            world_z: read_i32(data, palette_indexes_end + 6),
+        });
 
         let layer_area = size_x * size_z;
         let mut blocks = Vec::with_capacity(selected_count);
@@ -1834,12 +1867,101 @@ impl RangeMineArgs {
             action_id,
             mode,
             min_x,
+            min_y,
             min_z,
             size_x: size_x as u8,
+            size_y: size_y as u16,
             size_z: size_z as u8,
             blocks,
+            support_anchor,
         })
     }
+
+    pub fn is_face_connected_to_support_anchor(&self) -> bool {
+        let Some(anchor) = self.support_anchor else {
+            return false;
+        };
+        let size_x = usize::from(self.size_x);
+        let size_y = usize::from(self.size_y);
+        let size_z = usize::from(self.size_z);
+        let layer_area = size_x.saturating_mul(size_z);
+        let volume = layer_area.saturating_mul(size_y);
+        if volume == 0 || volume > RANGE_MINE_MAX_BLOCKS {
+            return false;
+        }
+
+        let mut selected = vec![false; volume];
+        for block in &self.blocks {
+            let Some(index) = self.volume_index(block.world_x, block.world_y, block.world_z) else {
+                return false;
+            };
+            selected[index] = true;
+        }
+
+        let mut visited = vec![false; volume];
+        let mut queue = Vec::with_capacity(self.blocks.len());
+        for block in &self.blocks {
+            if face_distance(block.world_x, block.world_y, block.world_z, anchor) != 1 {
+                continue;
+            }
+            let Some(index) = self.volume_index(block.world_x, block.world_y, block.world_z) else {
+                return false;
+            };
+            if !visited[index] {
+                visited[index] = true;
+                queue.push(index);
+            }
+        }
+        if queue.is_empty() {
+            return false;
+        }
+
+        let mut cursor = 0;
+        while cursor < queue.len() {
+            let index = queue[cursor];
+            let y = index / layer_area;
+            let within_layer = index % layer_area;
+            let z = within_layer / size_x;
+            let x = within_layer % size_x;
+            let neighbors = [
+                x.checked_sub(1).map(|next| index - (x - next)),
+                (x + 1 < size_x).then_some(index + 1),
+                y.checked_sub(1).map(|_| index - layer_area),
+                (y + 1 < size_y).then_some(index + layer_area),
+                z.checked_sub(1).map(|_| index - size_x),
+                (z + 1 < size_z).then_some(index + size_x),
+            ];
+            for neighbor in neighbors.into_iter().flatten() {
+                if selected[neighbor] && !visited[neighbor] {
+                    visited[neighbor] = true;
+                    queue.push(neighbor);
+                }
+            }
+            cursor += 1;
+        }
+        queue.len() == self.blocks.len()
+    }
+
+    fn volume_index(&self, world_x: i32, world_y: i16, world_z: i32) -> Option<usize> {
+        let x = usize::try_from(world_x.checked_sub(self.min_x)?).ok()?;
+        let y = usize::try_from(i32::from(world_y).checked_sub(i32::from(self.min_y))?).ok()?;
+        let z = usize::try_from(world_z.checked_sub(self.min_z)?).ok()?;
+        let size_x = usize::from(self.size_x);
+        let size_y = usize::from(self.size_y);
+        let size_z = usize::from(self.size_z);
+        if x >= size_x || y >= size_y || z >= size_z {
+            return None;
+        }
+        y.checked_mul(size_x.checked_mul(size_z)?)?
+            .checked_add(z.checked_mul(size_x)?)?
+            .checked_add(x)
+    }
+}
+
+fn face_distance(world_x: i32, world_y: i16, world_z: i32, anchor: SupportAnchor) -> u64 {
+    u64::from(world_x.abs_diff(anchor.world_x))
+        .saturating_add(u64::from(world_y.abs_diff(anchor.world_y)))
+        .saturating_add(u64::from(world_z.abs_diff(anchor.world_z)))
 }
 
 fn packed_bit(data: &[u8], bit_index: usize) -> bool {
@@ -3435,6 +3557,30 @@ mod tests {
             .blocks
             .iter()
             .all(|block| block.expected_block_id == BLOCK_STONE));
+
+        let mut collapse = payload.clone();
+        collapse[8] = RANGE_MINE_MODE_SUPPORT_COLLAPSE;
+        collapse.extend_from_slice(&31_i32.to_le_bytes());
+        collapse.extend_from_slice(&100_i16.to_le_bytes());
+        collapse.extend_from_slice(&(-16_i32).to_le_bytes());
+        let decoded_collapse = RangeMineArgs::unpack(&collapse).unwrap();
+        assert_eq!(decoded_collapse.mode, RANGE_MINE_MODE_SUPPORT_COLLAPSE);
+        assert_eq!(
+            decoded_collapse.support_anchor,
+            Some(SupportAnchor {
+                world_x: 31,
+                world_y: 100,
+                world_z: -16,
+            })
+        );
+        assert!(decoded_collapse.is_face_connected_to_support_anchor());
+
+        let mut invalid_primary = payload;
+        invalid_primary[8] = RANGE_MINE_MODE_SUPPORT_PRIMARY;
+        assert!(matches!(
+            RangeMineArgs::unpack(&invalid_primary),
+            Err(NicechunkChunkError::InvalidRangeMine)
+        ));
     }
 
     #[test]
@@ -3498,6 +3644,60 @@ mod tests {
             RangeMineArgs::unpack(&empty),
             Err(NicechunkChunkError::InvalidRangeMine)
         ));
+
+        let mut primary = Vec::new();
+        primary.extend_from_slice(&1_u64.to_le_bytes());
+        primary.push(RANGE_MINE_MODE_SUPPORT_PRIMARY);
+        primary.extend_from_slice(&0_i32.to_le_bytes());
+        primary.extend_from_slice(&80_i16.to_le_bytes());
+        primary.extend_from_slice(&0_i32.to_le_bytes());
+        primary.push(1);
+        primary.extend_from_slice(&1_u16.to_le_bytes());
+        primary.push(1);
+        primary.push(1);
+        primary.push(1);
+        primary.push(BLOCK_STONE as u8);
+        assert_eq!(
+            RangeMineArgs::unpack(&primary).unwrap().mode,
+            RANGE_MINE_MODE_SUPPORT_PRIMARY
+        );
+
+        primary[8] = 0xff;
+        assert!(matches!(
+            RangeMineArgs::unpack(&primary),
+            Err(NicechunkChunkError::InvalidRangeMine)
+        ));
+    }
+
+    #[test]
+    fn support_collapse_requires_an_anchor_and_one_connected_component() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&9_u64.to_le_bytes());
+        payload.push(RANGE_MINE_MODE_SUPPORT_COLLAPSE);
+        payload.extend_from_slice(&0_i32.to_le_bytes());
+        payload.extend_from_slice(&80_i16.to_le_bytes());
+        payload.extend_from_slice(&0_i32.to_le_bytes());
+        payload.push(3);
+        payload.extend_from_slice(&1_u16.to_le_bytes());
+        payload.push(1);
+        payload.push(0b0000_0101);
+        payload.push(1);
+        payload.push(BLOCK_STONE as u8);
+
+        assert!(matches!(
+            RangeMineArgs::unpack(&payload),
+            Err(NicechunkChunkError::InvalidRangeMine)
+        ));
+
+        payload.extend_from_slice(&(-1_i32).to_le_bytes());
+        payload.extend_from_slice(&80_i16.to_le_bytes());
+        payload.extend_from_slice(&0_i32.to_le_bytes());
+        let decoded = RangeMineArgs::unpack(&payload).unwrap();
+        assert!(!decoded.is_face_connected_to_support_anchor());
+
+        payload[23] = 0b0000_0011;
+        let connected = RangeMineArgs::unpack(&payload).unwrap();
+        assert!(connected.is_face_connected_to_support_anchor());
     }
 
     #[test]
