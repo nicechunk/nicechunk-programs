@@ -42,6 +42,7 @@ const GLOBAL_CONFIG_DEVELOPMENT_WALLET_OFFSET: usize = 53;
 const SYNC_MINING_COORDINATE_LEN: usize = 12;
 const CHUNK_MINE_WITH_REWARDS_TAG: u8 = 8;
 const CHUNK_FELL_TREE_WITH_REWARDS_TAG: u8 = 9;
+const CHUNK_MINE_PLACED_WITH_REWARDS_TAG: u8 = 16;
 const CHUNK_BATCH_MINE_WITH_REWARDS_TAG: u8 = 20;
 const CHUNK_RANGE_MINE_WITH_REWARDS_TAG: u8 = 21;
 const PLAYER_PROFILE_SEED: &[u8] = b"player-v7";
@@ -500,6 +501,7 @@ fn mining_instruction_matches(
         match instruction.data[0] {
             CHUNK_MINE_WITH_REWARDS_TAG => (3, 6, 9, 21),
             CHUNK_FELL_TREE_WITH_REWARDS_TAG => (3, 4, 9, 21),
+            CHUNK_MINE_PLACED_WITH_REWARDS_TAG => (3, 6, 9, 21),
             CHUNK_BATCH_MINE_WITH_REWARDS_TAG => (3, 6, 11, 23),
             CHUNK_RANGE_MINE_WITH_REWARDS_TAG => (3, 6, 10, 24),
             _ => return false,
@@ -865,6 +867,13 @@ mod tests {
                 CHUNK_FELL_TREE_WITH_REWARDS_TAG,
                 4_usize,
                 11_usize,
+                9_usize,
+                21_usize,
+            ),
+            (
+                CHUNK_MINE_PLACED_WITH_REWARDS_TAG,
+                6_usize,
+                12_usize,
                 9_usize,
                 21_usize,
             ),
