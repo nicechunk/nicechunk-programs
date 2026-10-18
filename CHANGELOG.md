@@ -20,6 +20,12 @@ NiceChunk Solana native programs and chain operation scripts.
 
 ### Current Status
 
+- Removed the shape-derived material-capacity gate from verified forging.
+  Valid designs may exceed advisory volume, durability, and mass capacities;
+  selected material slots are still validated and consumed, and their quality
+  still determines the forged outcome. Instruction and account layouts remain
+  compatible. Validated with backpack and unified-game unit tests and an SBF
+  build; live behavior requires upgrading the gameplay program.
 - Generated from the main NiceChunk working tree.
 - Added treasury-issued blank land contracts, now priced at a fixed `10 NCK`, with available and reserved balances in `market-user-v1`.
 - Added recoverable chunk-aligned land registration through `build-site-v3` and `foundation-chunk-v3`, capped at `4,096` contracts per parcel.

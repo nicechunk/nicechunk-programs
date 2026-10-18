@@ -1163,12 +1163,9 @@ impl BackpackAccount {
             materials.push(slot);
         }
 
-        if let Some(required) = requirements {
-            let capacity = forge_material_capacity(&materials)?;
-            if !capacity.satisfies(&required) {
-                return Err(NicechunkBackpackError::InsufficientForgeMaterialParameters.into());
-            }
-        }
+        // A design's shape and display parameters do not impose a material
+        // capacity gate. Selected slots are still owned, usable materials and
+        // are consumed below; output quality comes from those actual inputs.
 
         let mut outcome = calculate_forge_outcome(&materials, forging_level);
         if let Some(required) = requirements {
@@ -2600,12 +2597,12 @@ mod tests {
     }
 
     #[test]
-    fn verified_forge_rejects_any_material_parameter_deficit_without_consuming_slots() {
+    fn verified_forge_accepts_design_volume_above_material_capacity() {
         let owner = Pubkey::new_unique();
         let mut data = empty_backpack(&owner, 4);
         BackpackAccount::append_item(&mut data, &owner, &material_slot(1_200, 1_200), 11).unwrap();
 
-        let error = BackpackAccount::forge_equipment_from_verified_materials(
+        let outcome = BackpackAccount::forge_equipment_from_verified_materials(
             &mut data,
             &owner,
             &[0],
@@ -2620,16 +2617,12 @@ mod tests {
                 output_mass_grams: 600,
             },
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(matches!(
-            error,
-            ProgramError::Custom(code)
-                if code == NicechunkBackpackError::InsufficientForgeMaterialParameters as u32
-        ));
+        assert_eq!(outcome.volume_mm3, 600_001);
         assert_eq!(
             BackpackAccount::slot_at(&data, 0).unwrap().category,
-            BACKPACK_ITEM_CATEGORY_MATERIAL
+            BACKPACK_ITEM_CATEGORY_FORGED
         );
     }
 
@@ -2665,12 +2658,12 @@ mod tests {
     }
 
     #[test]
-    fn verified_forge_rejects_a_durability_deficit_even_when_volume_is_exact() {
+    fn verified_forge_accepts_design_durability_above_material_capacity() {
         let owner = Pubkey::new_unique();
         let mut data = empty_backpack(&owner, 4);
         BackpackAccount::append_item(&mut data, &owner, &material_slot(1_200, 1_200), 11).unwrap();
 
-        let error = BackpackAccount::forge_equipment_from_verified_materials(
+        let outcome = BackpackAccount::forge_equipment_from_verified_materials(
             &mut data,
             &owner,
             &[0],
@@ -2685,22 +2678,19 @@ mod tests {
                 output_mass_grams: 600,
             },
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(matches!(
-            error,
-            ProgramError::Custom(code)
-                if code == NicechunkBackpackError::InsufficientForgeMaterialParameters as u32
-        ));
+        assert!(outcome.durability_max > 0);
+        assert_eq!(BackpackAccount::slot_at(&data, 0).unwrap().category, BACKPACK_ITEM_CATEGORY_FORGED);
     }
 
     #[test]
-    fn verified_forge_rejects_mass_creation_without_consuming_slots() {
+    fn verified_forge_accepts_design_mass_above_material_capacity() {
         let owner = Pubkey::new_unique();
         let mut data = empty_backpack(&owner, 4);
         BackpackAccount::append_item(&mut data, &owner, &material_slot(1_200, 1_200), 11).unwrap();
 
-        let error = BackpackAccount::forge_equipment_from_verified_materials(
+        let outcome = BackpackAccount::forge_equipment_from_verified_materials(
             &mut data,
             &owner,
             &[0],
@@ -2715,17 +2705,13 @@ mod tests {
                 output_mass_grams: 601,
             },
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(matches!(
-            error,
-            ProgramError::Custom(code)
-                if code == NicechunkBackpackError::InsufficientForgeMaterialParameters as u32
-        ));
-        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 600);
+        assert_eq!(outcome.mass_grams, 601);
+        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(), 601);
         assert_eq!(
             BackpackAccount::slot_at(&data, 0).unwrap().category,
-            BACKPACK_ITEM_CATEGORY_MATERIAL
+            BACKPACK_ITEM_CATEGORY_FORGED
         );
     }
 
