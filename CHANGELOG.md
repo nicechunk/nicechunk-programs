@@ -14,6 +14,12 @@ This repository is generated from the main NiceChunk working tree. Make source c
 
 ## Unreleased
 
+- Place owned equipment resource stacks even when past split/merge operations
+  left rounded mass differences. Placement derives canonical mass from volume
+  and the authoritative density table, updates the remainder and retains exact
+  snapshot, custody, count and volume checks. Validated with player, chunk,
+  backpack and game unit tests plus executable SBF regression cases.
+
 ### Split Scope
 
 NiceChunk Solana native programs and chain operation scripts.

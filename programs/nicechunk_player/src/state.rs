@@ -703,11 +703,15 @@ impl PlayerEquipment {
             || block_id == 0
             || density_kg_m3 == 0
             || flags & BACKPACK_ITEM_FLAG_MASS_VALID == 0
-            || read_u32(expected_slot, BACKPACK_SLOT_DURABILITY_CURRENT_OFFSET)
-                != block_mass_grams(volume_mm3, density_kg_m3)?
         {
             return Err(NicechunkPlayerError::InvalidPlacementResource.into());
         }
+        // Splitting and merging resource stacks can round cached grams
+        // independently of mm3. Ownership and the exact slot snapshot above
+        // authenticate the material; canonical volume and trusted density
+        // determine its mass. Validate that calculation and normalize the
+        // remainder below instead of rejecting an owned stack for gram drift.
+        block_mass_grams(volume_mm3, density_kg_m3)?;
         let consumed_volume_mm3 = proportional_consumed_volume_mm3(volume_mm3, quantity)?;
 
         if quantity == 1 {
@@ -2199,6 +2203,65 @@ mod tests {
         )
         .is_err());
         assert_eq!(data, before);
+    }
+
+    #[test]
+    fn player_equipment_placement_normalizes_rounded_stack_mass() {
+        // Live resource stacks can accumulate independent gram rounding while
+        // being split and merged. The owned volume, not the rounded cached
+        // weight, determines how much material can be placed.
+        for (block_id, quantity, volume, stored_mass, density) in [
+            (3_u16, 58_u32, 28_988_230_u32, 75_370_u32, 2_600_u16),
+            (14, 21, 9_800_000, 29_403, 3_000),
+            (3, 3, 1_000_001, 2_599, 2_600),
+        ] {
+            let owner = Pubkey::new_unique();
+            let profile = Pubkey::new_unique();
+            let config = Pubkey::new_unique();
+            let backpack = Pubkey::new_unique();
+            let mut data = vec![0_u8; PlayerEquipment::LEN];
+            PlayerEquipment::pack_empty(&mut data, &PlayerEquipmentInitArgs {
+                bump: 250, owner: &owner, player_profile: &profile,
+                global_config: &config, created_slot: 100,
+            }).unwrap();
+            let mut record = [0_u8; BACKPACK_SLOT_RECORD_LEN];
+            record[0] = BACKPACK_SLOT_KIND_BLOCK;
+            record[2..4].copy_from_slice(&BACKPACK_ITEM_FLAG_MASS_VALID.to_le_bytes());
+            record[4..8].copy_from_slice(&quantity.to_le_bytes());
+            record[12..14].copy_from_slice(&(block_id << 9).to_le_bytes());
+            record[BACKPACK_SLOT_VOLUME_MM3_OFFSET..BACKPACK_SLOT_VOLUME_MM3_OFFSET + 4]
+                .copy_from_slice(&volume.to_le_bytes());
+            record[BACKPACK_SLOT_DURABILITY_CURRENT_OFFSET..BACKPACK_SLOT_DURABILITY_CURRENT_OFFSET + 4]
+                .copy_from_slice(&stored_mass.to_le_bytes());
+            PlayerEquipment::write_custodied_slot(&mut data, 2, 7, &backpack, &record, &[], 101).unwrap();
+
+            let before = data.clone();
+            let mut changed = record;
+            changed[4..8].copy_from_slice(&(quantity + 1).to_le_bytes());
+            let err = PlayerEquipment::consume_placement_resource(&mut data, &owner,
+                &profile, &config, &backpack, 2, &changed, density, 102).err().unwrap();
+            assert!(matches!(err, solana_program::program_error::ProgramError::Custom(6257)));
+            assert_eq!(data, before, "a stale or forged snapshot must remain atomic");
+
+            let mut placed_volume = 0_u32;
+            for remaining in (1..=quantity).rev() {
+                let (placed_block, used_volume, _) = PlayerEquipment::consume_placement_resource(
+                    &mut data, &owner, &profile, &config, &backpack, 2, &record, density, 103,
+                ).unwrap();
+                assert_eq!(placed_block, block_id);
+                placed_volume += used_volume;
+                if remaining > 1 {
+                    record = PlayerEquipment::slot_record(&data, 2).ok().unwrap();
+                    let remaining_volume = read_u32(&record, BACKPACK_SLOT_VOLUME_MM3_OFFSET);
+                    assert_eq!(read_u32(&record, BACKPACK_SLOT_QUANTITY_OFFSET), remaining - 1);
+                    assert_eq!(placed_volume + remaining_volume, volume);
+                    assert_eq!(read_u32(&record, BACKPACK_SLOT_DURABILITY_CURRENT_OFFSET),
+                        block_mass_grams(remaining_volume, density).ok().unwrap());
+                }
+            }
+            assert_eq!(placed_volume, volume, "continuous placement must spend exactly the original volume");
+            assert!(PlayerEquipment::slot_record(&data, 2).is_err());
+        }
     }
 
     #[test]
