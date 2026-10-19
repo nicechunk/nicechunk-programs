@@ -45,6 +45,8 @@ const CHUNK_FELL_TREE_WITH_REWARDS_TAG: u8 = 9;
 const CHUNK_MINE_PLACED_WITH_REWARDS_TAG: u8 = 16;
 const CHUNK_BATCH_MINE_WITH_REWARDS_TAG: u8 = 20;
 const CHUNK_RANGE_MINE_WITH_REWARDS_TAG: u8 = 21;
+const CHUNK_BARE_HAND_MINE_WITH_REWARDS_TAG: u8 = 22;
+const CHUNK_PICK_SURFACE_PEBBLE_TAG: u8 = 23;
 const PLAYER_PROFILE_SEED: &[u8] = b"player-v7";
 const PLAYER_PROFILE_MAGIC: [u8; 8] = *b"NCKPLY01";
 const PLAYER_PROFILE_LEN: usize = 773;
@@ -499,7 +501,9 @@ fn mining_instruction_matches(
     }
     let (progress_index, global_config_index, coordinate_offset, required_data_len) =
         match instruction.data[0] {
-            CHUNK_MINE_WITH_REWARDS_TAG => (3, 6, 9, 21),
+            CHUNK_MINE_WITH_REWARDS_TAG
+            | CHUNK_BARE_HAND_MINE_WITH_REWARDS_TAG
+            | CHUNK_PICK_SURFACE_PEBBLE_TAG => (3, 6, 9, 21),
             CHUNK_FELL_TREE_WITH_REWARDS_TAG => (3, 4, 9, 21),
             CHUNK_MINE_PLACED_WITH_REWARDS_TAG => (3, 6, 9, 21),
             CHUNK_BATCH_MINE_WITH_REWARDS_TAG => (3, 6, 11, 23),
@@ -891,6 +895,20 @@ mod tests {
                 10_usize,
                 24_usize,
             ),
+            (
+                CHUNK_BARE_HAND_MINE_WITH_REWARDS_TAG,
+                6_usize,
+                14_usize,
+                9_usize,
+                21_usize,
+            ),
+            (
+                CHUNK_PICK_SURFACE_PEBBLE_TAG,
+                6_usize,
+                15_usize,
+                9_usize,
+                21_usize,
+            ),
         ] {
             let mut data = vec![0_u8; data_len];
             data[0] = tag;
@@ -915,6 +933,54 @@ mod tests {
                 &player_progress,
                 &global_config,
             ));
+        }
+    }
+
+    #[test]
+    fn bare_hand_proofs_reject_substituted_accounts_coordinates_and_truncated_data() {
+        let global_config = Pubkey::new_unique();
+        let player_progress = Pubkey::new_unique();
+        let coordinate = MiningCoordinate { x: -245, y: 91, z: 1_024 };
+        for (tag, account_count) in [
+            (CHUNK_BARE_HAND_MINE_WITH_REWARDS_TAG, 14),
+            (CHUNK_PICK_SURFACE_PEBBLE_TAG, 15),
+        ] {
+            let mut data = vec![0_u8; 21];
+            data[0] = tag;
+            data[1..9].copy_from_slice(&7_u64.to_le_bytes());
+            data[9..13].copy_from_slice(&coordinate.x.to_le_bytes());
+            data[13..15].copy_from_slice(&(coordinate.y as i16).to_le_bytes());
+            data[15..19].copy_from_slice(&coordinate.z.to_le_bytes());
+            let mut accounts = vec![AccountMeta::new_readonly(Pubkey::new_unique(), false); account_count];
+            accounts[3].pubkey = player_progress;
+            accounts[6].pubkey = global_config;
+            let instruction = Instruction { program_id: NICECHUNK_CHUNK_PROGRAM_ID, accounts, data };
+            let matches = |candidate: &Instruction| mining_instruction_matches(candidate, coordinate, &player_progress, &global_config);
+            assert!(matches(&instruction));
+            for length in 0..instruction.data.len() {
+                let mut candidate = instruction.clone();
+                candidate.data.truncate(length);
+                assert!(!matches(&candidate), "accepted truncated tag {tag} at length {length}");
+            }
+            for offset in [9, 13, 15] {
+                let mut candidate = instruction.clone();
+                candidate.data[offset] ^= 1;
+                assert!(!matches(&candidate), "accepted substituted coordinate for tag {tag}");
+            }
+            for index in [3, 6] {
+                let mut candidate = instruction.clone();
+                candidate.accounts[index].pubkey = Pubkey::new_unique();
+                assert!(!matches(&candidate), "accepted substituted account for tag {tag}");
+            }
+            let mut candidate = instruction.clone();
+            candidate.accounts.truncate(6);
+            assert!(!matches(&candidate));
+            candidate = instruction.clone();
+            candidate.program_id = Pubkey::new_unique();
+            assert!(!matches(&candidate));
+            candidate = instruction;
+            candidate.data[0] = 5;
+            assert!(!matches(&candidate), "legacy mining must not authenticate a reward");
         }
     }
 
