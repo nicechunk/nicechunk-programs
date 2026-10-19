@@ -1,5 +1,13 @@
 # nicechunk-programs Changelog
 
+## 2026-10-19 — Starter tool gathering and crafting
+
+- Add narrow Chunk bare-hand tags 22/23 with canonical leaf/surface validation and replay-protected pebble pickup.
+- Add fixed Backpack tag 17 recipe: 1 Gravel + 2 Twigs creates one canonical axe with 99 durability.
+- Bound batch inventory scratch allocation and skip redundant full compaction; preserve previous storage outcomes.
+- Retain authenticated equipment wear, existing authorization and failure atomicity.
+
+
 All notable public changes for this split repository should be recorded here.
 
 This repository is generated from the main NiceChunk working tree. Make source changes in the main tree, regenerate the split repositories, then commit and push this split separately.
@@ -14,6 +22,52 @@ This repository is generated from the main NiceChunk working tree. Make source c
 
 ## Unreleased
 
+- Removed the starter iron pickaxe balance and grant from PlayerProfile.
+  Player and Chunk mining accept only real Equipment slots 0 through 8;
+  selector 255 no longer grants or consumes a synthetic tool. Profile length
+  is unchanged, reserved bytes initialize to zero, and crafted tools keep the
+  fixed atomic three-point mining cost. Player and Chunk are deployed to Devnet
+  with finalized executable-byte, authority and buffer-closure verification.
+- Bind resource mining to a fixed three-point tool durability debit in the
+  Player program, authenticated by the canonical mining progress PDA. Mining,
+  rewards and wear commit atomically; paid structural continuations reuse their
+  primary action. Successful mining returns the authoritative equipment balance.
+  Legacy uncharged mining is retired.
+  Validated with native tests, complete local SBF replays, signed authority
+  cases and public read-only RPC mining simulations after the Devnet upgrade.
+- Reduced repeated placement biome sampling with a bounded, fully keyed exact
+  noise sample cache and initialized noise state only when generation is used.
+  Fixed-width active-record slices reduce scan overhead while preserving all
+  record decoding and duplicate checks. Validated with 55 Chunk unit tests,
+  219,792 generation comparisons, 160 complete local SBF placement replays and
+  signed receiver-authority cases. Deployed to Devnet and verified by public
+  RPC simulations and finalized executable-byte checks.
+- Removed repeated fixed global-config PDA derivation, placement CPI PDA
+  rederivation, derived-coordinate checks and immediate header redecoding.
+  Same-chunk broken-state queries now share one authenticated record scan.
+  Session, canonical-address, account-owner, foundation and inventory checks
+  remain enforced, including independent CPI receiver authority checks.
+  Validated with 54 Chunk unit tests, generation comparisons, complete SBF
+  placement replays and signed authority-boundary cases. Deployed to Devnet;
+  public RPC simulations verified successful and rejected placement paths.
+- Further reduced placement compute with byte-exact coordinate hash expansion,
+  shared noise hash prefixes, salt-banked lattice caches, zero-weight coastal
+  evaluation and conservative outer-canopy pruning. A private prepared vacancy
+  proof reuses one complete placed-record scan for the target, same-chunk support
+  and final append; inventory CPIs retain read-only access to that account.
+  Instruction and account layouts remain compatible. Validated with
+  `cargo test --offline -p nicechunk_chunk --lib`, generation comparisons and
+  complete local SBF placement transactions. This follow-up was deployed to Devnet and verified with public RPC simulations.
+- Reduced placement validation to canonical occupancy/support predicates and
+  authenticated chunk deltas before terrain generation. Shared bounded caches
+  reuse noise lattice hashes, terrain factors and tree profiles; conservative
+  growth bounds reject impossible tree candidates before height generation.
+  Canonical seed hash prefixes and zero-weight terrain branches avoid redundant
+  work without changing world results, instruction layouts or inventory checks.
+- Reused immutable terrain heights across placement target and support checks
+  within one instruction. Dense tree validation could exceed the transaction
+  compute limit before inventory consumption. The bounded cache preserves
+  canonical generation and does not cache player modifications or change the ABI.
 - Place owned equipment resource stacks even when past split/merge operations
   left rounded mass differences. Placement derives canonical mass from volume
   and the authoritative density table, updates the remainder and retains exact

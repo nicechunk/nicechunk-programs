@@ -9,6 +9,10 @@ compile_error!("Only one cluster feature can be enabled");
 
 pub const NICECHUNK_CORE_PROGRAM_ID: Pubkey =
     pubkey!("9EhMCRYMJej1F21KzaA5Zao3khGGc5aJbDGbnxaogQHu");
+// Exact canonical PDA for [b"global-config"] under the fixed Core program.
+// A unit test derives it again, so a Core ID change cannot silently stale it.
+pub const NICECHUNK_GLOBAL_CONFIG_ID: Pubkey =
+    pubkey!("46bTKGThh96ChxJEmcKz6GvudGi3d7YDiAFtVhKb2Y5f");
 pub const NICECHUNK_PLAYER_PROGRAM_ID: Pubkey =
     pubkey!("CHZHsBCGn58ih2WrPfKSYhvCEjMPGhArTiYCH7AWWBkB");
 pub const NICECHUNK_CIVILIZATION_PROGRAM_ID: Pubkey =

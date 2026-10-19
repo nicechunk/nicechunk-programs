@@ -40,6 +40,8 @@ declare_id!("CHZHsBCGn58ih2WrPfKSYhvCEjMPGhArTiYCH7AWWBkB");
 const CLEAR_EQUIPMENT_BACKPACK_INDEX: u8 = u8::MAX;
 const RELEASE_EQUIPMENT_TO_MARKET_TAG: u8 = 16;
 const CONSUME_PLACEMENT_RESOURCE_TAG: u8 = 17;
+const CONSUME_MINING_TOOL_TAG: u8 = 18;
+const MINING_TOOL_AUTHORITY_SEED: &[u8] = b"player-progress";
 const CHUNK_PLACED_SEED: &[u8] = b"chunk-placed";
 const MATERIAL_PHYSICS_SEED: &[u8] = b"material-physics-v2";
 const MATERIAL_PHYSICS_MAGIC: [u8; 8] = *b"NCKPHY02";
@@ -81,8 +83,87 @@ pub fn process_instruction(
             release_equipment_to_market(program_id, accounts, payload)
         }
         CONSUME_PLACEMENT_RESOURCE_TAG => consume_placement_resource(program_id, accounts, payload),
+        CONSUME_MINING_TOOL_TAG => consume_mining_tool(program_id, accounts, payload),
         _ => Err(NicechunkPlayerError::InvalidInstruction.into()),
     }
+}
+
+/// Only the mining programs can grant this PDA signature. The amount is fixed
+/// here; it is never taken from a client-supplied damage counter.
+fn consume_mining_tool(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8]) -> ProgramResult {
+    if accounts.len() != 4 || payload.len() != 1 {
+        return Err(NicechunkPlayerError::InvalidInstruction.into());
+    }
+    let authority = &accounts[0];
+    let profile = &accounts[1];
+    let equipment = &accounts[2];
+    let global_config = &accounts[3];
+    let tool = payload[0];
+    if tool >= state::EQUIPMENT_SLOT_COUNT as u8 {
+        return Err(NicechunkPlayerError::InvalidEquipmentSlot.into());
+    }
+
+    if !authority.is_signer {
+        return Err(NicechunkPlayerError::InvalidEquipmentTransferAuthority.into());
+    }
+    if !profile.is_writable || !equipment.is_writable {
+        return Err(NicechunkPlayerError::InvalidWritableAccount.into());
+    }
+    require_key_eq(profile.owner, program_id, NicechunkPlayerError::InvalidPlayerProfileOwner)?;
+    require_key_eq(global_config.owner, &NICECHUNK_CORE_PROGRAM_ID,
+        NicechunkPlayerError::InvalidGlobalConfigOwner)?;
+    let (config_key, _) = Pubkey::find_program_address(&[b"global-config"], &NICECHUNK_CORE_PROGRAM_ID);
+    require_key_eq(global_config.key, &config_key, NicechunkPlayerError::InvalidGlobalConfig)?;
+    let owner = {
+        let data = profile.try_borrow_data()?;
+        if data.len() != PlayerProfile::LEN {
+            return Err(NicechunkPlayerError::InvalidPlayerProfileData.into());
+        }
+        Pubkey::new_from_array(data[PlayerProfile::OWNER_OFFSET..PlayerProfile::OWNER_OFFSET + 32]
+            .try_into().map_err(|_| NicechunkPlayerError::InvalidPlayerProfileData)?)
+    };
+    let (profile_key, _) = Pubkey::find_program_address(&[PLAYER_PROFILE_SEED, owner.as_ref()], program_id);
+    require_key_eq(profile.key, &profile_key, NicechunkPlayerError::InvalidPlayerProfilePda)?;
+    let authorized = [NICECHUNK_CHUNK_PROGRAM_ID, NICECHUNK_GAME_PROGRAM_ID].iter().any(|caller| {
+        Pubkey::find_program_address(&[MINING_TOOL_AUTHORITY_SEED, global_config.key.as_ref(),
+            owner.as_ref()], caller).0 == *authority.key
+    });
+    if !authorized {
+        return Err(NicechunkPlayerError::InvalidEquipmentTransferAuthority.into());
+    }
+    let clock = Clock::get()?;
+    let mut profile_data = profile.try_borrow_mut_data()?;
+    PlayerProfile::validate_owner_and_config(&profile_data, &owner, global_config.key)?;
+    let (current, maximum, item_pda): (u32, u32, [u8; 32]) = {
+        require_key_eq(equipment.owner, program_id, NicechunkPlayerError::InvalidPlayerEquipmentOwner)?;
+        let (key, _) = Pubkey::find_program_address(&[PLAYER_EQUIPMENT_SEED, owner.as_ref()], program_id);
+        require_key_eq(equipment.key, &key, NicechunkPlayerError::InvalidPlayerEquipmentPda)?;
+        let mut data = equipment.try_borrow_mut_data()?;
+        PlayerEquipment::validate_owner_and_config(&data, &owner, profile.key, global_config.key)?;
+        let before = PlayerEquipment::slot_record(&data, tool)?;
+        if before[state::BACKPACK_SLOT_ITEM_PDA_OFFSET..state::BACKPACK_SLOT_ITEM_PDA_OFFSET + 32]
+            .iter().all(|byte| *byte == 0)
+        {
+            return Err(NicechunkPlayerError::InvalidBackpackItem.into());
+        }
+        PlayerEquipment::consume_forged_durability(&mut data, tool, state::MINING_DURABILITY_COST, clock.slot)?;
+        let identity = PlayerEquipment::slot_identity(&data, tool)?;
+        PlayerProfile::write_equipment_slot(&mut profile_data, tool, &identity, clock.slot)?;
+        let record = PlayerEquipment::slot_record(&data, tool)?;
+        (read_u32(&record, state::BACKPACK_SLOT_DURABILITY_CURRENT_OFFSET),
+            read_u32(&record, state::BACKPACK_SLOT_DURABILITY_MAX_OFFSET),
+            record[state::BACKPACK_SLOT_ITEM_PDA_OFFSET..state::BACKPACK_SLOT_ITEM_PDA_OFFSET + 32]
+                .try_into().map_err(|_| NicechunkPlayerError::InvalidBackpackItem)?)
+    };
+    let mut result = [0_u8; 57];
+    result[..8].copy_from_slice(b"NCKDUR01");
+    result[8] = tool;
+    result[9..13].copy_from_slice(&current.to_le_bytes());
+    result[13..17].copy_from_slice(&maximum.to_le_bytes());
+    result[17..25].copy_from_slice(&clock.slot.to_le_bytes());
+    result[25..57].copy_from_slice(&item_pda);
+    set_return_data(&result);
+    Ok(())
 }
 
 fn consume_placement_resource(

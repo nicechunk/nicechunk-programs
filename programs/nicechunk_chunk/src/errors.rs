@@ -90,6 +90,8 @@ pub enum NicechunkChunkError {
     InvalidInstructionsSysvar = 6395,
     InvalidSupportCollapseProof = 6396,
     InvalidSupportCollapseConnectivity = 6397,
+    InvalidMiningTool = 6398,
+    InvalidMiningDurabilityReturn = 6399,
 }
 
 impl From<NicechunkChunkError> for ProgramError {

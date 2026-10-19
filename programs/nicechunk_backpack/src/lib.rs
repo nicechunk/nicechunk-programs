@@ -19,6 +19,7 @@ use solana_program::entrypoint;
 pub mod cluster_config;
 pub mod errors;
 pub mod state;
+pub mod starter_tools;
 
 use cluster_config::{
     NICECHUNK_BOOTSTRAP_AUTHORITY, NICECHUNK_CHUNK_PROGRAM_ID, NICECHUNK_CORE_PROGRAM_ID,
@@ -91,6 +92,7 @@ pub fn process_instruction(
         14 => consume_smelting_resources(program_id, accounts, payload),
         15 => consume_placement_resource(program_id, accounts, payload),
         16 => append_placed_resource(program_id, accounts, payload),
+        17 => starter_tools::craft(program_id, accounts, payload),
         _ => Err(NicechunkBackpackError::InvalidInstruction.into()),
     }
 }

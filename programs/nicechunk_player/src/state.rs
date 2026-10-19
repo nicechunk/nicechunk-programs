@@ -49,6 +49,7 @@ pub const DEFAULT_STAMINA: u16 = 100;
 pub const DEFAULT_MINING_POWER: u16 = 1;
 pub const DEFAULT_BUILD_POWER: u16 = 1;
 pub const DEFAULT_DEFENSE: u16 = 0;
+pub const MINING_DURABILITY_COST: u32 = 3;
 pub const DEFAULT_BACKPACK_STYLE: u8 = 0;
 pub const PLAYER_NAME_MAX_CHARS: usize = 32;
 pub const PLAYER_NAME_MAX_BYTES: usize = 300;
@@ -1846,6 +1847,35 @@ mod tests {
         let mut wrong_slot_count = data;
         wrong_slot_count[102] = (EQUIPMENT_SLOT_COUNT - 1) as u8;
         assert!(PlayerProfile::validate_owner(&wrong_slot_count, &owner).is_err());
+    }
+
+    #[test]
+    fn new_player_profile_has_no_granted_tool_or_reserved_balance() {
+        let mut data = vec![0xff_u8; PlayerProfile::LEN];
+        PlayerProfile::pack_default(&mut data, 252, &Pubkey::new_unique(),
+            &Pubkey::new_unique(), 1, "", 123, 456).unwrap();
+        assert!(data[PlayerProfile::EQUIPMENT_OFFSET
+            ..PlayerProfile::EQUIPMENT_OFFSET + EQUIPMENT_SLOT_COUNT * 32].iter().all(|byte| *byte == 0));
+        assert_eq!(&data[PlayerProfile::RESERVED_OFFSET..], &[0; 8]);
+        PlayerProfile::write_position(&mut data, 1, 2, 3, 124).unwrap();
+        assert_eq!(&data[PlayerProfile::RESERVED_OFFSET..], &[0; 8]);
+    }
+
+    #[test]
+    fn empty_equipment_and_retired_default_selector_cannot_consume_a_tool() {
+        let mut data = vec![0_u8; PlayerEquipment::LEN];
+        PlayerEquipment::pack_empty(&mut data, &PlayerEquipmentInitArgs {
+            bump: 252, owner: &Pubkey::new_unique(), player_profile: &Pubkey::new_unique(),
+            global_config: &Pubkey::new_unique(), created_slot: 123,
+        }).unwrap();
+        let before = data.clone();
+        for slot in 0..EQUIPMENT_SLOT_COUNT as u8 {
+            assert!(PlayerEquipment::consume_forged_durability(&mut data, slot,
+                MINING_DURABILITY_COST, 124).is_err());
+        }
+        assert!(PlayerEquipment::consume_forged_durability(&mut data, u8::MAX,
+            MINING_DURABILITY_COST, 124).is_err());
+        assert_eq!(data, before);
     }
 
     #[test]

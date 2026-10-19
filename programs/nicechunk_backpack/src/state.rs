@@ -236,7 +236,15 @@ impl<'a> MaterialPhysicsTableView<'a> {
     }
 
     pub fn block_rule(&self, block_id: u16) -> Result<MaterialPhysicsRule, NicechunkBackpackError> {
-        self.rule(MaterialPhysicsRule::block_key(block_id)?)
+        let key=MaterialPhysicsRule::block_key(block_id)?;
+        match self.rule(key) {
+            // Twig is introduced by this protocol version. Existing governed
+            // rules and their update authority remain untouched. A later
+            // explicit governed Twig entry takes precedence over the default.
+            Err(NicechunkBackpackError::InvalidMaterialPhysicsRule) if block_id==54 =>
+                Ok(MaterialPhysicsRule{key,density_kg_m3:650,standard_volume_mm3:250_000}),
+            result=>result,
+        }
     }
 
     pub fn item_rule(&self, item_code: u16) -> Result<MaterialPhysicsRule, NicechunkBackpackError> {
@@ -601,6 +609,78 @@ impl BackpackAccount {
         incoming: &BackpackSlotRecord,
     ) -> Result<bool, solana_program::program_error::ProgramError> {
         Self::retire_legacy_blueprints(data)?;
+        Self::try_store_slot_buffered(data,incoming,&mut Vec::new(),&mut Vec::new(),&mut false)
+    }
+
+    fn try_store_slot_buffered(
+        data: &mut [u8], incoming: &BackpackSlotRecord,
+        candidate: &mut Vec<BackpackSlotRecord>, compacted: &mut Vec<BackpackSlotRecord>,
+        no_compaction_space: &mut bool,
+    ) -> Result<bool, solana_program::program_error::ProgramError> {
+        let mut packed = [0_u8; BACKPACK_SLOT_RECORD_LEN];
+        incoming.pack(&mut packed)?;
+
+        let item_count = data[Self::ITEM_COUNT_OFFSET];
+        let capacity = data[Self::CAPACITY_OFFSET];
+        if incoming.kind == BACKPACK_SLOT_KIND_BLOCK && incoming.quantity == 1 {
+            let mut fragmented=false;
+            for index in 0..item_count {
+                let existing = Self::slot_at(data, index)?;
+                fragmented |= existing.kind == BACKPACK_SLOT_KIND_BLOCK && existing.quantity < BACKPACK_STACK_LIMIT;
+                if let Some((merged, None)) = existing.merged_resource_stack(incoming)? {
+                    let offset = Self::RECORDS_OFFSET + index as usize * BACKPACK_SLOT_RECORD_LEN;
+                    merged.pack(&mut data[offset..offset + BACKPACK_SLOT_RECORD_LEN])?;
+                    return Ok(true);
+                }
+            }
+            // Full resource stacks and non-resource items cannot compact into
+            // fewer slots. A lossy batch may cheaply skip each extra reward.
+            if item_count==capacity && (!fragmented || *no_compaction_space) { return Ok(false); }
+        }
+        if item_count < capacity
+            && (incoming.kind != BACKPACK_SLOT_KIND_BLOCK || incoming.quantity == 1)
+        {
+            let offset = Self::RECORDS_OFFSET + item_count as usize * BACKPACK_SLOT_RECORD_LEN;
+            data[offset..offset + BACKPACK_SLOT_RECORD_LEN].copy_from_slice(&packed);
+            data[Self::ITEM_COUNT_OFFSET] = item_count.saturating_add(1);
+            return Ok(true);
+        }
+
+        candidate.clear(); candidate.reserve(item_count as usize + 1);
+        for index in 0..item_count {
+            candidate.push(Self::slot_at(data, index)?);
+        }
+        Self::push_compacted_slot(candidate, *incoming)?;
+        if candidate.len() <= capacity as usize {
+            Self::write_slots(data, item_count, candidate)?;
+            return Ok(true);
+        }
+
+        // Compact fragmented resource stacks in a candidate buffer so a failed
+        // insert never mutates the account.
+        compacted.clear(); compacted.reserve(item_count as usize + 1);
+        for index in 0..item_count {
+            Self::push_compacted_slot(compacted, Self::slot_at(data, index)?)?;
+        }
+        // Appending rewards can only fill slots. Once full compaction cannot
+        // free a slot, later rewards still try direct merges but need not
+        // rebuild the same failed compaction until a removal (outside this batch).
+        if compacted.len()==capacity as usize { *no_compaction_space=true; }
+        Self::push_compacted_slot(compacted, *incoming)?;
+        if compacted.len() > capacity as usize {
+            return Ok(false);
+        }
+
+        Self::write_slots(data, item_count, compacted)?;
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    fn try_store_slot_reference(
+        data: &mut [u8],
+        incoming: &BackpackSlotRecord,
+    ) -> Result<bool, solana_program::program_error::ProgramError> {
+        Self::retire_legacy_blueprints(data)?;
         let mut packed = [0_u8; BACKPACK_SLOT_RECORD_LEN];
         incoming.pack(&mut packed)?;
 
@@ -652,6 +732,14 @@ impl BackpackAccount {
 
     fn retire_legacy_blueprints(data: &mut [u8]) -> ProgramResult {
         let item_count = data[Self::ITEM_COUNT_OFFSET];
+        // Most live backpacks contain no retired blueprints. The SBF bump
+        // allocator cannot reclaim a new retained buffer for every reward.
+        let mut has_retired=false;
+        for index in 0..item_count {
+            if Self::slot_at(data,index)?.is_retired_blueprint() {has_retired=true;break;}
+        }
+        if !has_retired {return Ok(());}
+
         let mut retained = Vec::with_capacity(item_count as usize);
         let mut retired_mass = 0_u64;
         for index in 0..item_count {
@@ -787,7 +875,9 @@ impl BackpackAccount {
             return Ok(());
         }
 
+        Self::retire_legacy_blueprints(data)?;
         let mut stored_any = false;
+        let mut candidate=Vec::new();let mut compacted=Vec::new();let mut no_compaction_space=false;
         for (index, record) in records.iter().enumerate() {
             let mut slot = BackpackSlotRecord::from_block_resource_with_volume_and_metadata(
                 *record,
@@ -795,7 +885,7 @@ impl BackpackAccount {
                 metadata[index],
             );
             slot.set_mass_grams(masses_grams[index])?;
-            if Self::try_store_slot(data, &slot)? {
+            if Self::try_store_slot_buffered(data, &slot, &mut candidate, &mut compacted, &mut no_compaction_space)? {
                 Self::add_total_mass(data, masses_grams[index])?;
                 stored_any = true;
             }
@@ -3146,4 +3236,78 @@ mod tests {
             })
             .collect()
     }
+    fn starter_fixture(stone:u32,twigs:u32)->(Pubkey,Vec<u8>,Vec<u8>){
+        let owner=Pubkey::new_unique();let mut data=empty_backpack(&owner,6);
+        let rules=[MaterialPhysicsRule{key:6,density_kg_m3:1700,standard_volume_mm3:500000},MaterialPhysicsRule{key:54,density_kg_m3:650,standard_volume_mm3:250000}];
+        let mut payload=2u32.to_le_bytes().to_vec();payload.push(2);
+        for rule in rules {let mut packed=[0u8;MATERIAL_PHYSICS_RULE_LEN];rule.pack(&mut packed).unwrap();payload.extend_from_slice(&packed);}
+        let mut physics=vec![0;MaterialPhysicsTableState::LEN];MaterialPhysicsTableState::pack_payload(&mut physics,250,&payload).unwrap();
+        let table=MaterialPhysicsTableView::new(&physics).unwrap();
+        for (block,quantity,volume) in [(6u16,stone,500000u32),(54u16,twigs,250000u32)] {
+            let mut record=BackpackSlotRecord{kind:BACKPACK_SLOT_KIND_BLOCK,quantity,resource:BackpackResourceRecord{world_x:1,world_y:((block<<9)|100) as i16,world_z:1},volume_mm3:volume*quantity,..BackpackSlotRecord::default()};
+            table.apply_mass(&mut record).unwrap();BackpackAccount::append_item(&mut data,&owner,&record,10).unwrap();
+        }
+        (owner,data,physics)
+    }
+    #[test]
+    fn starter_axe_consumes_exact_units_preserves_stack_and_has_fixed_99_durability(){
+        let (owner,mut data,physics)=starter_fixture(3,5);let table=MaterialPhysicsTableView::new(&physics).unwrap();
+        let (hash,_)=verified_forge_design(crate::starter_tools::AXE_CODE).unwrap();
+        crate::starter_tools::craft_record(&mut data,&owner,&[0,1],1,&Pubkey::new_unique(),hash,&table,11).unwrap();
+        let stone=BackpackAccount::slot_at(&data,0).unwrap();let twigs=BackpackAccount::slot_at(&data,1).unwrap();let axe=BackpackAccount::slot_at(&data,2).unwrap();
+        assert_eq!((stone.quantity,twigs.quantity),(2,3));assert_eq!(stone.volume_mm3,1000000);assert_eq!(twigs.volume_mm3,750000);
+        assert_eq!((axe.quantity,axe.durability_current,axe.durability_max),(1,99,99));assert_eq!(axe.category,BACKPACK_ITEM_CATEGORY_FORGED);assert_eq!(axe.metadata,hash);
+        assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(),(stone.mass_grams().unwrap()+twigs.mass_grams().unwrap()+axe.mass_grams().unwrap()) as u64);
+    }
+    #[test]
+    fn starter_axe_rejects_duplicate_wrong_owner_missing_and_non_gravel_inputs_before_spending(){
+        for mode in 0..4 {
+            let (owner,mut data,physics)=starter_fixture(1,if mode==0 {1}else{2});
+            if mode==1 {let mut record=BackpackAccount::slot_at(&data,0).unwrap();record.resource.world_y=((3u16<<9)|100) as i16;BackpackAccount::replace_slot_at(&mut data,&owner,0,&record,10).unwrap();}
+            let before=data.clone();let indexes=if mode==2 {vec![0,0]}else{vec![0,1]};let authority=if mode==3 {Pubkey::new_unique()}else{owner};
+            let table=MaterialPhysicsTableView::new(&physics).unwrap();
+            assert!(crate::starter_tools::craft_record(&mut data,&authority,&indexes,1,&Pubkey::new_unique(),1,&table,11).is_err());assert_eq!(data,before);
+        }
+    }
+    #[test]
+    fn starter_axe_frees_consumed_slots_for_its_output(){
+        let (owner,mut data,physics)=starter_fixture(1,2);let table=MaterialPhysicsTableView::new(&physics).unwrap();
+        crate::starter_tools::craft_record(&mut data,&owner,&[0,1],1,&Pubkey::new_unique(),1,&table,11).unwrap();
+        assert_eq!(data[BackpackAccount::ITEM_COUNT_OFFSET],1);assert_eq!(BackpackAccount::slot_at(&data,0).unwrap().durability_current,99);
+    }
+
+    #[test]
+    fn bounded_batch_storage_matches_reference_for_fragmented_stacks(){
+        let owner=Pubkey::new_unique();let mut random=0x438721u32;
+        let mut next=|| {random=random.wrapping_mul(1664525).wrapping_add(1013904223);random};
+        for _ in 0..400 {
+            let capacity=(next()%8+1) as u8;let mut original=empty_backpack(&owner,capacity);
+            for i in 0..capacity {
+                let block=[3u16,6,23,54][(next()%4) as usize];let quantity=next()%99+1;
+                let mut record=BackpackSlotRecord{kind:BACKPACK_SLOT_KIND_BLOCK,quantity,resource:BackpackResourceRecord{world_x:i as i32,world_y:(block<<9) as i16,world_z:0},volume_mm3:quantity*250000,metadata:next()%3,..BackpackSlotRecord::default()};
+                record.set_mass_grams(quantity*125).unwrap();let _=BackpackAccount::append_item(&mut original,&owner,&record,11);
+            }
+            let mut optimized=original.clone();let mut reference=original;
+            let mut resources=Vec::new();let mut volumes=Vec::new();let mut metadata=Vec::new();let mut masses=Vec::new();
+            for _ in 0..32 {
+                let block=[3u16,6,23,54][(next()%4) as usize];resources.push(BackpackResourceRecord{world_x:10,world_y:(block<<9) as i16,world_z:0});volumes.push(250000);metadata.push(next()%3);masses.push(125);
+            }
+            BackpackAccount::append_resources_lossy_with_volumes_and_metadata(&mut optimized,&owner,&resources,&volumes,&metadata,&masses,99).unwrap();
+            let mut stored=false;
+            for i in 0..resources.len() {
+                let mut slot=BackpackSlotRecord::from_block_resource_with_volume_and_metadata(resources[i],volumes[i],metadata[i]);slot.set_mass_grams(masses[i]).unwrap();
+                if BackpackAccount::try_store_slot_reference(&mut reference,&slot).unwrap() {BackpackAccount::add_total_mass(&mut reference,masses[i]).unwrap();stored=true;}
+            }
+            if stored {BackpackAccount::set_updated_slot(&mut reference,99);}
+            assert_eq!(optimized,reference);
+        }
+    }
+
+    #[test]
+    fn protocol_twig_physics_works_with_the_unmodified_governed_table(){
+        let data=material_physics_fixture();let table=MaterialPhysicsTableView::new(&data).unwrap();
+        let twig=table.block_rule(54).unwrap();assert_eq!(twig.density_kg_m3,650);assert_eq!(twig.standard_volume_mm3,250000);assert_eq!(twig.mass_grams(250000).unwrap(),163);
+        assert!(table.block_rule(55).is_err());assert_eq!(table.block_rule(3).unwrap().density_kg_m3,2600);
+    }
+
 }
