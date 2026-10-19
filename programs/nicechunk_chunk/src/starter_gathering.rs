@@ -47,9 +47,9 @@ pub fn pick(program_id:&Pubkey,accounts:&[AccountInfo],payload:&[u8])->ProgramRe
       if data[16+index/8]&(1<<(index%8))!=0 {return Err(NicechunkChunkError::BlockAlreadyMined.into());}
       data[16+index/8]|=1<<(index%8);
     }
-    // All visible pebble types become the same recipe resource (Gravel), with a 500 cm3 unit.
+    // Loose surface stones are a distinct inventory resource, never terrain Gravel.
     append_backpack_block_resource(program_id,backpack_program,broken,global,profile,backpack,physics,cx,cz,bump,args.world_x,
-        pack_backpack_resource_y(surface.saturating_add(1),state::BLOCK_GRAVEL,config.min_build_y),args.world_z,500_000,reward.action_id,false)?;
+        pack_backpack_resource_y(surface.saturating_add(1),state::BLOCK_STONE_FRAGMENT,config.min_build_y),args.world_z,500_000,reward.action_id,false)?;
     let _=decoration; // Rule authentication above is required even though output is normalized.
     Ok(())
 }

@@ -3238,12 +3238,12 @@ mod tests {
     }
     fn starter_fixture(stone:u32,twigs:u32)->(Pubkey,Vec<u8>,Vec<u8>){
         let owner=Pubkey::new_unique();let mut data=empty_backpack(&owner,6);
-        let rules=[MaterialPhysicsRule{key:6,density_kg_m3:1700,standard_volume_mm3:500000},MaterialPhysicsRule{key:54,density_kg_m3:650,standard_volume_mm3:250000}];
+        let rules=[MaterialPhysicsRule{key:54,density_kg_m3:650,standard_volume_mm3:250000},MaterialPhysicsRule{key:55,density_kg_m3:2600,standard_volume_mm3:500000}];
         let mut payload=2u32.to_le_bytes().to_vec();payload.push(2);
         for rule in rules {let mut packed=[0u8;MATERIAL_PHYSICS_RULE_LEN];rule.pack(&mut packed).unwrap();payload.extend_from_slice(&packed);}
         let mut physics=vec![0;MaterialPhysicsTableState::LEN];MaterialPhysicsTableState::pack_payload(&mut physics,250,&payload).unwrap();
         let table=MaterialPhysicsTableView::new(&physics).unwrap();
-        for (block,quantity,volume) in [(6u16,stone,500000u32),(54u16,twigs,250000u32)] {
+        for (block,quantity,volume) in [(55u16,stone,500000u32),(54u16,twigs,250000u32)] {
             let mut record=BackpackSlotRecord{kind:BACKPACK_SLOT_KIND_BLOCK,quantity,resource:BackpackResourceRecord{world_x:1,world_y:((block<<9)|100) as i16,world_z:1},volume_mm3:volume*quantity,..BackpackSlotRecord::default()};
             table.apply_mass(&mut record).unwrap();BackpackAccount::append_item(&mut data,&owner,&record,10).unwrap();
         }
@@ -3260,10 +3260,10 @@ mod tests {
         assert_eq!(BackpackAccount::total_mass_grams(&data).unwrap(),(stone.mass_grams().unwrap()+twigs.mass_grams().unwrap()+axe.mass_grams().unwrap()) as u64);
     }
     #[test]
-    fn starter_axe_rejects_duplicate_wrong_owner_missing_and_non_gravel_inputs_before_spending(){
-        for mode in 0..4 {
+    fn starter_axe_rejects_gravel_stone_duplicate_wrong_owner_and_missing_inputs_before_spending(){
+        for mode in 0..5 {
             let (owner,mut data,physics)=starter_fixture(1,if mode==0 {1}else{2});
-            if mode==1 {let mut record=BackpackAccount::slot_at(&data,0).unwrap();record.resource.world_y=((3u16<<9)|100) as i16;BackpackAccount::replace_slot_at(&mut data,&owner,0,&record,10).unwrap();}
+            if mode==1 || mode==4 {let mut record=BackpackAccount::slot_at(&data,0).unwrap();let block=if mode==1 {6u16}else{3u16};record.resource.world_y=((block<<9)|100) as i16;BackpackAccount::replace_slot_at(&mut data,&owner,0,&record,10).unwrap();}
             let before=data.clone();let indexes=if mode==2 {vec![0,0]}else{vec![0,1]};let authority=if mode==3 {Pubkey::new_unique()}else{owner};
             let table=MaterialPhysicsTableView::new(&physics).unwrap();
             assert!(crate::starter_tools::craft_record(&mut data,&authority,&indexes,1,&Pubkey::new_unique(),1,&table,11).is_err());assert_eq!(data,before);

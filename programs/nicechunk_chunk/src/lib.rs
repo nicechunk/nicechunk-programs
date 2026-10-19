@@ -877,13 +877,7 @@ fn mine_block_with_rewards(
     }
 
     if bare_hands && !is_tree_leaf_block(block_id) {
-        if block_id!=state::BLOCK_GRAVEL || args.world_y!=surface {
-            return Err(NicechunkChunkError::InvalidMiningTool.into());
-        }
-        let above=MineBlockArgs{world_y:args.world_y.saturating_add(1),..args};
-        if generated_block_id_at_surface(global_config_view,&above.generated_args(global_config_view)?,surface)!=BLOCK_AIR {
-            return Err(NicechunkChunkError::InvalidMiningTool.into());
-        }
+        return Err(NicechunkChunkError::InvalidMiningTool.into());
     }
 
     let extra_drop = {

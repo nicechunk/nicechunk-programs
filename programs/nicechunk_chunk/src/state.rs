@@ -758,6 +758,7 @@ pub fn is_tree_trunk_block(block_id: u16) -> bool {
 }
 
 pub const BLOCK_TWIG:u16=54;
+pub const BLOCK_STONE_FRAGMENT:u16=55;
 pub const TWIG_VOLUME_MM3:u32=250_000;
 // Fixed coordinate roll: the same removed leaf can never be rerolled with a nonce or wallet.
 pub fn leaf_twig_drop(config:&GlobalConfigView,x:i32,y:i16,z:i32,block:u16)->Option<ResourceExtraDrop> {

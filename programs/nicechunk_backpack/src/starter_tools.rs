@@ -3,6 +3,7 @@ use solana_program::{account_info::AccountInfo, clock::Clock, entrypoint::Progra
 use crate::{state::*, errors::{NicechunkBackpackError as E, require_key_eq}, cluster_config::NICECHUNK_PLAYER_PROGRAM_ID};
 pub const AXE_CODE: &[u8] = include_bytes!("starter_axe_code.bin");
 pub const TWIG_BLOCK_ID: u16 = 54;
+pub const STONE_FRAGMENT_BLOCK_ID: u16 = 55;
 pub const AXE_DURABILITY: u32 = 99;
 
 pub fn craft(program_id: &Pubkey, accounts: &[AccountInfo], payload: &[u8]) -> ProgramResult {
@@ -46,7 +47,7 @@ pub fn craft_record(data:&mut [u8],owner:&Pubkey,indexes:&[u8],item_id:u64,item:
         if *index as usize>=quantities.len() || quantities[*index as usize]!=0 {return Err(E::InvalidResourceIndex.into());}
         let record=BackpackAccount::slot_at(data,*index)?;
         if record.kind!=BACKPACK_SLOT_KIND_BLOCK {return Err(E::InvalidForgingMaterial.into());}
-        let left=match record.block_id()? {6=>&mut stone,TWIG_BLOCK_ID=>&mut twigs,_=>return Err(E::InvalidForgingMaterial.into())};
+        let left=match record.block_id()? {STONE_FRAGMENT_BLOCK_ID=>&mut stone,TWIG_BLOCK_ID=>&mut twigs,_=>return Err(E::InvalidForgingMaterial.into())};
         let used=record.quantity.min(*left);
         if used==0 {return Err(E::InvalidForgingMaterial.into());}
         *left-=used;quantities[*index as usize]=used;
