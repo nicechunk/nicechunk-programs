@@ -301,12 +301,18 @@ fn sync_player_skills(
         if accounts.len() < 7 {
             return Err(NicechunkSkillsError::InvalidAccountCount.into());
         }
-        validate_mining_proof(
+        let proof = validate_mining_proof(
             &accounts[6],
             mining_coordinate.expect("coordinate checked above"),
             owner.key,
             global_config.key,
         )?;
+        if proof == MiningProofKind::BareHands {
+            // Compatibility for clients that append a Skills instruction to
+            // a bare-hand action. It must not create or mutate Skills state,
+            // consume a previous tool event, or backfill any source counter.
+            return Ok(());
+        }
         &accounts[7..]
     } else {
         &accounts[6..]
@@ -463,12 +469,18 @@ fn parse_optional_mining_coordinate(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MiningProofKind {
+    Equipped,
+    BareHands,
+}
+
 fn validate_mining_proof(
     instructions_sysvar: &AccountInfo,
     coordinate: MiningCoordinate,
     owner: &Pubkey,
     global_config: &Pubkey,
-) -> ProgramResult {
+) -> Result<MiningProofKind, solana_program::program_error::ProgramError> {
     require_key_eq(
         instructions_sysvar.key,
         &solana_program::sysvar::instructions::ID,
@@ -484,7 +496,10 @@ fn validate_mining_proof(
         let instruction = load_instruction_at_checked(index, instructions_sysvar)
             .map_err(|_| NicechunkSkillsError::InvalidInstructionsSysvar)?;
         if mining_instruction_matches(&instruction, coordinate, &player_progress, global_config) {
-            return Ok(());
+            return Ok(match instruction.data[0] {
+                CHUNK_BARE_HAND_MINE_WITH_REWARDS_TAG | CHUNK_PICK_SURFACE_PEBBLE_TAG => MiningProofKind::BareHands,
+                _ => MiningProofKind::Equipped,
+            });
         }
     }
     Err(NicechunkSkillsError::InvalidMiningProof.into())

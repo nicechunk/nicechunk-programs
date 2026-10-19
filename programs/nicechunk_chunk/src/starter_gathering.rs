@@ -12,10 +12,10 @@ pub fn mine(program_id:&Pubkey,accounts:&[AccountInfo],payload:&[u8])->ProgramRe
 pub fn pick(program_id:&Pubkey,accounts:&[AccountInfo],payload:&[u8])->ProgramResult {
     if accounts.len()!=15 {return Err(NicechunkChunkError::InvalidAccountCount.into());}
     let reward=RewardMineArgs::unpack(payload)?;let args=reward.block;
-    let payer=&accounts[0];let profile=&accounts[1];let session=&accounts[2];let progress=&accounts[3];
+    let payer=&accounts[0];let profile=&accounts[1];let session=&accounts[2];
     let broken=&accounts[4];let foundation=&accounts[5];let global=&accounts[6];let table=&accounts[8];
-    let backpack_program=&accounts[9];let backpack=&accounts[10];let physics=&accounts[11];let skills=&accounts[12];let system=&accounts[13];let picked=&accounts[14];
-    if !picked.is_writable || !broken.is_writable || !progress.is_writable || !backpack.is_writable {return Err(NicechunkChunkError::InvalidWritableAccount.into());}
+    let backpack_program=&accounts[9];let backpack=&accounts[10];let physics=&accounts[11];let system=&accounts[13];let picked=&accounts[14];
+    if !picked.is_writable || !broken.is_writable || !backpack.is_writable {return Err(NicechunkChunkError::InvalidWritableAccount.into());}
     let context=validate_player_action(payer,profile,session,global,system)?;let config=&context.config;
     let generated=args.generated_args(config)?;generated.validate(config)?;
     let surface=generated_surface_height(config,args.world_x,args.world_z);
@@ -35,7 +35,6 @@ pub fn pick(program_id:&Pubkey,accounts:&[AccountInfo],payload:&[u8])->ProgramRe
       ChunkBrokenState::validate_header(&data,config.min_build_y)?;
       if ChunkBrokenState::contains_packed(&data,pack_broken_coord(lx,surface,lz,config.min_build_y)?)? {return Err(NicechunkChunkError::BlockAlreadyMined.into());}
     }
-    load_player_progress(program_id,payer,progress,skills,global,system,&context)?;
     let bx=cx.to_le_bytes();let bz=cz.to_le_bytes();
     let (expected,pick_bump)=Pubkey::find_program_address(&[PICKED_SEED,global.key.as_ref(),&bx,&bz],program_id);
     require_key_eq(picked.key,&expected,NicechunkChunkError::InvalidChunkBrokenPda)?;
@@ -50,7 +49,7 @@ pub fn pick(program_id:&Pubkey,accounts:&[AccountInfo],payload:&[u8])->ProgramRe
     }
     // All visible pebble types become the same recipe resource (Gravel), with a 500 cm3 unit.
     append_backpack_block_resource(program_id,backpack_program,broken,global,profile,backpack,physics,cx,cz,bump,args.world_x,
-        pack_backpack_resource_y(surface.saturating_add(1),state::BLOCK_GRAVEL,config.min_build_y),args.world_z,500_000,reward.action_id)?;
+        pack_backpack_resource_y(surface.saturating_add(1),state::BLOCK_GRAVEL,config.min_build_y),args.world_z,500_000,reward.action_id,false)?;
     let _=decoration; // Rule authentication above is required even though output is normalized.
     Ok(())
 }

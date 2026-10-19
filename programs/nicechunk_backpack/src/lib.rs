@@ -76,12 +76,12 @@ pub fn process_instruction(
 
     match tag {
         0 => initialize_backpack(program_id, accounts, payload),
-        1 => append_mined_resource(program_id, accounts, payload),
+        1 => append_mined_resource(program_id, accounts, payload, true),
         2 => remove_resource(program_id, accounts, payload),
         3 => append_market_resource(program_id, accounts, payload),
         4 => remove_resources(program_id, accounts, payload),
         5 => append_smelting_item(program_id, accounts, payload),
-        6 => append_mined_resources_batch(program_id, accounts, payload),
+        6 => append_mined_resources_batch(program_id, accounts, payload, true),
         7 => Err(NicechunkBackpackError::UnverifiedForgeInstructionDisabled.into()),
         8 => forge_equipment_with_material_verification(program_id, accounts, payload),
         9 => Err(NicechunkBackpackError::InvalidInstruction.into()),
@@ -93,6 +93,10 @@ pub fn process_instruction(
         15 => consume_placement_resource(program_id, accounts, payload),
         16 => append_placed_resource(program_id, accounts, payload),
         17 => starter_tools::craft(program_id, accounts, payload),
+        // Only the authenticated Chunk PDA can call either reward route.
+        // Bare-hand rewards update inventory without creating an XP source.
+        18 => append_mined_resource(program_id, accounts, payload, false),
+        19 => append_mined_resources_batch(program_id, accounts, payload, false),
         _ => Err(NicechunkBackpackError::InvalidInstruction.into()),
     }
 }
@@ -647,6 +651,7 @@ fn append_mined_resource(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     payload: &[u8],
+    skill_credit: bool,
 ) -> ProgramResult {
     const PAYLOAD_LEN: usize = BackpackResourceRecord::LEN + 4 + 8;
     if accounts.len() != 5 || payload.len() != PAYLOAD_LEN {
@@ -660,6 +665,9 @@ fn append_mined_resource(
             .map_err(|_| NicechunkBackpackError::InvalidInstruction)?,
     );
     let action_id = read_u64(payload, BackpackResourceRecord::LEN + 4);
+    if action_id == 0 {
+        return Err(NicechunkBackpackError::InvalidMiningAction.into());
+    }
     let account_info_iter = &mut accounts.iter();
     let chunk_broken = next_account_info(account_info_iter)?;
     let global_config = next_account_info(account_info_iter)?;
@@ -684,7 +692,9 @@ fn append_mined_resource(
 
     let clock = Clock::get()?;
     let mut backpack_data = backpack.try_borrow_mut_data()?;
-    BackpackAccount::record_mining_action(&mut backpack_data, &owner, action_id, clock.slot)?;
+    if skill_credit {
+        BackpackAccount::record_mining_action(&mut backpack_data, &owner, action_id, clock.slot)?;
+    }
     BackpackAccount::append_resource_with_volume(
         &mut backpack_data,
         &owner,
@@ -699,12 +709,16 @@ fn append_mined_resources_batch(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     payload: &[u8],
+    skill_credit: bool,
 ) -> ProgramResult {
     if accounts.len() != 5 || payload.len() < 9 {
         return Err(NicechunkBackpackError::InvalidInstruction.into());
     }
     let count = payload[0] as usize;
     let action_id = read_u64(payload, 1);
+    if action_id == 0 {
+        return Err(NicechunkBackpackError::InvalidMiningAction.into());
+    }
     let volume_end = BackpackResourceRecord::LEN + 4;
     let record_size = volume_end + 4;
     if payload.len() != 9 + count * record_size {
@@ -769,7 +783,9 @@ fn append_mined_resources_batch(
 
     let clock = Clock::get()?;
     let mut backpack_data = backpack.try_borrow_mut_data()?;
-    BackpackAccount::record_mining_action(&mut backpack_data, &owner, action_id, clock.slot)?;
+    if skill_credit {
+        BackpackAccount::record_mining_action(&mut backpack_data, &owner, action_id, clock.slot)?;
+    }
     BackpackAccount::append_resources_lossy_with_volumes_and_metadata(
         &mut backpack_data,
         &owner,

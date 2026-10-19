@@ -804,7 +804,7 @@ fn mine_block_with_rewards(
     let player_skills = next_account_info(account_info_iter)?;
     let system_program_account = next_account_info(account_info_iter)?;
 
-    if !player_progress.is_writable || !chunk_broken.is_writable || !backpack.is_writable {
+    if (!bare_hands && !player_progress.is_writable) || !chunk_broken.is_writable || !backpack.is_writable {
         return Err(NicechunkChunkError::InvalidWritableAccount.into());
     }
     validate_backpack(backpack_program, backpack)?;
@@ -817,18 +817,23 @@ fn mine_block_with_rewards(
         system_program_account,
     )?;
     let global_config_view = &context.config;
-    let is_new_action = is_new_backpack_mining_action(backpack, &context.owner, action_id)?;
+    let is_new_action = !bare_hands && is_new_backpack_mining_action(backpack, &context.owner, action_id)?;
     let generated_args = args.generated_args(global_config_view)?;
     generated_args.validate(global_config_view)?;
-    let (gathered_volume_mm3, exploration_level) = load_player_progress(
-        program_id,
-        session_authority,
-        player_progress,
-        player_skills,
-        global_config,
-        system_program_account,
-        &context,
-    )?;
+    let (gathered_volume_mm3, exploration_level) = if bare_hands {
+        // Bare hands do not create, read, or update progress/Skills accounts.
+        (PlayerProgressState::precision_gathering_volume_mm3_from_level(0), 0)
+    } else {
+        load_player_progress(
+            program_id,
+            session_authority,
+            player_progress,
+            player_skills,
+            global_config,
+            system_program_account,
+            &context,
+        )?
+    };
 
     let (chunk_x, chunk_z, local_x, local_z) = args.chunk_coords(global_config_view)?;
     reject_foundation_protected_block(
@@ -957,6 +962,7 @@ fn mine_block_with_rewards(
         args.world_z,
         gathered_volume_mm3,
         action_id,
+        !bare_hands,
     )?;
 
     let mut secondary_rewards = Vec::with_capacity(2);
@@ -1008,9 +1014,10 @@ fn mine_block_with_rewards(
         bump,
         &secondary_rewards,
         action_id,
+        !bare_hands,
     )?;
 
-    {
+    if !bare_hands {
         let mut data = player_progress.try_borrow_mut_data()?;
         if is_new_action {
             PlayerProgressState::add_precision_gathering_xp(
@@ -1297,6 +1304,7 @@ fn batch_mine_with_rewards(
         bump,
         &primary_rewards,
         action_id,
+        true,
     )?;
 
     {
@@ -1714,6 +1722,7 @@ fn range_mine_with_rewards(
         bump,
         &primary_rewards,
         action_id,
+        true,
     )?;
 
     {
@@ -2141,6 +2150,7 @@ fn fell_tree_with_rewards(
             bump,
             &chunk_rewards,
             action_id,
+            true,
         )?;
     }
 
@@ -3527,9 +3537,10 @@ fn append_backpack_block_resource<'a>(
     world_z: i32,
     volume_mm3: u32,
     action_id: u64,
+    skill_credit: bool,
 ) -> ProgramResult {
     let mut data = [0_u8; 23];
-    data[0] = 1;
+    data[0] = if skill_credit { 1 } else { 18 };
     data[1..5].copy_from_slice(&world_x.to_le_bytes());
     data[5..7].copy_from_slice(&packed_y.to_le_bytes());
     data[7..11].copy_from_slice(&world_z.to_le_bytes());
@@ -3604,8 +3615,12 @@ fn append_backpack_block_resources_lossy<'a>(
     chunk_bump: u8,
     rewards: &[BackpackBlockReward],
     action_id: u64,
+    skill_credit: bool,
 ) -> ProgramResult {
     if rewards.is_empty() {
+        if !skill_credit {
+            return Ok(());
+        }
         return record_backpack_mining_action(
             program_id,
             backpack_program,
@@ -3620,7 +3635,7 @@ fn append_backpack_block_resources_lossy<'a>(
         );
     }
     let mut data = Vec::with_capacity(10 + rewards.len() * 18);
-    data.push(6);
+    data.push(if skill_credit { 6 } else { 19 });
     data.push(rewards.len().min(u8::MAX as usize) as u8);
     data.extend_from_slice(&action_id.to_le_bytes());
     for reward in rewards {
